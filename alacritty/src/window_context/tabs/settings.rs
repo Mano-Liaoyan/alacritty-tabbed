@@ -742,7 +742,7 @@ impl Settings {
         layer.outlined(dialog, px(10.), palette.chrome, palette.popup_outline, line);
         let mark =
             Rect::new(dialog.x + px(12.), dialog.y + px(11.), px(26.), px(26.)).square(px(24.));
-        layer.image(mark, &icons::logo());
+        layer.image(mark, &icons::logo(), palette.foreground);
         let title = Rect::new(mark.right() + px(10.), dialog.y + px(4.), px(200.), px(20.));
         layer.text(title.x, dialog.y + px(24.) - ch, "Settings".into(), palette.foreground, true);
         layer.text(title.x, dialog.y + px(25.), "Profiles".into(), palette.muted, false);
@@ -1027,7 +1027,7 @@ impl Settings {
         cell: (f32, f32),
     ) {
         match profile.image(config) {
-            Some(image) => layer.image(rect, &image),
+            Some(image) => layer.image(rect, &image, palette.foreground),
             None => {
                 let accent = palette.accent(&profile.name);
                 layer.rounded(rect, rect.w / 4., mix(surface, accent, 0.3));

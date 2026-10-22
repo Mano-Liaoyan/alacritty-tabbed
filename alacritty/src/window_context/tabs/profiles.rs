@@ -128,10 +128,20 @@ impl Profile {
     }
 
     /// Start the terminal with this profile's command, directory and environment.
+    ///
+    /// The user's own shell, without arguments, starts the way Alacritty starts its default
+    /// shell, which on macOS makes it a login shell.
     pub fn apply(&self, pty_config: &mut PtyOptions) {
-        if let Some((program, args)) = split(&self.command) {
-            pty_config.shell = Some(Shell::new(program, args));
-        }
+        let shell = env::var_os("SHELL").and_then(|shell| fs::canonicalize(shell).ok());
+        pty_config.shell = match split(&self.command) {
+            Some((program, args))
+                if !args.is_empty() || fs::canonicalize(&program).ok() != shell =>
+            {
+                Some(Shell::new(program, args))
+            },
+            Some(_) => None,
+            None => pty_config.shell.take(),
+        };
         let directory = self.directory.trim();
         pty_config.working_directory =
             if directory.is_empty() { home::home_dir() } else { Some(expand(directory).into()) };

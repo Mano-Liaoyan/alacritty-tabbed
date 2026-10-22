@@ -1,8 +1,9 @@
 //! Linux and BSD integration: caption, installed shells, program icons and file pickers.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::{env, fs};
 
 use winit::window::WindowAttributes;
@@ -46,12 +47,11 @@ fn data_dirs() -> Vec<PathBuf> {
     home.into_iter().chain(dirs.split(':').map(PathBuf::from)).collect()
 }
 
-/// Icon of a program: from its desktop entry, or named after it, or a terminal.
+/// Icon of a program: from its desktop entry, or else named after it.
 pub fn program_icon(command: &str) -> Option<Arc<Image>> {
     let program = command.split_whitespace().next()?.trim_matches(['"', '\'']);
     let name = Path::new(program).file_name()?.to_str()?;
-    let dirs = data_dirs();
-    let entry = dirs.iter().find_map(|dir| {
+    let entry = data_dirs().iter().find_map(|dir| {
         let entries = fs::read_dir(dir.join("applications")).ok()?.flatten();
         entries.filter_map(|entry| fs::read_to_string(entry.path()).ok()).find_map(|entry| {
             let value = |key: &str| entry.lines().find_map(|line| line.strip_prefix(key));
@@ -63,33 +63,112 @@ pub fn program_icon(command: &str) -> Option<Arc<Image>> {
             matches.then(|| value("Icon=").map(str::to_owned)).flatten()
         })
     });
-    let names = entry.into_iter().chain([name.to_owned(), "utilities-terminal".into()]);
-    names.filter_map(|icon| theme_icon(&dirs, &icon)).find_map(|path| file_icon(&path))
+    // Versioned programs, like `python3`, share their icon.
+    let unversioned = name.trim_end_matches(|c: char| c.is_ascii_digit() || c == '.');
+    entry.into_iter().chain([name.into(), unversioned.into()]).find_map(|icon| theme_icon(&icon))
 }
 
-/// A PNG of an icon theme; icons only available as SVG are not supported.
-fn theme_icon(dirs: &[PathBuf], icon: &str) -> Option<PathBuf> {
-    if Path::new(icon).is_absolute() {
-        return Some(icon.into());
-    }
-    let file = &format!("{icon}.png");
-    let sizes = ["256x256", "128x128", "96x96", "64x64", "48x48", "32x32"];
-    dirs.iter().find_map(|dir| {
-        let themes = fs::read_dir(dir.join("icons")).ok()?.flatten().map(|theme| theme.path());
-        // Prefer the fallback theme every icon theme inherits.
-        let mut themes: Vec<_> = themes.collect();
-        themes.sort_by_key(|theme| !theme.ends_with("hicolor"));
-        let candidates = themes.iter().flat_map(|theme| {
-            sizes.iter().flat_map(move |size| {
-                ["apps", "legacy"].map(|context| theme.join(size).join(context).join(file))
-            })
-        });
-        candidates.chain([dir.join("pixmaps").join(file)]).find(|path| path.is_file())
+pub fn terminal_icon() -> Option<Arc<Image>> {
+    theme_icon("utilities-terminal")
+}
+
+/// An icon of the icon theme, or an icon file.
+fn theme_icon(icon: &str) -> Option<Arc<Image>> {
+    let path = match Path::new(icon).is_absolute() {
+        true => PathBuf::from(icon),
+        false => theme().get(icon)?.clone(),
+    };
+    super::icons::load(&path)
+}
+
+/// Application icons of the desktop's icon theme, the themes it inherits, and the fallback
+/// theme, by name; each the largest SVG, or else the largest PNG, of the first theme with one.
+fn theme() -> &'static HashMap<String, PathBuf> {
+    static THEME: OnceLock<HashMap<String, PathBuf>> = OnceLock::new();
+    THEME.get_or_init(|| {
+        let dirs: Vec<_> = data_dirs().iter().map(|dir| dir.join("icons")).collect();
+        let config = home::home_dir().unwrap_or_default().join(".config");
+        let setting = |file: &str, key: &str| {
+            let text = fs::read_to_string(config.join(file)).ok()?;
+            text.lines().find_map(|line| Some(line.strip_prefix(key)?.trim().to_owned()))
+        };
+        let mut themes: Vec<String> =
+            [("kdeglobals", "Theme="), ("gtk-3.0/settings.ini", "gtk-icon-theme-name=")]
+                .iter()
+                .filter_map(|(file, key)| setting(file, key))
+                .collect();
+        let mut index = 0;
+        while let Some(theme) = themes.get(index).cloned() {
+            let text = dirs
+                .iter()
+                .find_map(|dir| fs::read_to_string(dir.join(&theme).join("index.theme")).ok());
+            let inherits =
+                text.as_deref().and_then(|t| t.lines().find_map(|l| l.strip_prefix("Inherits=")));
+            for parent in inherits.unwrap_or_default().split(',').chain(["hicolor"]).map(str::trim)
+            {
+                if !parent.is_empty() && !themes.iter().any(|theme| theme == parent) {
+                    themes.push(parent.into());
+                }
+            }
+            index += 1;
+        }
+        themes.push("hicolor".into());
+
+        let mut icons: HashMap<String, (usize, u32, PathBuf)> = HashMap::new();
+        let roots = themes
+            .iter()
+            .enumerate()
+            .flat_map(|(rank, theme)| dirs.iter().map(move |dir| (rank, dir.join(theme))));
+        let pixmaps = data_dirs().into_iter().map(|dir| (themes.len(), dir.join("pixmaps")));
+        for (rank, root) in roots.chain(pixmaps) {
+            // Themes keep application icons in `<size>/apps` or `apps/<size>`.
+            let mut directories = vec![(root, 0)];
+            while let Some((dir, depth)) = directories.pop() {
+                for path in
+                    fs::read_dir(&dir).into_iter().flatten().flatten().map(|entry| entry.path())
+                {
+                    let Some(file) = path.file_name().and_then(|name| name.to_str()) else {
+                        continue;
+                    };
+                    let Some((name, extension)) = file.rsplit_once('.') else {
+                        if depth < 2 && path.is_dir() {
+                            directories.push((path, depth + 1));
+                        }
+                        continue;
+                    };
+                    let apps =
+                        rank == themes.len() || path.components().any(|c| c.as_os_str() == "apps");
+                    if !apps || !matches!(extension, "svg" | "png") {
+                        continue;
+                    }
+                    // Larger sizes are more detailed; scalable is the largest.
+                    let size =
+                        path.parent().into_iter().flat_map(|p| p.ancestors()).find_map(|dir| {
+                            let dir = dir.file_name()?.to_str()?;
+                            let (size, scale) = dir.split_once('@').unwrap_or((dir, "1x"));
+                            let size: u32 = if size == "scalable" {
+                                1024
+                            } else {
+                                size.split('x').next()?.parse().ok()?
+                            };
+                            Some(size * scale.trim_end_matches('x').parse::<u32>().unwrap_or(1))
+                        });
+                    let score = size.unwrap_or(1) + if extension == "svg" { 1 << 20 } else { 0 };
+                    let better = icons
+                        .get(name)
+                        .is_none_or(|&(r, s, _)| rank < r || (rank == r && score > s));
+                    if better {
+                        icons.insert(name.into(), (rank, score, path));
+                    }
+                }
+            }
+        }
+        icons.into_iter().map(|(name, (.., path))| (name, path)).collect()
     })
 }
 
-pub fn file_icon(path: &Path) -> Option<Arc<Image>> {
-    super::icons::png(&fs::read(path).ok()?)
+pub fn file_icon(_: &Path) -> Option<Arc<Image>> {
+    None
 }
 
 /// Ask for a file, or a folder, with the desktop's dialog.

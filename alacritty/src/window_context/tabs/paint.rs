@@ -4,6 +4,8 @@
 use std::f32::consts::{FRAC_PI_2, FRAC_PI_4};
 use std::sync::{Arc, Mutex};
 
+use resvg::{tiny_skia, usvg};
+
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use winit::dpi::PhysicalPosition;
 
@@ -151,19 +153,32 @@ impl Palette {
 /// Rows of equal pixels: `(x, y, width, color, alpha)`.
 type Runs = Arc<Vec<(u16, u16, u16, Rgb, f32)>>;
 
-/// An image with straight alpha, drawn as rectangles of equal pixels.
+/// An image, drawn as rectangles of equal pixels.
 pub struct Image {
-    pub width: u32,
-    pub height: u32,
-    pub rgba: Vec<u8>,
-    /// The image scaled to fit squares of a size.
+    source: Source,
+    /// Draw the image in one color, for single-color logos.
+    tint: bool,
+    /// The image fit in squares of a size.
     scaled: Mutex<Vec<(u32, Runs)>>,
+}
+
+enum Source {
+    /// Pixels with straight alpha.
+    Pixels { width: u32, height: u32, rgba: Vec<u8> },
+    /// A vector image, rendered at each size it is drawn at.
+    Svg(usvg::Tree),
 }
 
 impl Image {
     pub fn new(width: u32, height: u32, rgba: Vec<u8>) -> Option<Arc<Self>> {
         let valid = width > 0 && height > 0 && rgba.len() == (width * height * 4) as usize;
-        valid.then(|| Arc::new(Self { width, height, rgba, scaled: Default::default() }))
+        let source = Source::Pixels { width, height, rgba };
+        valid.then(|| Arc::new(Self { source, tint: false, scaled: Default::default() }))
+    }
+
+    pub fn svg(data: &[u8], tint: bool) -> Option<Arc<Self>> {
+        let tree = usvg::Tree::from_data(data, &usvg::Options::default()).ok()?;
+        Some(Arc::new(Self { source: Source::Svg(tree), tint, scaled: Default::default() }))
     }
 
     /// Runs of the image fit in a `size` square, averaging the pixels each one covers.
@@ -173,8 +188,16 @@ impl Image {
             return runs.clone();
         }
 
-        let scale = self.width.max(self.height) as f32 / size as f32;
-        let (w, h) = ((self.width as f32 / scale) as u32, (self.height as f32 / scale) as u32);
+        let rendered;
+        let (width, height, rgba) = match &self.source {
+            Source::Pixels { width, height, rgba } => (*width, *height, &rgba[..]),
+            Source::Svg(tree) => {
+                rendered = render(tree, size.max(1));
+                (size.max(1), size.max(1), &rendered[..])
+            },
+        };
+        let scale = width.max(height) as f32 / size as f32;
+        let (w, h) = ((width as f32 / scale) as u32, (height as f32 / scale) as u32);
         let (left, top) = ((size - w.min(size)) / 2, (size - h.min(size)) / 2);
         let samples = (scale.ceil() as u32).clamp(1, 8);
         let mut runs: Vec<(u16, u16, u16, Rgb, f32)> = Vec::new();
@@ -186,9 +209,8 @@ impl Image {
                         let at = |v: u32, s: u32| {
                             ((v as f32 + (s as f32 + 0.5) / samples as f32) * scale) as u32
                         };
-                        let (px, py) =
-                            (at(x, sx).min(self.width - 1), at(y, sy).min(self.height - 1));
-                        let pixel = &self.rgba[((py * self.width + px) * 4) as usize..][..4];
+                        let (px, py) = (at(x, sx).min(width - 1), at(y, sy).min(height - 1));
+                        let pixel = &rgba[((py * width + px) * 4) as usize..][..4];
                         let alpha = f32::from(pixel[3]);
                         for i in 0..3 {
                             sum[i] += f32::from(pixel[i]) * alpha;
@@ -202,7 +224,7 @@ impl Image {
                 }
                 let color = |i: usize| (sum[i] / sum[3]) as u8;
                 let color = Rgb::new(color(0), color(1), color(2));
-                let alpha = (alpha * 32.).round() / 32.;
+                let alpha = (alpha * 64.).round() / 64.;
                 let (x, y) = ((left + x) as u16, (top + y) as u16);
                 match runs.last_mut() {
                     Some(run)
@@ -218,6 +240,21 @@ impl Image {
         scaled.push((size, runs.clone()));
         runs
     }
+}
+
+/// Render a vector image centered in a `size` square, as pixels with straight alpha.
+fn render(tree: &usvg::Tree, size: u32) -> Vec<u8> {
+    let Some(mut pixmap) = tiny_skia::Pixmap::new(size, size) else { return Vec::new() };
+    let (width, height) = (tree.size().width(), tree.size().height());
+    let scale = size as f32 / width.max(height);
+    let (x, y) = ((size as f32 - width * scale) / 2., (size as f32 - height * scale) / 2.);
+    resvg::render(
+        tree,
+        tiny_skia::Transform::from_row(scale, 0., 0., scale, x, y),
+        &mut pixmap.as_mut(),
+    );
+    let pixels = pixmap.pixels().iter().map(|pixel| pixel.demultiply());
+    pixels.flat_map(|pixel| [pixel.red(), pixel.green(), pixel.blue(), pixel.alpha()]).collect()
 }
 
 /// Shapes and labels drawn together; later layers cover earlier ones.
@@ -382,10 +419,12 @@ impl Layer {
     }
 
     /// Draw `image` fit in the `rect` square.
-    pub fn image(&mut self, rect: Rect, image: &Image) {
+    /// Draw `image` fit in the `rect` square, in `tint` if it is a single-color image.
+    pub fn image(&mut self, rect: Rect, image: &Image, tint: Rgb) {
         let runs = image.runs(rect.w.min(rect.h) as u32);
         self.rects.extend(runs.iter().map(|&(x, y, w, color, alpha)| {
             let (x, y) = (rect.x + f32::from(x), rect.y + f32::from(y));
+            let color = if image.tint { tint } else { color };
             RenderRect::new(x, y, f32::from(w), 1., color, alpha)
         }));
     }
