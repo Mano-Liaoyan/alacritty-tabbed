@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 
 use windows_sys::Win32::Foundation::{HWND, POINT, RECT};
 use windows_sys::Win32::Graphics::Dwm::{
-    DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND, DwmSetWindowAttribute,
+    DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND, DWMWCP_ROUND, DwmSetWindowAttribute,
 };
 use windows_sys::Win32::Graphics::Gdi::{
     BitBlt, ClientToScreen, DT_BOTTOM, DT_CENTER, DT_SINGLELINE, DT_TOP, DT_VCENTER, DeleteObject,
@@ -35,7 +35,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::ActiveEventLoop;
-use winit::platform::windows::WindowAttributesExtWindows;
+use winit::platform::windows::{WindowAttributesExtWindows, WindowExtWindows};
 use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle, Win32WindowHandle};
 use winit::window::{CursorIcon, Fullscreen, ResizeDirection, Window, WindowAttributes, WindowId};
 
@@ -115,6 +115,8 @@ struct Group {
     shared: Rc<Shared>,
     /// When the dropdown last closed, so the click that dismissed it does not reopen it.
     dropdown_closed: Option<Instant>,
+    /// Whether leaving fullscreen should maximize the window again.
+    restore_maximized: bool,
 }
 
 #[derive(Default)]
@@ -134,6 +136,21 @@ fn hwnd(window: &Window) -> isize {
 
 fn strip_height(scale: f64) -> i32 {
     (48.0 * scale).round() as i32
+}
+
+/// Ask DWM for Windows 11 rounded corners, or square ones while the window fills a monitor.
+///
+/// Older systems reject the attribute, which leaves the window square.
+fn round_corners(window: &Window, round: bool) {
+    let corners = if round { DWMWCP_ROUND } else { DWMWCP_DONOTROUND };
+    unsafe {
+        DwmSetWindowAttribute(
+            hwnd(window) as HWND,
+            DWMWA_WINDOW_CORNER_PREFERENCE as u32,
+            (&corners as *const i32).cast(),
+            std::mem::size_of_val(&corners) as u32,
+        )
+    };
 }
 
 /// The parent HWND is created and owned by TabManager on the same UI thread.
@@ -213,32 +230,25 @@ impl TabManager {
             return Ok(());
         }
 
+        let fullscreen = config.window.fullscreen();
         let mut attributes = TerminalWindow::get_platform_window(&config.window.identity, &config.window)
                 .with_title("Alacritty Tabs")
                 // The tab header is the title bar; winit still manages the native window.
                 .with_decorations(false)
-                .with_undecorated_shadow(true)
+                // The shadow moves the client area down a pixel, which fullscreen cannot spare.
+                .with_undecorated_shadow(fullscreen.is_none())
                 .with_min_inner_size(LogicalSize::new(480., 180.))
                 .with_theme(config.window.theme())
                 .with_inner_size(LogicalSize::new(1000., 650.))
                 .with_maximized(config.window.maximized())
-                .with_fullscreen(config.window.fullscreen())
+                .with_fullscreen(fullscreen.clone())
                 .with_visible(false);
         if let Some(position) = config.window.position {
             attributes = attributes.with_position(PhysicalPosition::new(position.x, position.y));
         }
         let window = event_loop.create_window(attributes)?;
-        // Undecorated windows are square by default; ask DWM for Windows 11 rounded corners.
-        // Older systems reject the attribute, which leaves the window square.
-        let corners = DWMWCP_ROUND;
-        unsafe {
-            DwmSetWindowAttribute(
-                hwnd(&window) as HWND,
-                DWMWA_WINDOW_CORNER_PREFERENCE as u32,
-                (&corners as *const i32).cast(),
-                std::mem::size_of_val(&corners) as u32,
-            )
-        };
+        // Undecorated windows are square by default.
+        round_corners(&window, fullscreen.is_none());
         options.tab_parent = Some(hwnd(&window));
         let shared = self.shared(config);
         self.groups.insert(
@@ -257,6 +267,7 @@ impl TabManager {
                 host_name: std::env::var("COMPUTERNAME").unwrap_or_default(),
                 shared,
                 dropdown_closed: None,
+                restore_maximized: false,
             },
         );
         Ok(())
@@ -355,9 +366,7 @@ impl TabManager {
                 Request::None
             },
             TabAction::ToggleFullscreen => {
-                let fullscreen =
-                    group.window.fullscreen().is_none().then_some(Fullscreen::Borderless(None));
-                group.window.set_fullscreen(fullscreen);
+                group.set_fullscreen(group.window.fullscreen().is_none());
                 Request::None
             },
             TabAction::ToggleMaximized => {
@@ -453,11 +462,45 @@ impl Group {
         self.window.request_redraw();
     }
 
+    /// Enter or leave borderless fullscreen, keeping the header and restoring the prior state.
+    fn set_fullscreen(&mut self, fullscreen: bool) {
+        if fullscreen == self.window.fullscreen().is_some() {
+            return;
+        }
+        if fullscreen {
+            // winit keeps a maximized window's client area inside the monitor's work area,
+            // which would leave the taskbar's strip unpainted, so enter from the normal state.
+            self.restore_maximized = self.window.is_maximized();
+            if self.restore_maximized {
+                self.window.set_maximized(false);
+            }
+            self.window.set_undecorated_shadow(false);
+            self.window.set_fullscreen(Some(Fullscreen::Borderless(None)));
+        } else {
+            self.window.set_fullscreen(None);
+            self.window.set_undecorated_shadow(true);
+            if std::mem::take(&mut self.restore_maximized) {
+                self.window.set_maximized(true);
+            }
+        }
+        round_corners(&self.window, !fullscreen);
+        // The size may not change, e.g. with an auto-hidden taskbar, so always lay out again.
+        self.layout();
+        self.window.request_redraw();
+    }
+
     fn header(&self) -> Header {
+        let frame = if self.window.fullscreen().is_some() {
+            Frame::Fullscreen
+        } else if self.window.is_maximized() {
+            Frame::Maximized
+        } else {
+            Frame::Normal
+        };
         Header::new(
             self.window.inner_size(),
             self.window.scale_factor(),
-            self.window.is_maximized() || self.window.fullscreen().is_some(),
+            frame,
             self.tabs.len(),
             self.selected,
             self.first_visible,
@@ -582,7 +625,7 @@ impl Group {
             },
             Hit::Maximize => {
                 if self.window.fullscreen().is_some() {
-                    self.window.set_fullscreen(None);
+                    self.set_fullscreen(false);
                 } else {
                     self.window.set_maximized(!self.window.is_maximized());
                 }
@@ -720,10 +763,19 @@ enum Hit {
     Close,
 }
 
+/// How the host window is shown, which decides its resize border and terminal margins.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Frame {
+    Normal,
+    Maximized,
+    /// Borderless fullscreen: the header stays and the terminal fills the rest edge to edge.
+    Fullscreen,
+}
+
 /// One source of geometry for painting, input, overflow, and terminal placement.
 struct Header {
     scale: f64,
-    maximized: bool,
+    frame: Frame,
     selected: usize,
     width: i32,
     height: i32,
@@ -747,7 +799,7 @@ impl Header {
     fn new(
         size: PhysicalSize<u32>,
         scale: f64,
-        maximized: bool,
+        frame: Frame,
         count: usize,
         selected: usize,
         first: usize,
@@ -756,7 +808,8 @@ impl Header {
         let width = size.width as i32;
         let height = size.height as i32;
         let bar = strip_height(scale);
-        let border = if maximized { 0 } else { px(4.) };
+        let fullscreen = frame == Frame::Fullscreen;
+        let border = if frame == Frame::Normal { px(4.) } else { 0 };
         let margin = px(8.);
         let control = px(32.);
         let caption = px(40.);
@@ -771,7 +824,8 @@ impl Header {
         let chevron = px(22.);
         let split = control + chevron;
 
-        let brand_label = width >= px(780.);
+        // Fullscreen gives the label's space to the tabs; the logo stays.
+        let brand_label = !fullscreen && width >= px(780.);
         let brand_width = if brand_label { px(160.) } else { px(52.) };
         let pad = px(3.);
         let gap = px(4.);
@@ -817,13 +871,18 @@ impl Header {
             buttons.push((hit, button(controls_start + index as i32 * caption, caption)));
         }
 
-        let card = Rect::new(margin, bar, width - margin, height - margin);
-        // Keep the square terminal surface inside the card's rounded corners.
-        let terminal = card.inset(px(4.));
+        let (card, terminal) = if fullscreen {
+            let terminal = Rect::new(0, bar, width, height);
+            (terminal, terminal)
+        } else {
+            let card = Rect::new(margin, bar, width - margin, height - margin);
+            // Keep the square terminal surface inside the card's rounded corners.
+            (card, card.inset(px(4.)))
+        };
 
         Self {
             scale,
-            maximized,
+            frame,
             selected,
             width,
             height,
@@ -976,9 +1035,12 @@ impl Scene<'_> {
         let hairline = scale.max(1.).floor();
 
         canvas.clear(palette.chrome);
-        let radius = f64::from(px(10.));
-        canvas.fill(header.card, radius, palette.terminal);
-        canvas.stroke(header.card, radius, hairline, palette.card_outline);
+        // In fullscreen the terminal covers everything below the bar, without a panel.
+        if header.frame != Frame::Fullscreen {
+            let radius = f64::from(px(10.));
+            canvas.fill(header.card, radius, palette.terminal);
+            canvas.stroke(header.card, radius, hairline, palette.card_outline);
+        }
         if canvas.view.top >= header.bar {
             return;
         }
@@ -1063,7 +1125,7 @@ impl Scene<'_> {
                 Hit::Previous => Icon::Previous,
                 Hit::Next => Icon::Next,
                 Hit::Minimize => Icon::Minimize,
-                Hit::Maximize if header.maximized => Icon::Restore,
+                Hit::Maximize if header.frame != Frame::Normal => Icon::Restore,
                 Hit::Maximize => Icon::Maximize,
                 _ => Icon::Close,
             };
@@ -1249,14 +1311,15 @@ mod tests {
         };
         let icons = [icon_of("PowerShell"), None, icon_of("Command Prompt"), None];
         let cache = Icons::default();
-        for (name, colors, scale, width, hovered) in [
-            ("dark", &dark, 1.25, 1200, Hit::Tab(2)),
-            ("light", &light, 1., 1100, Hit::New),
-            ("narrow", &dark, 1.5, 760, Hit::Close),
-            ("drag", &dark, 1.25, 1200, Hit::None),
+        for (name, colors, scale, width, hovered, frame) in [
+            ("dark", &dark, 1.25, 1200, Hit::Tab(2), Frame::Normal),
+            ("light", &light, 1., 1100, Hit::New, Frame::Normal),
+            ("narrow", &dark, 1.5, 760, Hit::Close, Frame::Normal),
+            ("drag", &dark, 1.25, 1200, Hit::None, Frame::Normal),
+            ("fullscreen", &dark, 1.25, 1200, Hit::Maximize, Frame::Fullscreen),
         ] {
             let height = (190. * scale) as u32;
-            let header = Header::new(PhysicalSize::new(width, height), scale, false, 4, 0, 0);
+            let header = Header::new(PhysicalSize::new(width, height), scale, frame, 4, 0, 0);
             let palette = Palette::new(colors);
             let size = Scene::badge_size(scale);
             let scene = Scene {
@@ -1304,68 +1367,70 @@ mod tests {
 
     #[test]
     fn header_keeps_selected_tabs_and_controls_reachable() {
-        for scale in [1., 1.25, 1.5, 2.] {
-            for width in [480., 800., 1600.] {
-                for count in [1, 3, 30] {
-                    for selected in 0..count {
-                        let header = Header::new(
-                            PhysicalSize::new((width * scale) as u32, (600. * scale) as u32),
-                            scale,
-                            false,
-                            count,
-                            selected,
-                            0,
-                        );
-                        assert!(header.tabs.iter().any(|(index, _)| *index == selected));
-                        let mut previous_right = 0;
-                        for &(index, rect) in &header.tabs {
-                            assert!(rect.width() > header.close_width);
-                            assert!(rect.left >= previous_right);
+        for frame in [Frame::Normal, Frame::Maximized, Frame::Fullscreen] {
+            for scale in [1., 1.25, 1.5, 2.] {
+                for width in [480., 800., 1600.] {
+                    for count in [1, 3, 30] {
+                        for selected in 0..count {
+                            let header = Header::new(
+                                PhysicalSize::new((width * scale) as u32, (600. * scale) as u32),
+                                scale,
+                                frame,
+                                count,
+                                selected,
+                                0,
+                            );
+                            assert!(header.tabs.iter().any(|(index, _)| *index == selected));
+                            let mut previous_right = 0;
+                            for &(index, rect) in &header.tabs {
+                                assert!(rect.width() > header.close_width);
+                                assert!(rect.left >= previous_right);
+                                assert_eq!(
+                                    header.hit(PhysicalPosition::new(
+                                        f64::from(rect.left + 2),
+                                        f64::from(rect.top + 2)
+                                    )),
+                                    Hit::Tab(index)
+                                );
+                                let close = header.close_tab(rect);
+                                assert_eq!(
+                                    header.hit(PhysicalPosition::new(
+                                        f64::from(close.left + 1),
+                                        f64::from(close.top + 1)
+                                    )),
+                                    Hit::CloseTab(index)
+                                );
+                                previous_right = rect.right;
+                            }
+                            for &(hit, rect) in &header.buttons {
+                                assert!(rect.left >= previous_right);
+                                assert!(rect.right <= header.width - header.border);
+                                assert_eq!(
+                                    header.hit(PhysicalPosition::new(
+                                        f64::from((rect.left + rect.right) / 2),
+                                        f64::from((rect.top + rect.bottom) / 2)
+                                    )),
+                                    hit
+                                );
+                                previous_right = rect.right;
+                            }
+                            let find = |target: Hit| {
+                                header.buttons.iter().find(|(hit, _)| *hit == target).unwrap().1
+                            };
+                            let (plus, profiles) = (find(Hit::New), find(Hit::Profiles));
+                            let last_tab = header.tabs.last().unwrap().1;
+                            // The new-tab split button follows the tabs, overflow arrows aside.
+                            let arrows = if count > header.tabs.len() { 64. * scale } else { 0. };
+                            assert!(f64::from(plus.left - last_tab.right) <= 12. * scale + arrows);
+                            assert_eq!(plus.right, profiles.left);
                             assert_eq!(
                                 header.hit(PhysicalPosition::new(
-                                    f64::from(rect.left + 2),
-                                    f64::from(rect.top + 2)
+                                    f64::from(profiles.right + 2),
+                                    f64::from(header.bar / 2)
                                 )),
-                                Hit::Tab(index)
+                                Hit::Drag
                             );
-                            let close = header.close_tab(rect);
-                            assert_eq!(
-                                header.hit(PhysicalPosition::new(
-                                    f64::from(close.left + 1),
-                                    f64::from(close.top + 1)
-                                )),
-                                Hit::CloseTab(index)
-                            );
-                            previous_right = rect.right;
                         }
-                        for &(hit, rect) in &header.buttons {
-                            assert!(rect.left >= previous_right);
-                            assert!(rect.right <= header.width - header.border);
-                            assert_eq!(
-                                header.hit(PhysicalPosition::new(
-                                    f64::from((rect.left + rect.right) / 2),
-                                    f64::from((rect.top + rect.bottom) / 2)
-                                )),
-                                hit
-                            );
-                            previous_right = rect.right;
-                        }
-                        let find = |target: Hit| {
-                            header.buttons.iter().find(|(hit, _)| *hit == target).unwrap().1
-                        };
-                        let (plus, profiles) = (find(Hit::New), find(Hit::Profiles));
-                        let last_tab = header.tabs.last().unwrap().1;
-                        // The new-tab split button follows the tabs, overflow arrows aside.
-                        let arrows = if count > header.tabs.len() { 64. * scale } else { 0. };
-                        assert!(f64::from(plus.left - last_tab.right) <= 12. * scale + arrows);
-                        assert_eq!(plus.right, profiles.left);
-                        assert_eq!(
-                            header.hit(PhysicalPosition::new(
-                                f64::from(profiles.right + 2),
-                                f64::from(header.bar / 2)
-                            )),
-                            Hit::Drag
-                        );
                     }
                 }
             }
@@ -1373,8 +1438,38 @@ mod tests {
     }
 
     #[test]
+    fn fullscreen_terminal_fills_the_window_below_the_header() {
+        for scale in [1., 1.25, 1.5, 2.] {
+            for (width, height) in [(1280., 720.), (1920., 1080.), (3840., 2160.)] {
+                let size = PhysicalSize::new((width * scale) as u32, (height * scale) as u32);
+                let header = Header::new(size, scale, Frame::Fullscreen, 3, 0, 0);
+                let (width, height) = (size.width as i32, size.height as i32);
+                assert_eq!(header.terminal, Rect::new(0, header.bar, width, height));
+                assert_eq!(header.bar, strip_height(scale));
+                // Only the header strip is painted; the terminal covers the rest.
+                assert_eq!(header.chrome(), vec![Rect::new(0, 0, width, header.bar)]);
+                assert!(!header.brand_label);
+                assert_eq!(header.border, 0);
+                for (x, y) in [(0., 0.), (f64::from(width - 1), 0.), (0., f64::from(height - 1))] {
+                    assert!(!matches!(header.hit(PhysicalPosition::new(x, y)), Hit::Resize(_)));
+                }
+                for target in [Hit::New, Hit::Profiles, Hit::Settings, Hit::Maximize, Hit::Close] {
+                    let rect = header.buttons.iter().find(|(hit, _)| *hit == target).unwrap().1;
+                    let (x, y) = rect.center();
+                    assert_eq!(header.hit(PhysicalPosition::new(x, y)), target);
+                }
+                // The label's space goes to the tabs.
+                let windowed = Header::new(size, scale, Frame::Maximized, 3, 0, 0);
+                assert!(windowed.brand_label);
+                assert!(header.tabs[0].1.left < windowed.tabs[0].1.left);
+                assert!(windowed.terminal.left > 0 && windowed.terminal.bottom < height);
+            }
+        }
+    }
+
+    #[test]
     fn dragged_tabs_drop_into_the_slot_under_their_center() {
-        let header = Header::new(PhysicalSize::new(1600, 600), 1., false, 4, 0, 0);
+        let header = Header::new(PhysicalSize::new(1600, 600), 1., Frame::Normal, 4, 0, 0);
         let slot = |index: usize| f64::from(header.tabs[index].1.left);
         let half = f64::from(header.step) / 2.;
         assert_eq!(header.drop_target(slot(0)), Some(0));
@@ -1384,7 +1479,7 @@ mod tests {
         // Positions beyond either end clamp to the first and last visible slots.
         assert_eq!(header.drop_target(-500.), Some(0));
         assert_eq!(header.drop_target(5000.), Some(3));
-        let empty = Header::new(PhysicalSize::new(1600, 600), 1., false, 0, 0, 0);
+        let empty = Header::new(PhysicalSize::new(1600, 600), 1., Frame::Normal, 0, 0, 0);
         assert_eq!(empty.drop_target(10.), None);
     }
 
@@ -1400,7 +1495,7 @@ mod tests {
     fn settings_sits_left_of_the_caption_controls() {
         for scale in [1., 1.5] {
             let width = (1200. * scale) as u32;
-            let header = Header::new(PhysicalSize::new(width, 800), scale, false, 3, 0, 0);
+            let header = Header::new(PhysicalSize::new(width, 800), scale, Frame::Normal, 3, 0, 0);
             let find =
                 |target: Hit| header.buttons.iter().find(|(hit, _)| *hit == target).unwrap().1;
             let (settings, minimize) = (find(Hit::Settings), find(Hit::Minimize));
@@ -1416,7 +1511,7 @@ mod tests {
 
     #[test]
     fn border_hit_testing_respects_maximized_and_terminal_areas() {
-        let header = Header::new(PhysicalSize::new(1000, 650), 1., false, 2, 0, 0);
+        let header = Header::new(PhysicalSize::new(1000, 650), 1., Frame::Normal, 2, 0, 0);
         for (x, y, direction) in [
             (0., 0., ResizeDirection::NorthWest),
             (999., 0., ResizeDirection::NorthEast),
@@ -1430,7 +1525,7 @@ mod tests {
             assert_eq!(header.hit(PhysicalPosition::new(x, y)), Hit::Resize(direction));
         }
         assert_eq!(header.hit(PhysicalPosition::new(500., 300.)), Hit::None);
-        let header = Header::new(PhysicalSize::new(1000, 650), 1., true, 2, 0, 0);
+        let header = Header::new(PhysicalSize::new(1000, 650), 1., Frame::Maximized, 2, 0, 0);
         assert_eq!(header.border, 0);
         assert_eq!(header.hit(PhysicalPosition::new(0., 0.)), Hit::Drag);
         assert_eq!(header.hit(PhysicalPosition::new(999., 649.)), Hit::None);
