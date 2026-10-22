@@ -385,6 +385,9 @@ pub struct Display {
     /// Font size used by the window.
     pub font_size: FontSize,
 
+    /// Tab bar and background tabs.
+    pub tabs: crate::window_context::tabs::Tabs,
+
     // Mouse point position when highlighting hints.
     hint_mouse_point: Option<Point>,
 
@@ -412,7 +415,7 @@ impl Display {
         let rasterizer = Rasterizer::new()?;
 
         let font_size = config.font.size().scale(scale_factor);
-        debug!("Loading \"{}\" font", config.font.normal().family);
+        debug!("Loading \"{}\" font", &config.font.normal().family);
         let font = config.font.clone().with_size(font_size);
         let mut glyph_cache = GlyphCache::new(rasterizer, &font)?;
 
@@ -539,6 +542,7 @@ impl Display {
             cursor_hidden: Default::default(),
             meter: Default::default(),
             ime: Default::default(),
+            tabs: Default::default(),
         })
     }
 
@@ -613,6 +617,7 @@ impl Display {
                     && !self.damage_tracker.debug =>
             {
                 let damage = self.damage_tracker.shape_frame_damage(self.size_info.into());
+                let damage = self.tabs.damage(damage, &self.size_info);
                 surface.swap_buffers_with_damage(context, &damage)
             },
             (surface, context) => surface.swap_buffers(context),
@@ -751,6 +756,7 @@ impl Display {
         if renderer_update.resize {
             let width = NonZeroU32::new(self.size_info.width() as u32).unwrap();
             let height = NonZeroU32::new(self.size_info.height() as u32).unwrap();
+            let height = height.saturating_add(self.tabs.height);
             self.surface.resize(&self.context, width, height);
         }
 
@@ -1015,6 +1021,8 @@ impl Display {
             let cursor_point = vi_cursor_point.or(Some(cursor_point));
             self.draw_hyperlink_preview(config, cursor_point, display_offset);
         }
+
+        self.tabs.draw(&mut self.renderer, &mut self.glyph_cache, &self.window, &size_info, config);
 
         // Notify winit that we're about to present.
         self.window.pre_present_notify();

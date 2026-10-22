@@ -27,8 +27,7 @@ pub struct WindowConfig {
     /// Startup mode.
     pub startup_mode: StartupMode,
 
-    /// Group terminal windows in a native Windows tab container.
-    #[cfg(windows)]
+    /// Show a tab bar and group terminals of a window in tabs.
     pub tabs: bool,
 
     /// XEmbed parent.
@@ -84,8 +83,7 @@ impl Default for WindowConfig {
             dimensions: Default::default(),
             decorations: Default::default(),
             startup_mode: Default::default(),
-            #[cfg(windows)]
-            tabs: false,
+            tabs: Default::default(),
             dynamic_padding: Default::default(),
             resize_increments: Default::default(),
             decorations_theme_variant: Default::default(),

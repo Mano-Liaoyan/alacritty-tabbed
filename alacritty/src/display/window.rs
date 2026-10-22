@@ -114,8 +114,6 @@ pub struct Window {
     pub hold: bool,
 
     window: WinitWindow,
-    #[cfg(windows)]
-    tab_parent: Option<isize>,
 
     /// Current window title.
     title: String,
@@ -185,11 +183,6 @@ impl Window {
             .with_fullscreen(config.window.fullscreen())
             .with_window_level(config.window.level.into());
 
-        #[cfg(windows)]
-        if let Some(parent) = options.tab_parent {
-            window_attributes = crate::windows_tabs::child_attributes(window_attributes, parent);
-        }
-
         let window = event_loop.create_window(window_attributes)?;
 
         // Text cursor.
@@ -211,8 +204,6 @@ impl Window {
         let is_x11 = matches!(window.window_handle().unwrap().as_raw(), RawWindowHandle::Xlib(_));
 
         Ok(Self {
-            #[cfg(windows)]
-            tab_parent: options.tab_parent,
             hold: options.terminal_options.hold,
             requested_redraw: false,
             title: identity.title,
@@ -375,11 +366,6 @@ impl Window {
 
     pub fn id(&self) -> WindowId {
         self.window.id()
-    }
-
-    #[cfg(windows)]
-    pub fn tab_parent(&self) -> Option<isize> {
-        self.tab_parent
     }
 
     pub fn set_transparent(&self, transparent: bool) {
