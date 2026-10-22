@@ -11,9 +11,10 @@ use std::rc::Rc;
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Dwm::{DWMWCP_ROUND, DwmExtendFrameIntoClientArea};
 use windows_sys::Win32::Graphics::Gdi::{
-    CreateSolidBrush, DT_CENTER, DT_RIGHT, DT_VCENTER, DeleteObject, GetMonitorInfoW, HBRUSH, HDC,
-    HFONT, InvalidateRect, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow,
-    ScreenToClient, SelectObject, SetBkColor, SetBkMode, SetTextColor, TRANSPARENT,
+    CreateSolidBrush, DT_CENTER, DT_RIGHT, DT_VCENTER, DeleteObject, ExcludeClipRect,
+    GetMonitorInfoW, HBRUSH, HDC, HFONT, InvalidateRect, MONITOR_DEFAULTTONEAREST, MONITORINFO,
+    MonitorFromWindow, ScreenToClient, SelectClipRgn, SelectObject, SetBkColor, SetBkMode,
+    SetTextColor, TRANSPARENT,
 };
 use windows_sys::Win32::System::Com::CoTaskMemFree;
 use windows_sys::Win32::UI::Controls::Dialogs::{
@@ -21,8 +22,8 @@ use windows_sys::Win32::UI::Controls::Dialogs::{
 };
 use windows_sys::Win32::UI::Controls::{MARGINS, SetWindowTheme, WM_MOUSELEAVE};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    GetKeyState, SetFocus, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent, VK_CONTROL, VK_ESCAPE,
-    VK_RETURN, VK_SHIFT, VK_TAB,
+    GetKeyState, ReleaseCapture, SetCapture, SetFocus, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
+    VK_CONTROL, VK_ESCAPE, VK_RETURN, VK_SHIFT, VK_TAB,
 };
 use windows_sys::Win32::UI::Shell::{
     BIF_NEWDIALOGSTYLE, BIF_RETURNONLYFSDIRS, BROWSEINFOW, SHBrowseForFolderW, SHGetPathFromIDListW,
@@ -31,12 +32,13 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     CallWindowProcW, CreateWindowExW, DI_NORMAL, DestroyIcon, DestroyWindow, DrawIconEx,
     ES_AUTOHSCROLL, ES_AUTOVSCROLL, ES_MULTILINE, ES_WANTRETURN, GWLP_USERDATA, GWLP_WNDPROC,
     GetParent, GetWindowLongPtrW, GetWindowRect, GetWindowTextLengthW, GetWindowTextW, HTCAPTION,
-    HTCLIENT, IsWindow, MoveWindow, SW_SHOW, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
-    SWP_NOSIZE, SWP_NOZORDER, SendMessageW, SetForegroundWindow, SetWindowLongPtrW, SetWindowPos,
-    SetWindowTextW, ShowWindow, WM_CHAR, WM_CLOSE, WM_COMMAND, WM_CTLCOLOREDIT, WM_DPICHANGED,
-    WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCALCSIZE,
-    WM_NCHITTEST, WM_SETFONT, WNDPROC, WS_CAPTION, WS_CHILD, WS_CLIPCHILDREN, WS_POPUP, WS_SYSMENU,
-    WS_TABSTOP, WS_THICKFRAME, WS_VISIBLE,
+    HTCLIENT, IsWindow, KillTimer, MoveWindow, SW_SHOW, SWP_FRAMECHANGED, SWP_NOACTIVATE,
+    SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SendMessageW, SetForegroundWindow, SetTimer,
+    SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow, WM_CAPTURECHANGED, WM_CHAR,
+    WM_CLOSE, WM_COMMAND, WM_CTLCOLOREDIT, WM_DPICHANGED, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP,
+    WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCALCSIZE, WM_NCHITTEST, WM_SETFONT, WM_TIMER, WNDPROC,
+    WS_CAPTION, WS_CHILD, WS_CLIPCHILDREN, WS_POPUP, WS_SYSMENU, WS_TABSTOP, WS_THICKFRAME,
+    WS_VISIBLE,
 };
 
 use super::Shared;
@@ -60,6 +62,8 @@ const COMMAND_CLOSE: usize = 2;
 const COMMAND_NEXT: usize = 3;
 const COMMAND_PREVIOUS: usize = 4;
 const EM_SETSEL: u32 = 0x00b1;
+/// Scrolls the sidebar while a dragged row is held beyond its ends.
+const SCROLL_TIMER: usize = 1;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Field {
@@ -98,7 +102,7 @@ impl Field {
         match self {
             Field::Name => "",
             Field::Command => "Empty uses the shell from alacritty.toml",
-            Field::Directory => "Empty uses Alacritty's working directory",
+            Field::Directory => "Empty starts in your home folder",
             Field::Icon => "Empty uses the program's own icon",
             Field::Env => "KEY=value, one per line",
             Field::Options => "e.g. font.size=14",
@@ -107,6 +111,7 @@ impl Field {
 }
 
 /// A profile being edited, kept as the text the user typed until it is saved.
+#[derive(Clone)]
 struct Entry {
     text: [String; 6],
     hidden: bool,
@@ -201,6 +206,7 @@ enum Target {
     Close,
     Row(usize),
     NewProfile,
+    Duplicate,
     IconTile,
     Browse(Field),
     ResetIcon,
@@ -217,6 +223,7 @@ struct Layout {
     sidebar: Rect,
     rows: Vec<(usize, Rect)>,
     new_profile: Rect,
+    duplicate: Rect,
     card: Rect,
     tile: Rect,
     fields: [Rect; 6],
@@ -229,6 +236,21 @@ struct Layout {
     cancel: Rect,
     save: Rect,
     status: Rect,
+}
+
+/// A sidebar row being dragged to a new position.
+#[derive(Clone, Copy, Debug)]
+struct RowDrag {
+    /// Current position of the dragged profile in `Settings::entries`.
+    index: usize,
+    /// Pointer offset from the row's top edge when it was grabbed.
+    grab: i32,
+    start: i32,
+    /// Pointer position in client pixels.
+    y: i32,
+    moving: bool,
+    /// Whether the sidebar is scrolling because the pointer is beyond its rows.
+    scrolling: bool,
 }
 
 pub(super) struct Settings {
@@ -248,6 +270,7 @@ pub(super) struct Settings {
     field_brush: HBRUSH,
     hovered: Option<Target>,
     pressed: Option<Target>,
+    drag: Option<RowDrag>,
     tracking: bool,
     dirty: bool,
     confirm_close: bool,
@@ -301,6 +324,7 @@ pub(super) fn open(owner: HWND, palette: &Palette, shared: &Rc<Shared>) {
             field_brush: CreateSolidBrush(palette.field.colorref()),
             hovered: None,
             pressed: None,
+            drag: None,
             tracking: false,
             dirty: false,
             confirm_close: false,
@@ -358,7 +382,8 @@ impl Settings {
         let (w, h) = (self.width, self.height);
         let sidebar = Rect::new(px(8.), px(TITLE), px(248.), h - px(8.));
         let new_profile =
-            Rect::new(px(14.), sidebar.bottom - px(42.), px(242.), sidebar.bottom - px(6.));
+            Rect::new(px(14.), sidebar.bottom - px(42.), px(128.), sidebar.bottom - px(6.));
+        let duplicate = Rect::new(px(132.), new_profile.top, px(242.), new_profile.bottom);
         let mut rows = Vec::new();
         let mut top = sidebar.top + px(36.);
         for index in self.scroll..self.entries.len() {
@@ -407,6 +432,7 @@ impl Settings {
             sidebar,
             rows,
             new_profile,
+            duplicate,
             card,
             tile,
             fields,
@@ -432,6 +458,7 @@ impl Settings {
         let targets = [
             (Target::Close, layout.close),
             (Target::NewProfile, layout.new_profile),
+            (Target::Duplicate, layout.duplicate),
             (Target::IconTile, layout.tile),
             (Target::ResetIcon, layout.reset),
             (Target::ToggleDefault, layout.toggle_default),
@@ -578,10 +605,15 @@ impl Settings {
         self.changed(field);
     }
 
-    fn changed(&mut self, field: Field) {
+    /// Note an unsaved change that is not to a particular field.
+    fn touched(&mut self) {
         self.dirty = true;
         self.confirm_close = false;
         self.status = None;
+    }
+
+    fn changed(&mut self, field: Field) {
+        self.touched();
         if matches!(field, Field::Name | Field::Command | Field::Icon) {
             let shell = self.shared.shell.clone();
             self.entries[self.selected].refresh_icon(shell.as_deref());
@@ -596,13 +628,22 @@ impl Settings {
                 let profile = Profile { name: "New profile".into(), ..Profile::default() };
                 let shell = self.shared.shell.clone();
                 self.entries.push(Entry::new(&profile, shell.as_deref()));
-                self.dirty = true;
+                self.touched();
                 self.select(self.entries.len() - 1);
-                let name = self.edits[Field::Name.index()];
-                unsafe {
-                    SetFocus(name);
-                    SendMessageW(name, EM_SETSEL, 0, -1);
-                }
+                self.focus_name();
+            },
+            Target::Duplicate => {
+                self.sync();
+                let mut copy = self.entry().clone();
+                copy.text[Field::Name.index()] = profiles::copy_name(copy.name(), |name| {
+                    self.entries.iter().any(|entry| entry.name() == name)
+                });
+                let at = self.selected + 1;
+                self.entries.insert(at, copy);
+                self.default = self.default.map(|default| inserted_index(default, at));
+                self.touched();
+                self.show(at);
+                self.focus_name();
             },
             Target::IconTile => self.pending = Some(Field::Icon),
             Target::Browse(field) => self.pending = Some(field),
@@ -628,6 +669,80 @@ impl Settings {
             },
             Target::Save => self.save(),
         }
+    }
+
+    fn focus_name(&self) {
+        let name = self.edits[Field::Name.index()];
+        unsafe {
+            SetFocus(name);
+            SendMessageW(name, EM_SETSEL, 0, -1);
+        }
+    }
+
+    /// The dragged row, following the pointer within the visible rows.
+    fn lifted(&self, layout: &Layout) -> Option<Rect> {
+        let drag = self.drag.filter(|drag| drag.moving)?;
+        let (&(_, first), &(_, last)) = (layout.rows.first()?, layout.rows.last()?);
+        let top = (drag.y - drag.grab).clamp(first.top, last.top);
+        Some(Rect::new(first.left, top, first.right, top + first.height()))
+    }
+
+    /// Follow the pointer with the dragged row, moving its profile to the slot beneath it.
+    fn drag_to(&mut self, hwnd: HWND, y: i32) {
+        let Some(mut drag) = self.drag else { return };
+        drag.y = y;
+        drag.moving |= (y - drag.start).abs() >= self.px(4.);
+        self.drag = Some(drag);
+        if !drag.moving {
+            return;
+        }
+        self.hovered = None;
+        if self.selected != drag.index {
+            self.select(drag.index);
+        }
+        let layout = self.layout();
+        let Some(lifted) = self.lifted(&layout) else { return };
+        let (first, last) = (layout.rows[0].1, layout.rows[layout.rows.len() - 1].1);
+        let pitch = self.px(38.);
+        let slot = self.scroll + ((lifted.top - first.top + pitch / 2) / pitch) as usize;
+        let target = slot.min(self.entries.len() - 1);
+        if target != drag.index {
+            let entry = self.entries.remove(drag.index);
+            self.entries.insert(target, entry);
+            self.default = self.default.map(|default| moved_index(default, drag.index, target));
+            // The edit controls already show the dragged profile.
+            self.selected = target;
+            drag.index = target;
+            self.touched();
+        }
+
+        // Held beyond either end, the list scrolls to reveal more rows.
+        let edge = (y < first.top && self.scroll > 0)
+            || (y >= last.bottom && self.scroll + layout.rows.len() < self.entries.len());
+        if edge != drag.scrolling {
+            drag.scrolling = edge;
+            unsafe {
+                if edge {
+                    SetTimer(hwnd, SCROLL_TIMER, 90, None);
+                } else {
+                    KillTimer(hwnd, SCROLL_TIMER);
+                }
+            }
+        }
+        self.drag = Some(drag);
+    }
+
+    /// Finish a row drag, returning whether the row was moved rather than clicked.
+    fn end_drag(&mut self, hwnd: HWND) -> bool {
+        let Some(drag) = self.drag.take() else { return false };
+        unsafe {
+            KillTimer(hwnd, SCROLL_TIMER);
+            ReleaseCapture();
+        }
+        if drag.moving {
+            self.pressed = None;
+        }
+        drag.moving
     }
 
     fn save(&mut self) {
@@ -848,6 +963,13 @@ impl Handler for Settings {
                     self.tracking = true;
                 }
                 let (x, y) = surface::point(lparam);
+                if self.drag.is_some() {
+                    self.drag_to(hwnd, y);
+                    if self.drag.is_some_and(|drag| drag.moving) {
+                        redraw();
+                        return Some(0);
+                    }
+                }
                 let hovered = self.target_at(x, y);
                 if hovered != self.hovered {
                     self.hovered = hovered;
@@ -864,9 +986,28 @@ impl Handler for Settings {
             WM_LBUTTONDOWN => {
                 let (x, y) = surface::point(lparam);
                 self.pressed = self.target_at(x, y);
+                // Rows can be dragged to reorder the profiles; a click still selects.
+                let layout = self.layout();
+                let row =
+                    layout.rows.iter().find(|(index, _)| self.pressed == Some(Target::Row(*index)));
+                if let Some(&(index, rect)) = row {
+                    self.drag = Some(RowDrag {
+                        index,
+                        grab: y - rect.top,
+                        start: y,
+                        y,
+                        moving: false,
+                        scrolling: false,
+                    });
+                    unsafe { SetCapture(hwnd) };
+                }
                 Some(0)
             },
             WM_LBUTTONUP => {
+                if self.end_drag(hwnd) {
+                    redraw();
+                    return Some(0);
+                }
                 let (x, y) = surface::point(lparam);
                 let target = self.target_at(x, y);
                 if let Some(target) = target.filter(|target| self.pressed.take() == Some(*target)) {
@@ -884,7 +1025,34 @@ impl Handler for Settings {
                 } else {
                     (self.scroll + 1).min(last)
                 };
+                if let Some(drag) = self.drag {
+                    self.drag_to(hwnd, drag.y);
+                }
                 redraw();
+                Some(0)
+            },
+            WM_TIMER if wparam == SCROLL_TIMER => {
+                let (Some(drag), Some(&(_, first))) = (self.drag, self.layout().rows.first())
+                else {
+                    unsafe { KillTimer(hwnd, SCROLL_TIMER) };
+                    return Some(0);
+                };
+                let visible = self.layout().rows.len();
+                self.scroll = if drag.y < first.top {
+                    self.scroll.saturating_sub(1)
+                } else {
+                    (self.scroll + 1).min(self.entries.len().saturating_sub(visible))
+                };
+                self.drag_to(hwnd, drag.y);
+                redraw();
+                Some(0)
+            },
+            // Losing the pointer, for example to another window, drops the row where it is.
+            WM_CAPTURECHANGED => {
+                if self.drag.is_some() {
+                    self.end_drag(hwnd);
+                    redraw();
+                }
                 Some(0)
             },
             WM_KEYDOWN => {
@@ -944,14 +1112,16 @@ impl Handler for Settings {
         let radius = f64::from(px(12.));
         canvas.fill(layout.sidebar, radius, palette.track);
         canvas.stroke(layout.sidebar, radius, hairline, palette.track_outline);
-        for &(index, rect) in &layout.rows {
-            let radius = f64::from(px(9.));
+        let row_radius = f64::from(px(9.));
+        let lifted = self.lifted(&layout);
+        let row = |canvas: &mut Canvas<'_>, index: usize, rect: Rect| {
             let surface = if index == self.selected {
-                canvas.fill(rect, radius, palette.raised);
-                canvas.stroke(rect, radius, hairline, palette.raised_outline);
+                canvas.fill(rect, row_radius, palette.raised);
+                let outline = if lifted.is_some() { palette.focus } else { palette.raised_outline };
+                canvas.stroke(rect, row_radius, hairline, outline);
                 palette.raised
             } else if self.hovered == Some(Target::Row(index)) {
-                canvas.fill(rect, radius, palette.hover);
+                canvas.fill(rect, row_radius, palette.hover);
                 palette.hover
             } else {
                 palette.track
@@ -963,17 +1133,31 @@ impl Handler for Settings {
                 canvas.fill(badge, f64::from(px(5.)), surface.mix(accent, 0.3));
                 prompt_glyph(canvas, badge, accent, self.scale);
             }
+        };
+        for &(index, rect) in &layout.rows {
+            match lifted {
+                // The dragged row leaves an empty slot where it would drop.
+                Some(_) if index == self.selected => {
+                    canvas.stroke(rect, row_radius, hairline, palette.track_outline);
+                },
+                _ => row(canvas, index, rect),
+            }
         }
-        if self.hovered == Some(Target::NewProfile) {
-            canvas.fill(layout.new_profile, f64::from(px(9.)), palette.hover);
+        if let Some(rect) = lifted {
+            let shadow = Rect::new(rect.left, rect.top + px(2.), rect.right, rect.bottom + px(3.));
+            canvas.fill(shadow, row_radius, palette.track.mix(Color::BLACK, 0.18));
+            row(canvas, self.selected, rect);
         }
-        let plus = Rect::new(
-            layout.new_profile.left,
-            layout.new_profile.top,
-            layout.new_profile.left + px(38.),
-            layout.new_profile.bottom,
-        );
-        icon(canvas, plus, Icon::Plus, palette.foreground, self.scale);
+        for (target, rect, glyph) in [
+            (Target::NewProfile, layout.new_profile, Icon::Plus),
+            (Target::Duplicate, layout.duplicate, Icon::Copy),
+        ] {
+            if self.hovered == Some(target) {
+                canvas.fill(rect, row_radius, palette.hover);
+            }
+            let mark = Rect::new(rect.left, rect.top, rect.left + px(38.), rect.bottom);
+            icon(canvas, mark, glyph, palette.foreground, self.scale);
+        }
 
         // Profile details, on the same panel as the terminal.
         let radius = f64::from(px(10.));
@@ -1085,7 +1269,8 @@ impl Handler for Settings {
                 layout.sidebar.top + px(32.),
             );
             text(small, palette.muted, "PROFILES", section, DT_VCENTER);
-            for &(index, rect) in &layout.rows {
+            let lifted = self.lifted(&layout);
+            let row = |index: usize, rect: Rect| {
                 let entry = &self.entries[index];
                 let badge = row_icon_rect(rect, self.scale);
                 if let Some(handle) = self.row_icon(entry, badge.width()) {
@@ -1109,14 +1294,26 @@ impl Handler for Settings {
                 let name = if entry.name().is_empty() { "Untitled" } else { entry.name() };
                 let label = Rect::new(badge.right + px(10.), rect.top, right, rect.bottom);
                 text(if selected { strong } else { regular }, color, name, label, DT_VCENTER);
+            };
+            // The dragged row floats above the others, so their text stays beneath it.
+            if let Some(rect) = lifted {
+                ExcludeClipRect(dc, rect.left, rect.top, rect.right, rect.bottom);
             }
-            let new_label = Rect::new(
-                layout.new_profile.left + px(38.),
-                layout.new_profile.top,
-                layout.new_profile.right,
-                layout.new_profile.bottom,
-            );
-            text(regular, palette.foreground, "New profile", new_label, DT_VCENTER);
+            for &(index, rect) in &layout.rows {
+                if lifted.is_none() || index != self.selected {
+                    row(index, rect);
+                }
+            }
+            if let Some(rect) = lifted {
+                SelectClipRgn(dc, std::ptr::null_mut());
+                row(self.selected, rect);
+            }
+            for (rect, label) in
+                [(layout.new_profile, "New profile"), (layout.duplicate, "Duplicate")]
+            {
+                let label_rect = Rect::new(rect.left + px(38.), rect.top, rect.right, rect.bottom);
+                text(regular, palette.foreground, label, label_rect, DT_VCENTER);
+            }
 
             // Details.
             if let Some(handle) = self.row_icon(self.entry(), px(32.)) {
@@ -1239,6 +1436,24 @@ impl Drop for Settings {
     }
 }
 
+/// Where the item at `index` ends up when the item at `from` moves to `to`.
+fn moved_index(index: usize, from: usize, to: usize) -> usize {
+    if index == from {
+        to
+    } else if from < index && index <= to {
+        index - 1
+    } else if to <= index && index < from {
+        index + 1
+    } else {
+        index
+    }
+}
+
+/// Where the item at `index` ends up when an item is inserted at `at`.
+fn inserted_index(index: usize, at: usize) -> usize {
+    if index >= at { index + 1 } else { index }
+}
+
 fn row_icon_rect(row: Rect, scale: f64) -> Rect {
     let size = (18. * scale).round() as i32;
     let left = row.left + (10. * scale).round() as i32;
@@ -1334,5 +1549,139 @@ unsafe extern "system" fn edit_procedure(
             _ => (),
         }
         CallWindowProcW(previous, hwnd, message, wparam, lparam)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Move `from` to `to` in a list and track `default`, as a row drag does step by step.
+    fn reorder(
+        list: &mut Vec<&str>,
+        default: Option<usize>,
+        from: usize,
+        to: usize,
+    ) -> Option<usize> {
+        let item = list.remove(from);
+        list.insert(to, item);
+        default.map(|default| moved_index(default, from, to))
+    }
+
+    #[test]
+    fn reordering_keeps_the_default_profile() {
+        let names = ["a", "b", "c", "d"];
+        for from in 0..names.len() {
+            for to in 0..names.len() {
+                for default in 0..names.len() {
+                    let mut list = names.to_vec();
+                    let moved = reorder(&mut list, Some(default), from, to).unwrap();
+                    assert_eq!(list[moved], names[default], "{from} -> {to}, default {default}");
+                }
+            }
+        }
+        let mut list = names.to_vec();
+        assert_eq!(reorder(&mut list, None, 0, 3), None);
+
+        // A drag moves one slot at a time; the steps compose.
+        let mut list = names.to_vec();
+        let mut default = Some(1);
+        for (from, to) in [(3, 2), (2, 1), (1, 0)] {
+            default = reorder(&mut list, default, from, to);
+        }
+        assert_eq!(list, ["d", "a", "b", "c"]);
+        assert_eq!(default.map(|index| list[index]), Some("b"));
+    }
+
+    #[test]
+    fn duplicates_shift_the_profiles_after_them() {
+        for (default, expected) in [(0, 0), (1, 1), (2, 3)] {
+            assert_eq!(inserted_index(default, 2), expected);
+        }
+        let mut list = vec!["a", "b", "c"];
+        list.insert(2, "b (copy)");
+        assert_eq!(list[inserted_index(2, 2)], "c");
+    }
+
+    #[test]
+    fn duplicating_an_entry_copies_everything_but_the_name() {
+        let profile = Profile {
+            name: "PowerShell".into(),
+            command: "pwsh.exe -NoLogo".into(),
+            directory: "~".into(),
+            icon: r"C:\logo.png".into(),
+            env: [("FOO".to_owned(), "bar".to_owned())].into(),
+            options: vec!["font.size=14".into()],
+            hidden: true,
+        };
+        let entry = Entry::new(&profile, None);
+        let mut copy = entry.clone();
+        copy.text[Field::Name.index()] =
+            profiles::copy_name(copy.name(), |name| name == entry.name());
+        assert_eq!(copy.draft(), Profile { name: "PowerShell (copy)".into(), ..profile });
+    }
+
+    #[test]
+    #[ignore = "writes ../work/settings-preview.bmp"]
+    fn render_settings_preview() {
+        let scale: f64 = 1.25;
+        let profiles = Profiles::discover();
+        let shared = Rc::new(Shared {
+            profiles: RefCell::new(profiles.clone()),
+            icons: profiles::Icons::default(),
+            shell: None,
+            settings: std::cell::Cell::new(std::ptr::null_mut()),
+        });
+        let palette = Palette::new(&crate::config::color::Colors::default());
+        let (width, height) = ((WIDTH * scale).round() as i32, (HEIGHT * scale).round() as i32);
+        let mut settings = Settings {
+            shared: shared.clone(),
+            palette,
+            scale,
+            width,
+            height,
+            entries: profiles.list.iter().map(|profile| Entry::new(profile, None)).collect(),
+            default: Some(0),
+            selected: 1,
+            scroll: 0,
+            edits: [std::ptr::null_mut(); 6],
+            focused: None,
+            edit_font: std::ptr::null_mut(),
+            name_font: std::ptr::null_mut(),
+            field_brush: std::ptr::null_mut(),
+            hovered: Some(Target::Duplicate),
+            pressed: None,
+            drag: None,
+            tracking: false,
+            dirty: true,
+            confirm_close: false,
+            status: None,
+            pending: None,
+        };
+        // Lift the second row past the middle of the third, which makes room above it.
+        let (_, rect) = settings.layout().rows[1];
+        let y = rect.top + rect.height() / 2;
+        settings.drag = Some(RowDrag {
+            index: 1,
+            grab: y - rect.top,
+            start: y,
+            y,
+            moving: false,
+            scrolling: false,
+        });
+        settings.drag_to(std::ptr::null_mut(), y + settings.px(20.));
+        assert!(settings.drag.is_some_and(|drag| drag.moving && drag.index == 2));
+        assert_eq!((settings.selected, settings.default), (2, Some(0)));
+        let mut bmp = Vec::new();
+        unsafe {
+            super::super::paint::render(
+                Rect::new(0, 0, width, height),
+                |canvas| settings.shapes(canvas),
+                |dc| settings.gdi(dc),
+                |_, pixels| bmp = super::super::paint::bitmap_file(width, height, pixels),
+            );
+        }
+        let output = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../work");
+        std::fs::write(output.join("settings-preview.bmp"), bmp).unwrap();
     }
 }

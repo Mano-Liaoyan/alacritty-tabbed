@@ -359,6 +359,8 @@ pub(super) enum Icon {
     Restore,
     Previous,
     Next,
+    /// Two overlapping squares, as in the restore button.
+    Copy,
 }
 
 /// Stroke icons stay centered at fractional DPI and do not depend on font glyph coverage.
@@ -393,7 +395,7 @@ pub(super) fn icon(canvas: &mut Canvas<'_>, rect: Rect, icon: Icon, color: Color
                 Rect::new(x.floor() as i32, y.floor() as i32, x2.ceil() as i32, y2.ceil() as i32);
             canvas.stroke(rect, 2. * scale, width, color);
         },
-        Icon::Restore => {
+        Icon::Restore | Icon::Copy => {
             line((-3., -5.), (5., -5.));
             line((5., -5.), (5., 3.));
             let (x, y) = at(-5., -3.);

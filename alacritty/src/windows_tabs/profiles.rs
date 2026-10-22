@@ -41,7 +41,7 @@ pub(super) struct Profile {
     /// Full command line; empty uses the shell configured in `alacritty.toml`.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub(super) command: String,
-    /// Starting directory; empty inherits Alacritty's working directory.
+    /// Starting directory; empty starts in the user's home directory.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub(super) directory: String,
     /// Custom icon file; empty uses the program's own icon.
@@ -135,18 +135,44 @@ impl Profiles {
 
 impl Profile {
     /// Start a terminal with this profile's command, directory, environment, and options.
+    ///
+    /// Like Windows Terminal, a profile without a starting directory starts in the user's home
+    /// directory rather than Alacritty's working directory, unless one was requested explicitly.
     pub(super) fn apply(&self, options: &mut WindowOptions) {
         if let Some(command) = split_program(&self.command) {
             options.terminal_options.set_command(command);
         }
         let directory = self.directory.trim();
+        let working_directory = &mut options.terminal_options.working_directory;
         if !directory.is_empty() {
-            options.terminal_options.working_directory = Some(expand(directory).into());
+            *working_directory = Some(expand(directory).into());
+        } else if working_directory.is_none() {
+            *working_directory = dirs::home_dir();
         }
         options.terminal_options.env.extend(self.env.clone());
         options
             .add_options(self.options.iter().filter(|option| !option.trim().is_empty()).cloned());
     }
+}
+
+/// A name for a copy of the profile `name` that `taken` accepts, such as "PowerShell (copy)".
+///
+/// Copying a copy numbers it instead of stacking suffixes: "PowerShell (copy 2)".
+pub(super) fn copy_name(name: &str, taken: impl Fn(&str) -> bool) -> String {
+    let name = name.trim();
+    let base = name
+        .strip_suffix(')')
+        .and_then(|rest| rest.rsplit_once(" (copy"))
+        .filter(|(_, number)| number.is_empty() || number.trim_start().parse::<u32>().is_ok())
+        .map_or(name, |(base, _)| base);
+    let base = if base.is_empty() { "Untitled" } else { base };
+    let mut candidate = format!("{base} (copy)");
+    let mut number = 2;
+    while taken(&candidate) {
+        candidate = format!("{base} (copy {number})");
+        number += 1;
+    }
+    candidate
 }
 
 fn program_files() -> String {
@@ -563,6 +589,36 @@ mod tests {
         let mut config = crate::config::UiConfig::default();
         options.config_overrides().override_config(&mut config);
         assert_eq!(config.font.size().as_pt(), 14.);
+    }
+
+    #[test]
+    fn profiles_without_a_directory_start_at_home() {
+        let home = std::env::var("USERPROFILE").unwrap();
+        let profile = Profile { name: "Test".into(), directory: "  ".into(), ..Profile::default() };
+        let mut options = WindowOptions::default();
+        profile.apply(&mut options);
+        assert_eq!(options.terminal_options.working_directory.as_deref(), Some(Path::new(&home)));
+
+        // An explicitly requested directory is kept.
+        let mut options = WindowOptions::default();
+        options.terminal_options.working_directory = Some(r"C:\Windows".into());
+        profile.apply(&mut options);
+        assert_eq!(
+            options.terminal_options.working_directory.as_deref(),
+            Some(Path::new(r"C:\Windows"))
+        );
+    }
+
+    #[test]
+    fn copies_get_unique_names() {
+        let names = ["PowerShell", "PowerShell (copy)", "PowerShell (copy 2)", "cmd (copy)"];
+        let taken = |name: &str| names.contains(&name);
+        assert_eq!(copy_name("Bash", taken), "Bash (copy)");
+        assert_eq!(copy_name("PowerShell", taken), "PowerShell (copy 3)");
+        assert_eq!(copy_name("PowerShell (copy 2)", taken), "PowerShell (copy 3)");
+        assert_eq!(copy_name("cmd (copy)", taken), "cmd (copy 2)");
+        assert_eq!(copy_name("Odd (copyright)", taken), "Odd (copyright) (copy)");
+        assert_eq!(copy_name("", taken), "Untitled (copy)");
     }
 
     #[test]
