@@ -176,6 +176,7 @@ impl WindowContext {
     ) -> Result<Self, Box<dyn Error>> {
         let mut pty_config = config.pty_config();
         options.terminal_options.override_pty_config(&mut pty_config);
+        tabs::launch(&config, &options, &mut pty_config, &display.tabs);
 
         let preserve_title = options.window_identity.title.is_some();
 

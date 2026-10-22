@@ -266,7 +266,8 @@ impl ApplicationHandler<Event> for Processor {
             None => return,
         };
 
-        let event = tabs::window_event(window_context, event, &self.config, &self.proxy);
+        let (config, proxy, clipboard) = (&self.config, &self.proxy, &mut self.clipboard);
+        let event = tabs::window_event(window_context, event, config, proxy, clipboard);
         let Some(event) = event else { return };
 
         let is_redraw = matches!(event, WindowEvent::RedrawRequested);

@@ -102,3 +102,22 @@ wayland = [
     "winit/wayland-csd-adwaita-crossfont",
 ]
 nightly = []
+
+# --- Alacritty Tabbed: fork-only dependencies ---------------------------------------------------
+# Kept apart from upstream's tables, so syncing with upstream does not conflict. Both are upstream's
+# own dependencies, enabled on every platform (`png`) or with more features (`windows-sys`), so
+# Cargo.lock gains no packages.
+
+[target.'cfg(all())'.dependencies]
+png = { version = "0.17.5", default-features = false }
+
+[target.'cfg(all(windows))'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Graphics_Gdi",
+    "Win32_Storage_Packaging_Appx",
+    "Win32_System_Com",
+    "Win32_System_Registry",
+    "Win32_UI_Controls_Dialogs",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
+]}

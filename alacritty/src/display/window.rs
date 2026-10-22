@@ -146,6 +146,7 @@ impl Window {
             #[cfg(target_os = "macos")]
             &options.window_tabbing_id.take(),
         );
+        window_attributes = crate::window_context::tabs::attributes(window_attributes, config);
 
         if let Some(position) = config.window.position {
             window_attributes = window_attributes
@@ -215,6 +216,11 @@ impl Window {
             is_x11,
             ime_inhibitor: Default::default(),
         })
+    }
+
+    /// The underlying window, for the tabs' caption.
+    pub fn winit(&self) -> &WinitWindow {
+        &self.window
     }
 
     #[inline]

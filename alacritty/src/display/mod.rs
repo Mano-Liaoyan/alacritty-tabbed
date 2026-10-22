@@ -1146,7 +1146,7 @@ impl Display {
             Some(preedit) => preedit,
             None => {
                 // In case we don't have preedit, just set the popup point.
-                self.window.update_ime_position(point, &self.size_info);
+                self.window.update_ime_position(point, &self.tabs.ime(&self.size_info));
                 return;
             },
         };
@@ -1220,7 +1220,7 @@ impl Display {
             _ => end,
         };
 
-        self.window.update_ime_position(ime_popup_point, &self.size_info);
+        self.window.update_ime_position(ime_popup_point, &self.tabs.ime(&self.size_info));
     }
 
     /// Format search regex to account for the cursor and fullwidth characters.
