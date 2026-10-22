@@ -1,31 +1,99 @@
-# Alacrity Tabbed — Windows project
+# Alacritty with Windows tabs
 
-Local Windows tabs fork of Alacritty v0.17.0. Project root: `C:\dev\alacrity-tabbed`.
+This is a soft fork of [Alacritty](https://github.com/alacritty/alacritty) that
+adds native tabs, shell profiles, and a settings panel on Windows. It tracks
+upstream: the `main` branch is an upstream release (currently v0.17.0) plus the
+Windows tabs work, and `master` mirrors upstream for syncing. It is not an
+official Alacritty release. Upstream's README follows the fork notes below.
 
-Tabs now share a Rex-inspired window header with the window controls, using
-Alacritty's existing winit and Windows bindings without adding dependencies.
+Each tab is a full Alacritty terminal, with its own OpenGL surface, PTY, and
+terminal state, hosted in one top-level window. No new crates or UI framework
+are added: the header, dropdown, and settings panel are plain Win32 drawn with
+the existing `windows-sys` bindings. Other platforms are unchanged.
 
-- Source and Git history live at the project root.
-- `dist/alacritty.exe` and `dist/alacritty.toml` are the installed app and personal configuration.
-- `scripts/Build-WindowsTabs.ps1` builds using the bundled `.tools/rust` compiler, or system Cargo if available.
-- `scripts/Test-WindowsTabs.ps1` runs the interactive Windows smoke checks; its temporary files go in `work/`.
-- `WINDOWS_TABS.md` describes tab controls, implementation, and known limits.
-- `.tools/`, `target/`, `dist/`, `work/`, and `.migration-backup/` are local ignored directories.
-- `.migration-backup/original-repository` retains the complete original checkout; `work/initial-session` retains the original build/test logs and scripts.
+## Features
 
-```powershell
-.\scripts\Build-WindowsTabs.ps1
-# Optional validation:
-.\scripts\Build-WindowsTabs.ps1 -Test -Check
-.\scripts\Test-WindowsTabs.ps1
+**Integrated tab header.** Tabs, the + button, a profile dropdown, settings, and
+the window controls share one row in place of the native caption. Drag tabs
+sideways to reorder them.
+
+![Tab header, dark theme](docs/windows-tabs/header-preview-dark.png)
+
+![Dragging a tab to reorder it](docs/windows-tabs/header-preview-drag.png)
+
+**Profiles with real icons.** The dropdown beside + lists PowerShell 7, Windows
+PowerShell, Command Prompt, Git Bash, and every registered WSL distribution,
+each with the program's or distribution's own icon.
+
+![Profile dropdown](docs/windows-tabs/dropdown-preview.png)
+
+**Settings panel.** The gear opens per-profile settings: name, icon, command
+line, starting directory, environment variables, and Alacritty configuration
+overrides (such as `font.size=14`), plus the default profile and dropdown
+visibility. Duplicate profiles and drag them in the sidebar to reorder them.
+Profiles are saved to `%APPDATA%\alacritty\profiles.toml`.
+
+![Settings panel while reordering profiles](docs/windows-tabs/settings-preview.png)
+
+**Fullscreen keeps the tabs.** F11 or Alt+Enter goes fullscreen with the header
+still visible and the terminal edge to edge below it.
+
+![Fullscreen header](docs/windows-tabs/header-preview-fullscreen.png)
+
+**Light and dark themes.** Header colors come from your configured color
+scheme. Narrow windows get overflow arrows.
+
+![Tab header, light theme](docs/windows-tabs/header-preview-light.png)
+
+![Narrow window with overflowing tabs](docs/windows-tabs/header-preview-narrow.png)
+
+## Enable
+
+```toml
+[window]
+tabs = true
 ```
 
-The desktop shortcut launches `dist/alacritty.exe` as administrator, maximized,
-with 16-point Maple Mono, PowerShell 7/Starship, and `C:\dev` as its starting folder.
-To deploy a future build, close the tabbed app and copy `target/release/alacritty.exe`
-over `dist/alacritty.exe`. Keep `dist/alacritty.toml` in place.
+`window.tabs` is Windows-only, defaults to `false`, and needs a restart to
+change.
 
-This is an independent local fork, not an official upstream Alacritty release.
+| Keys | Action |
+| --- | --- |
+| Ctrl+Shift+T | New tab with the default profile |
+| Ctrl+Shift+U | New tab with the default WSL distribution |
+| Ctrl+Tab / Ctrl+Shift+Tab | Next / previous tab |
+| Ctrl+1 to Ctrl+8, Ctrl+9 | Select a tab, or the last tab |
+| Ctrl+Shift+W, middle click | Close a tab |
+| F11, Alt+Enter | Toggle fullscreen |
+
+Bindings can be changed with `keyboard.bindings`. See
+[WINDOWS_TABS.md](WINDOWS_TABS.md) for all controls, profile settings, the
+implementation, and known limits.
+
+## Build
+
+Building needs Rust 1.85+ with the MSVC toolchain and the Visual Studio C++ build
+tools.
+
+```powershell
+cargo build --release --locked --no-default-features -p alacritty
+```
+
+The executable is `target/release/alacritty.exe`. `scripts/Build-WindowsTabs.ps1`
+wraps the build, and `scripts/Test-WindowsTabs.ps1` runs interactive smoke
+checks.
+
+## Syncing with upstream
+
+```sh
+git remote add upstream https://github.com/alacritty/alacritty.git  # once
+git fetch upstream --tags
+git checkout main
+git merge upstream/master   # or a release tag, e.g. v0.18.0
+```
+
+The fork's changes stay out of upstream files where they can, and this section
+sits above upstream's README, so merges should conflict rarely.
 
 ---
 
