@@ -165,6 +165,12 @@ impl WindowContext {
         Ok(window_context)
     }
 
+    /// Remember config overrides that were applied to the initial window's config.
+    #[cfg(windows)]
+    pub fn set_window_config(&mut self, config_overrides: ParsedOptions) {
+        self.window_config = config_overrides;
+    }
+
     /// Create a new terminal window context.
     fn new(
         display: Display,

@@ -99,6 +99,8 @@ pub trait ActionContext<T: EventListener> {
     fn terminal(&self) -> &Term<T>;
     fn terminal_mut(&mut self) -> &mut Term<T>;
     fn spawn_new_instance(&mut self) {}
+    #[cfg(windows)]
+    fn tab_action(&mut self, _action: crate::windows_tabs::TabAction) {}
     #[cfg(target_os = "macos")]
     fn create_new_window(&mut self, _tabbing_id: Option<String>) {}
     #[cfg(not(target_os = "macos"))]
@@ -332,6 +334,18 @@ impl<T: EventListener> Execute<T> for Action {
                 let text = ctx.clipboard_mut().load(ClipboardType::Selection);
                 ctx.paste(&text, true);
             },
+            #[cfg(windows)]
+            Action::ToggleFullscreen if ctx.window().tab_parent().is_some() => {
+                ctx.tab_action(crate::windows_tabs::TabAction::ToggleFullscreen)
+            },
+            #[cfg(windows)]
+            Action::ToggleMaximized if ctx.window().tab_parent().is_some() => {
+                ctx.tab_action(crate::windows_tabs::TabAction::ToggleMaximized)
+            },
+            #[cfg(windows)]
+            Action::Minimize if ctx.window().tab_parent().is_some() => {
+                ctx.tab_action(crate::windows_tabs::TabAction::Minimize)
+            },
             Action::ToggleFullscreen => ctx.window().toggle_fullscreen(),
             Action::ToggleMaximized => ctx.window().toggle_maximized(),
             #[cfg(target_os = "macos")]
@@ -406,6 +420,38 @@ impl<T: EventListener> Execute<T> for Action {
             #[cfg(not(target_os = "macos"))]
             Action::CreateNewWindow => ctx.create_new_window(),
             Action::SpawnNewInstance => ctx.spawn_new_instance(),
+            #[cfg(windows)]
+            Action::CreateNewTab => {
+                ctx.tab_action(crate::windows_tabs::TabAction::New { wsl: false })
+            },
+            #[cfg(windows)]
+            Action::CreateNewWslTab => {
+                ctx.tab_action(crate::windows_tabs::TabAction::New { wsl: true })
+            },
+            #[cfg(windows)]
+            Action::SelectNextTab => ctx.tab_action(crate::windows_tabs::TabAction::Next),
+            #[cfg(windows)]
+            Action::SelectPreviousTab => ctx.tab_action(crate::windows_tabs::TabAction::Previous),
+            #[cfg(windows)]
+            Action::SelectLastTab => ctx.tab_action(crate::windows_tabs::TabAction::Last),
+            #[cfg(windows)]
+            Action::SelectTab1 => ctx.tab_action(crate::windows_tabs::TabAction::Index(0)),
+            #[cfg(windows)]
+            Action::SelectTab2 => ctx.tab_action(crate::windows_tabs::TabAction::Index(1)),
+            #[cfg(windows)]
+            Action::SelectTab3 => ctx.tab_action(crate::windows_tabs::TabAction::Index(2)),
+            #[cfg(windows)]
+            Action::SelectTab4 => ctx.tab_action(crate::windows_tabs::TabAction::Index(3)),
+            #[cfg(windows)]
+            Action::SelectTab5 => ctx.tab_action(crate::windows_tabs::TabAction::Index(4)),
+            #[cfg(windows)]
+            Action::SelectTab6 => ctx.tab_action(crate::windows_tabs::TabAction::Index(5)),
+            #[cfg(windows)]
+            Action::SelectTab7 => ctx.tab_action(crate::windows_tabs::TabAction::Index(6)),
+            #[cfg(windows)]
+            Action::SelectTab8 => ctx.tab_action(crate::windows_tabs::TabAction::Index(7)),
+            #[cfg(windows)]
+            Action::SelectTab9 => ctx.tab_action(crate::windows_tabs::TabAction::Index(8)),
             #[cfg(target_os = "macos")]
             Action::CreateNewWindow => ctx.create_new_window(None),
             #[cfg(target_os = "macos")]

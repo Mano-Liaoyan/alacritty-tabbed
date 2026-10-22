@@ -92,6 +92,8 @@ pub struct Processor {
     initial_window_options: Option<WindowOptions>,
     initial_window_error: Option<Box<dyn Error>>,
     windows: HashMap<WindowId, WindowContext, RandomState>,
+    #[cfg(windows)]
+    tabs: crate::windows_tabs::TabManager,
     proxy: EventLoopProxy<Event>,
     gl_config: Option<GlutinConfig>,
     #[cfg(unix)]
@@ -138,6 +140,8 @@ impl Processor {
             config: Rc::new(config),
             clipboard,
             windows: Default::default(),
+            #[cfg(windows)]
+            tabs: Default::default(),
             #[cfg(unix)]
             global_ipc_options: Default::default(),
             config_monitor,
@@ -151,16 +155,37 @@ impl Processor {
     pub fn create_initial_window(
         &mut self,
         event_loop: &ActiveEventLoop,
-        window_options: WindowOptions,
+        #[allow(unused_mut)] mut window_options: WindowOptions,
     ) -> Result<(), Box<dyn Error>> {
-        let window_context = WindowContext::initial(
-            event_loop,
-            self.proxy.clone(),
-            self.config.clone(),
-            window_options,
-        )?;
+        // The first tab starts with the default profile, including its config overrides.
+        #[cfg(windows)]
+        self.tabs.launch(&self.config, &mut window_options);
+        #[cfg(windows)]
+        let mut config_overrides = window_options.config_overrides();
+        #[cfg(windows)]
+        let config = config_overrides.override_config_rc(self.config.clone());
+        #[cfg(not(windows))]
+        let config = self.config.clone();
+
+        #[cfg(windows)]
+        self.tabs.prepare(event_loop, &config, &mut window_options)?;
+
+        let result = WindowContext::initial(event_loop, self.proxy.clone(), config, window_options);
+        #[allow(unused_mut)]
+        let mut window_context = match result {
+            Ok(context) => context,
+            Err(error) => {
+                #[cfg(windows)]
+                self.tabs.discard_empty();
+                return Err(error);
+            },
+        };
 
         self.gl_config = Some(window_context.display.gl_context().config());
+        #[cfg(windows)]
+        window_context.set_window_config(config_overrides);
+        #[cfg(windows)]
+        self.tabs.attach(&window_context.display.window);
         self.windows.insert(window_context.id(), window_context);
 
         Ok(())
@@ -170,9 +195,12 @@ impl Processor {
     pub fn create_window(
         &mut self,
         event_loop: &ActiveEventLoop,
-        options: WindowOptions,
+        #[allow(unused_mut)] mut options: WindowOptions,
     ) -> Result<(), Box<dyn Error>> {
         let gl_config = self.gl_config.as_ref().unwrap();
+
+        #[cfg(windows)]
+        self.tabs.launch(&self.config, &mut options);
 
         // Override config with CLI/IPC options.
         let mut config_overrides = options.config_overrides();
@@ -181,17 +209,56 @@ impl Processor {
         let mut config = self.config.clone();
         config = config_overrides.override_config_rc(config);
 
-        let window_context = WindowContext::additional(
+        #[cfg(windows)]
+        self.tabs.prepare(event_loop, &config, &mut options)?;
+
+        let result = WindowContext::additional(
             gl_config,
             event_loop,
             self.proxy.clone(),
             config,
             options,
             config_overrides,
-        )?;
+        );
+        let window_context = match result {
+            Ok(context) => context,
+            Err(error) => {
+                #[cfg(windows)]
+                self.tabs.discard_empty();
+                return Err(error);
+            },
+        };
 
+        #[cfg(windows)]
+        self.tabs.attach(&window_context.display.window);
         self.windows.insert(window_context.id(), window_context);
         Ok(())
+    }
+
+    #[cfg(windows)]
+    fn dispatch_tab_request(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        request: crate::windows_tabs::Request,
+    ) {
+        use crate::windows_tabs::Request;
+        match request {
+            Request::None => (),
+            Request::New { parent, profile, command } => {
+                let mut options = WindowOptions::default();
+                options.tab_parent = Some(parent);
+                options.tab_profile = profile;
+                if let Some(command) = command {
+                    options.terminal_options.set_command(command);
+                }
+                let _ = self.proxy.send_event(Event::new(EventType::CreateWindow(options), None));
+            },
+            Request::Close(ids) => {
+                for id in ids {
+                    self.window_event(event_loop, id, WindowEvent::CloseRequested);
+                }
+            },
+        }
     }
 
     /// Run the event loop.
@@ -256,6 +323,13 @@ impl ApplicationHandler<Event> for Processor {
             info!(target: LOG_TARGET_WINIT, "{event:?}");
         }
 
+        #[cfg(windows)]
+        if self.tabs.is_host(window_id) {
+            let request = self.tabs.event(window_id, event);
+            self.dispatch_tab_request(_event_loop, request);
+            return;
+        }
+
         // Ignore all events we do not care about.
         if Self::skip_window_event(&event) {
             return;
@@ -289,6 +363,11 @@ impl ApplicationHandler<Event> for Processor {
 
         // Handle events which don't mandate the WindowId.
         match (event.payload, event.window_id.as_ref()) {
+            #[cfg(windows)]
+            (EventType::TabAction(action), Some(window_id)) => {
+                let request = self.tabs.action(*window_id, action);
+                self.dispatch_tab_request(event_loop, request);
+            },
             // Process IPC config update.
             #[cfg(unix)]
             (EventType::IpcConfig(ipc_config), window_id) => {
@@ -438,6 +517,13 @@ impl ApplicationHandler<Event> for Processor {
 
                     event_loop.exit();
                 }
+
+                // Destroy the child GL surface before its native parent.
+                #[cfg(windows)]
+                {
+                    drop(window_context);
+                    self.tabs.remove(*window_id);
+                }
             },
             // NOTE: This event bypasses batching to minimize input latency.
             (EventType::Frame, Some(window_id)) => {
@@ -478,6 +564,8 @@ impl ApplicationHandler<Event> for Processor {
                 &mut self.scheduler,
                 WinitEvent::AboutToWait,
             );
+            #[cfg(windows)]
+            self.tabs.update_title(window_context.id(), window_context.display.window.title());
         }
 
         // Update the scheduler after event processing to ensure
@@ -546,6 +634,8 @@ pub enum EventType {
     Message(Message),
     Scroll(Scroll),
     CreateWindow(WindowOptions),
+    #[cfg(windows)]
+    TabAction(crate::windows_tabs::TabAction),
     #[cfg(unix)]
     IpcConfig(IpcConfig),
     #[cfg(unix)]
@@ -900,6 +990,13 @@ impl<'a, N: Notify + 'a, T: EventListener> input::ActionContext<T> for ActionCon
         let _ = self
             .event_proxy
             .send_event(Event::new(EventType::CreateWindow(WindowOptions::default()), None));
+    }
+
+    #[cfg(windows)]
+    fn tab_action(&mut self, action: crate::windows_tabs::TabAction) {
+        let _ = self
+            .event_proxy
+            .send_event(Event::new(EventType::TabAction(action), self.display.window.id()));
     }
 
     fn spawn_daemon<I, S>(&self, program: &str, args: I)
@@ -1930,6 +2027,8 @@ impl input::Processor<EventProxy, ActionContext<'_, Notifier, EventProxy>> {
                 },
                 #[cfg(unix)]
                 EventType::IpcConfig(_) | EventType::IpcGetConfig(..) | EventType::Shutdown => (),
+                #[cfg(windows)]
+                EventType::TabAction(_) => (),
                 EventType::Message(_)
                 | EventType::ConfigReload(_)
                 | EventType::CreateWindow(_)

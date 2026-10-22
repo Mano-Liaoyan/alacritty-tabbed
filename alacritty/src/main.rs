@@ -47,6 +47,8 @@ mod renderer;
 mod scheduler;
 mod string;
 mod window_context;
+#[cfg(windows)]
+mod windows_tabs;
 
 mod gl {
     #![allow(clippy::all, unsafe_op_in_unsafe_fn)]
