@@ -726,10 +726,8 @@ fn click(
         (Hit::Previous, MouseButton::Left) => run(ctx, Command::Previous, config, proxy),
         (Hit::Next, MouseButton::Left) => run(ctx, Command::Next, config, proxy),
         (Hit::Minimize, MouseButton::Left) => ctx.display.window.set_minimized(true),
-        // macOS's green light, like a restore button in fullscreen, toggles fullscreen.
-        (Hit::Maximize, MouseButton::Left)
-            if cfg!(target_os = "macos") || ctx.display.tabs.frame == Frame::Fullscreen =>
-        {
+        // The restore button leaves fullscreen.
+        (Hit::Maximize, MouseButton::Left) if ctx.display.tabs.frame == Frame::Fullscreen => {
             ctx.display.window.toggle_fullscreen()
         },
         (Hit::Maximize, MouseButton::Left) => ctx.display.window.toggle_maximized(),

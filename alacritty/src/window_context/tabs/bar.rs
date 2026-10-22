@@ -29,7 +29,7 @@ pub const INSET: f32 = 4.;
 /// Last entry of the new-tab menu.
 const EDIT_PROFILES: &str = "Edit profiles…";
 
-/// macOS puts its window controls, red, yellow and green lights, at the left.
+/// macOS keeps its own red, yellow and green window buttons at the left.
 const MAC: bool = cfg!(target_os = "macos");
 
 /// What the pointer is over.
@@ -132,16 +132,12 @@ impl Layout {
         buttons.push((Hit::New, button(x, control)));
         buttons.push((Hit::Menu, button(x + control, chevron)));
         buttons.push((Hit::Settings, button(settings, control)));
-        for (index, hit) in [Hit::CloseWindow, Hit::Minimize, Hit::Maximize].into_iter().enumerate()
-        {
-            let rect = if mac {
-                // Lights are 12 pixels wide, with room around them for the pointer.
-                Rect::new(px(10. + 20. * index as f32), (bar - px(16.)) / 2., px(16.), px(16.))
-            } else {
-                // Close is rightmost.
-                button(controls + ((index + 2) % 3) as f32 * caption, caption)
-            };
-            buttons.push((hit, rect));
+        if !mac {
+            for (index, hit) in
+                [Hit::Minimize, Hit::Maximize, Hit::CloseWindow].into_iter().enumerate()
+            {
+                buttons.push((hit, button(controls + index as f32 * caption, caption)));
+            }
         }
 
         let left = border.max(px(6.)) + lights;
@@ -522,7 +518,7 @@ impl Tabs {
                 window_icon(layer, px(5.), color);
             },
             // Round buttons, like GNOME's and KDE's.
-            _ if control && !MAC => {
+            _ if control => {
                 let danger = hovered && hit == Hit::CloseWindow;
                 let background = match (danger, hovered) {
                     (true, _) => palette.danger,
@@ -531,24 +527,6 @@ impl Tabs {
                 };
                 layer.circle(center, px(12.), background);
                 window_icon(layer, px(4.), if danger { WHITE } else { palette.foreground });
-            },
-            _ if control => {
-                let color = match hit {
-                    Hit::CloseWindow => Rgb::new(255, 95, 87),
-                    Hit::Minimize => Rgb::new(254, 188, 46),
-                    _ => Rgb::new(40, 200, 64),
-                };
-                layer.circle(center, px(6.), mix(color, BLACK, 0.15));
-                layer.circle(center, px(6.) - width / 2., color);
-                // Symbols show while the pointer is over any of the lights.
-                if matches!(self.hover, Hit::Minimize | Hit::Maximize | Hit::CloseWindow) {
-                    let lines: &[[f32; 4]] = match hit {
-                        Hit::CloseWindow => &[[-1., -1., 1., 1.], [-1., 1., 1., -1.]],
-                        Hit::Minimize => &[[-1., 0., 1., 0.]],
-                        _ => &[[-1., 1., 0.3, -0.3], [1., -1., -0.3, 0.3]],
-                    };
-                    layer.icon(center, px(3.), width, lines, mix(color, BLACK, 0.6));
-                }
             },
             _ => {
                 if hovered {
