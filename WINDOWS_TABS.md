@@ -15,7 +15,9 @@ Alacritty's application icon with the computer name, a rounded track holding the
 tabs with a raised active tab showing each profile's icon, a + button with a
 profile dropdown right after the last tab, and a settings button beside the
 window controls. The terminal sits in a rounded, outlined panel inset from the window
-edge, and Windows 11 rounds the window corners. Shapes are anti-aliased by a
+edge, and Windows 11 rounds the window corners. In fullscreen the header stays,
+without the label beside the logo, and the terminal fills the rest of the screen
+edge to edge, without the panel. Shapes are anti-aliased by a
 small CPU rasterizer into a GDI DIB, and text uses GDI ClearType. It uses
 Alacritty's existing `winit`, `serde`, `toml`, and `windows-sys` dependencies
 (GDI, GDI+, DWM, and common dialogs); no new crate or UI framework is added. Terminal rendering continues to
@@ -47,6 +49,8 @@ The other supported platforms retain their existing window handling.
 | Ctrl+1 through Ctrl+8 | Select a numbered tab |
 | Ctrl+9 | Select the last tab |
 | Ctrl+Shift+W, tab ×, or middle click | Close the selected/clicked tab |
+| F11 or Alt+Enter | Toggle fullscreen; leaving it restores the normal or maximized window |
+| Restore button in fullscreen | Leave fullscreen |
 | Mouse wheel over the tab strip | Switch tabs |
 | ‹ and › buttons (when tabs overflow) | Previous/next tab |
 | Drag empty header space or the Alacritty label | Move the window |
@@ -104,11 +108,11 @@ The executable is `target/release/alacritty.exe`.
 
 ## Validation
 
-The build passes 91 application unit tests and Clippy with warnings treated as
+The build passes 92 application unit tests and Clippy with warnings treated as
 errors. Geometry tests cover selection/overflow, caption
-controls, and resize hit regions at 100%, 125%, 150%, and 200% scaling. An
-explicitly invoked, ignored test renders the production header painter into
-dark, light, narrow, and mid-drag bitmaps (`work/header-preview-*.bmp`), and
+controls, resize hit regions, and the fullscreen layout at 100%, 125%, 150%, and
+200% scaling. An explicitly invoked, ignored test renders the production header
+painter into dark, light, narrow, mid-drag, and fullscreen bitmaps (`work/header-preview-*.bmp`), and
 another renders the dropdown with this machine's profiles
 (`work/dropdown-preview.bmp`), for visual inspection without a desktop:
 
@@ -121,7 +125,8 @@ cargo test --release --locked --no-default-features -p alacritty preview -- --ig
 the environment has no interactive foreground desktop. The integrated-header
 checks cover removal of the separate native caption, tab creation/selection/
 closing, drag-to-reorder, choosing a profile from the dropdown, opening and
-closing settings, minimize/maximize/restore, DPI-scaled header space, terminal
+closing settings, minimize/maximize/restore, F11 fullscreen entered and left
+repeatedly (terminal flush with the screen below the header), DPI-scaled header space, terminal
 resize, and closing the entire host. Keyboard/WSL input, actual mouse dragging, and
 double-click behavior need an interactive desktop for end-to-end validation.
 

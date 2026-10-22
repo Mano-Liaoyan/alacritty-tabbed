@@ -574,6 +574,7 @@ pub fn platform_key_bindings() -> Vec<KeyBinding> {
     let mut bindings = bindings!(
         KeyBinding;
         Enter, ModifiersState::ALT; Action::ToggleFullscreen;
+        F11; Action::ToggleFullscreen;
         "t", ModifiersState::CONTROL | ModifiersState::SHIFT; Action::CreateNewTab;
         "u", ModifiersState::CONTROL | ModifiersState::SHIFT; Action::CreateNewWslTab;
         "w", ModifiersState::CONTROL | ModifiersState::SHIFT; Action::Quit;

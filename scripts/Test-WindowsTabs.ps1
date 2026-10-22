@@ -87,6 +87,12 @@ public static class TabNative {
         foreach(var key in keys){Send(host,new List<Input>{Key(key,0)});System.Threading.Thread.Sleep(30);}
         for(int i=keys.Length-1;i>=0;i--){Send(host,new List<Input>{Key(keys[i],2)});System.Threading.Thread.Sleep(30);}
     }
+    // Posted to one window, so it needs no foreground desktop; modifier state is not faked.
+    public static void PostKey(IntPtr hwnd,ushort key) {
+        var down=(IntPtr)(1|((int)MapVirtualKey(key,0)<<16));
+        PostMessage(hwnd,0x100,(IntPtr)key,down);
+        PostMessage(hwnd,0x101,(IntPtr)key,(IntPtr)((long)down|0xC0000000L));
+    }
     public static void Text(IntPtr host,string text) {
         var inputs=new List<Input>();
         foreach(char c in text){inputs.Add(Key(0,4,c));inputs.Add(Key(0,6,c));}
@@ -140,6 +146,26 @@ function Click-Tab([int]$Index,[switch]$Middle) {
     [TabNative]::Click($script:hostWindow,[int]$x,[int](24*$layout.Scale),$Middle.IsPresent)
 }
 function Click-FirstTab([switch]$Middle) { Click-Tab 0 -Middle:$Middle }
+# Fullscreen: the host has no frame and the terminal fills the client area below the header.
+function Test-Fullscreen {
+    $frame=[TabNative+Rect]::new(); $hostRect=[TabNative+Rect]::new(); $childRect=[TabNative+Rect]::new()
+    $hostOrigin=[TabNative+Point]::new(); $childOrigin=[TabNative+Point]::new()
+    $child=@([TabNative]::Children($script:hostWindow) | Where-Object { [TabNative]::IsWindowVisible($_) })[0]
+    [void][TabNative]::GetWindowRect($script:hostWindow,[ref]$frame)
+    [void][TabNative]::GetClientRect($script:hostWindow,[ref]$hostRect)
+    [void][TabNative]::GetClientRect($child,[ref]$childRect)
+    [void][TabNative]::ClientToScreen($script:hostWindow,[ref]$hostOrigin)
+    [void][TabNative]::ClientToScreen($child,[ref]$childOrigin)
+    $bar=[Math]::Round(48*[TabNative]::GetDpiForWindow($script:hostWindow)/96.0)
+    $hostOrigin.X -eq $frame.Left -and $hostOrigin.Y -eq $frame.Top -and
+        $hostRect.Right -eq ($frame.Right-$frame.Left) -and $hostRect.Bottom -eq ($frame.Bottom-$frame.Top) -and
+        $childOrigin.X -eq $hostOrigin.X -and $childOrigin.Y -eq ($hostOrigin.Y+$bar) -and
+        $childRect.Right -eq $hostRect.Right -and $childRect.Bottom -eq ($hostRect.Bottom-$bar)
+}
+function Send-F11 {
+    $child=@([TabNative]::Children($script:hostWindow) | Where-Object { [TabNative]::IsWindowVisible($_) })[0]
+    [TabNative]::PostKey($child,0x7A)
+}
 function Click-Caption([int]$FromRight) {
     $rect=[TabNative+Rect]::new()
     [void][TabNative]::GetClientRect($script:hostWindow,[ref]$rect)
@@ -217,6 +243,16 @@ try {
     Wait-For { $script:settingsWindow=[TabNative]::Find('AlacrittyTabsSettings'); $script:settingsWindow -ne [IntPtr]::Zero } 'the settings button opens the settings panel'
     [void][TabNative]::PostMessage($script:settingsWindow,0x10,[IntPtr]::Zero,[IntPtr]::Zero)
     Wait-For { [TabNative]::Find('AlacrittyTabsSettings') -eq [IntPtr]::Zero } 'the settings panel closes without changes'
+    # F11 in the focused terminal toggles fullscreen of the whole host, keeping the header.
+    Send-F11
+    Wait-For { Test-Fullscreen } 'F11 makes the terminal fill the host below the header edge to edge'
+    Assert (-not [TabNative]::IsZoomed($script:hostWindow)) 'fullscreen replaces the maximized state'
+    Send-F11
+    Wait-For { [TabNative]::IsZoomed($script:hostWindow) -and -not (Test-Fullscreen) } 'F11 again restores the maximized window'
+    Send-F11
+    Wait-For { Test-Fullscreen } 'fullscreen can be entered repeatedly'
+    Click-Caption 1
+    Wait-For { [TabNative]::IsZoomed($script:hostWindow) -and -not (Test-Fullscreen) } 'the header restore button leaves fullscreen'
     if(-not $SkipKeyboard) {
         [void][TabNative]::SetForegroundWindow($script:hostWindow)
         Wait-For { [TabNative]::GetAncestor([TabNative]::GetForegroundWindow(),2) -eq $script:hostWindow } 'keyboard test is restricted to its own foreground window'
