@@ -20,7 +20,7 @@ pub fn attributes(attributes: WindowAttributes) -> WindowAttributes {
         .with_fullsize_content_view(true)
 }
 
-/// Icon of the application bundle a program belongs to, or else the Terminal's.
+/// Icon of the application bundle a program belongs to.
 pub fn program_icon(command: &str) -> Option<Arc<Image>> {
     let program = command.split_whitespace().next()?.trim_matches(['"', '\'']);
     let path = match Path::new(program) {
@@ -29,22 +29,23 @@ pub fn program_icon(command: &str) -> Option<Arc<Image>> {
             .map(|dir| dir.join(path))
             .find(|p| p.is_file())?,
     };
-    let bundle = path.ancestors().find(|path| path.extension().is_some_and(|ext| ext == "app"));
-    let terminal = Path::new("/System/Applications/Utilities/Terminal.app");
-    file_icon(bundle.unwrap_or(terminal))
+    file_icon(path.ancestors().find(|path| path.extension().is_some_and(|ext| ext == "app"))?)
 }
 
-/// Images from PNG files, icon files, and application bundles.
+pub fn terminal_icon() -> Option<Arc<Image>> {
+    file_icon(Path::new("/System/Applications/Utilities/Terminal.app"))
+}
+
+/// Icon files and application bundles, at their largest size.
 pub fn file_icon(path: &Path) -> Option<Arc<Image>> {
     let icns = match path.extension().and_then(|ext| ext.to_str()) {
-        Some("png") => return super::icons::png(&fs::read(path).ok()?),
         Some("app") => bundle_icon(path)?,
         _ => path.to_owned(),
     };
 
     // `sips` converts the system's icon formats.
     let png = env::temp_dir().join(format!("alacritty-icon-{}.png", std::process::id()));
-    let args = ["-s", "format", "png", "-Z", "64"];
+    let args = ["-s", "format", "png", "-Z", "256"];
     let status = Command::new("sips").args(args).arg(&icns).arg("--out").arg(&png).output();
     let image = status.ok().and_then(|_| super::icons::png(&fs::read(&png).ok()?));
     let _ = fs::remove_file(&png);

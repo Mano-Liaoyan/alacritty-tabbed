@@ -23,10 +23,12 @@ yellow and green lights on macOS.
 the tabs of a window share its renderer. Drag tabs to reorder them, close them
 with × or a middle click, and scroll over the bar to switch.
 
-**Profiles with icons.** The ⌄ menu beside + lists profiles with their
-program's icon: the executable's icon on Windows, with each WSL distribution's
-own artwork and Git Bash's logo; the desktop entry's icon on Linux; the
-application's icon on macOS. A profile can set its own image or an emoji.
+**Profiles with logos.** Tabs, the ⌄ menu beside + and the settings show each
+profile's logo, drawn sharp at the screen's scale: the executable's largest icon
+on Windows, with each WSL distribution's own artwork and Git Bash's logo; the
+icon theme's logo on Linux, preferring SVG; the application's icon on macOS.
+Bash, PowerShell and Nushell have bundled logos where the system has none, and
+other shells get a terminal. A profile can set its own SVG or PNG, or an emoji.
 
 **Settings panel.** The gear opens the profile settings: name, icon, command
 line, starting directory, environment variables, configuration overrides, the
@@ -83,9 +85,11 @@ options = ["font.size=14"]            # Configuration overrides for this profile
 hidden = false                        # Leave out of the menu.
 ```
 
-Icons can be PNG files everywhere, `.ico`, `.exe` and `.dll` files on Windows,
-and `.icns` files or application bundles on macOS. On Linux, icon themes that
-only ship SVG icons fall back to the profile's initial.
+Icons can be SVG and PNG files everywhere, `.ico`, `.exe` and `.dll` files on
+Windows, and `.icns` files or application bundles on macOS. On Linux, logos come
+from the profile program's desktop entry or are named after it, in the icon
+theme set for KDE or GTK, the themes it inherits, and `hicolor`. The bundled
+logos and their licences are in `alacritty/res/icons`.
 
 ## Syncing with upstream
 

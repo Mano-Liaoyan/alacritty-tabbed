@@ -198,20 +198,24 @@ fn search_path(program: &str) -> Option<PathBuf> {
         .find(|p| p.is_file())
 }
 
-/// Images from PNG files, icons, and the icons of programs and libraries.
+pub fn terminal_icon() -> Option<Arc<Image>> {
+    None
+}
+
+/// Icons, and the icons of programs and libraries, at their largest size.
 pub fn file_icon(path: &Path) -> Option<Arc<Image>> {
     let name = wide(path);
     let icon = unsafe {
         match extension(path).as_str() {
             "ico" => {
-                LoadImageW(ptr::null_mut(), name.as_ptr(), IMAGE_ICON, 64, 64, LR_LOADFROMFILE)
+                LoadImageW(ptr::null_mut(), name.as_ptr(), IMAGE_ICON, 256, 256, LR_LOADFROMFILE)
             },
             "exe" | "dll" => {
                 let mut icon = ptr::null_mut();
-                SHDefExtractIconW(name.as_ptr(), 0, 0, &mut icon, ptr::null_mut(), 64);
+                SHDefExtractIconW(name.as_ptr(), 0, 0, &mut icon, ptr::null_mut(), 256);
                 icon
             },
-            _ => return super::icons::png(&std::fs::read(path).ok()?),
+            _ => return None,
         }
     };
     (!icon.is_null()).then(|| unsafe { icon_image(icon) }).flatten()
