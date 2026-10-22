@@ -1,0 +1,104 @@
+# Release builds for the Alacritty Tabbed fork. Upstream's release.yml is disabled in this
+# repository (`gh workflow disable release.yml`), so that file stays identical to upstream.
+#
+# Pushing a tag such as `v0.17.0-tabbed.1` publishes a GitHub release with Linux, macOS and
+# Windows builds; running the workflow by hand, or a pull request that changes it, only
+# uploads them as workflow artifacts.
+
+name: Tabbed Release
+
+on:
+  push:
+    tags: ["v[0-9]+.[0-9]+.[0-9]+*"]
+  workflow_dispatch:
+  pull_request:
+    paths: [.github/workflows/tabbed-release.yml]
+
+env:
+  CARGO_TERM_COLOR: always
+  NAME: Alacritty-Tabbed-${{ github.ref_type == 'tag' && github.ref_name || github.sha }}
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake pkg-config libfreetype6-dev libfontconfig1-dev \
+            libxcb-xfixes0-dev libxkbcommon-dev scdoc
+      - name: Build
+        run: cargo build --release
+      - name: Package
+        run: |
+          mkdir -p "$NAME/man"
+          cp target/release/alacritty extra/alacritty.info extra/linux/Alacritty.desktop \
+            extra/logo/alacritty-term.svg extra/completions/* "$NAME"
+          for page in extra/man/*.scd; do
+            scdoc < "$page" | gzip -c > "$NAME/man/$(basename "${page%.scd}").gz"
+          done
+          tar -czf "$NAME-linux-x86_64.tar.gz" "$NAME"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: ${{ env.NAME }}-linux-x86_64.tar.gz
+
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: brew install scdoc
+      - name: Install targets
+        run: rustup update && rustup target add aarch64-apple-darwin x86_64-apple-darwin
+      - name: Make DMG
+        run: |
+          make dmg-universal
+          mv target/release/osx/Alacritty.dmg "$NAME-macos-universal.dmg"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: ${{ env.NAME }}-macos-universal.dmg
+
+  windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: |
+          cargo build --release
+          cp target/release/alacritty.exe "$NAME-windows-x86_64-portable.exe"
+      - name: Install WiX
+        run: dotnet tool install --global wix --version 4.0.5
+      - name: Create msi installer
+        run: |
+          wix extension add WixToolset.UI.wixext/4.0.5 WixToolset.Util.wixext/4.0.5
+          wix build -arch "x64" -ext WixToolset.UI.wixext -ext WixToolset.Util.wixext \
+            -out "$NAME-windows-x86_64-installer.msi" "alacritty/windows/wix/alacritty.wxs"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: |
+            ${{ env.NAME }}-windows-x86_64-portable.exe
+            ${{ env.NAME }}-windows-x86_64-installer.msi
+
+  release:
+    if: github.ref_type == 'tag'
+    needs: [linux, macos, windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+            --title "Alacritty Tabbed $GITHUB_REF_NAME" --generate-notes ./*
