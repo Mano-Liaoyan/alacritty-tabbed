@@ -80,7 +80,7 @@ profile it sets:
 | Name | Label in the dropdown and settings |
 | Icon | Empty uses the program's own icon; or choose an `.ico`, `.png`, `.jpg`, `.bmp`, `.gif`, `.exe`, or `.dll` |
 | Command line | Program and arguments; empty uses the shell from `alacritty.toml` |
-| Starting directory | Accepts `~` and `%VARIABLES%`; empty uses Alacritty's working directory |
+| Starting directory | Accepts `~` and `%VARIABLES%`; empty starts in the home directory (`%USERPROFILE%`), like Windows Terminal |
 | Environment variables | `KEY=value`, one per line, added to the shell's environment |
 | Configuration overrides | Alacritty options for this profile's tabs, in `--option` syntax such as `font.size=14` |
 | Default profile | Used by +, Ctrl+Shift+T, and the first tab of a new window |
@@ -89,6 +89,16 @@ profile it sets:
 Automatic icons come from the program itself: the executable's icon,
 `git-bash.exe` for Git Bash, and the distribution's own artwork for WSL
 (`shortcut.ico` beside the disk image, or the Store package's launcher).
+A profile's empty starting directory ignores `general.working_directory` from
+`alacritty.toml`; tabs started without any profile, such as `alacritty -e`,
+still honor it. WSL profiles open in the distribution's home through `--cd ~`.
+
+Duplicate, beside New profile, copies the selected profile, including its
+environment, overrides, icon, and visibility but not the default flag, as
+"Name (copy)" right after the original. Drag profiles in the sidebar to
+reorder them; the dropdown lists them in that order. Holding a dragged row
+beyond the top or bottom of the list scrolls it.
+
 Save writes `%APPDATA%\alacritty\profiles.toml`, which can also be edited by
 hand. Closing with unsaved changes asks for a second close to discard them.
 Tabs keep the icon they started with; new tabs use saved changes immediately.
@@ -108,13 +118,14 @@ The executable is `target/release/alacritty.exe`.
 
 ## Validation
 
-The build passes 92 application unit tests and Clippy with warnings treated as
-errors. Geometry tests cover selection/overflow, caption
-controls, resize hit regions, and the fullscreen layout at 100%, 125%, 150%, and
-200% scaling. An explicitly invoked, ignored test renders the production header
-painter into dark, light, narrow, mid-drag, and fullscreen bitmaps (`work/header-preview-*.bmp`), and
-another renders the dropdown with this machine's profiles
-(`work/dropdown-preview.bmp`), for visual inspection without a desktop:
+The build passes COUNT application unit tests and Clippy with warnings treated as
+errors. Geometry tests cover selection/overflow, caption controls, resize hit
+regions, and the fullscreen layout at 100%, 125%, 150%, and 200% scaling. An
+explicitly invoked, ignored test renders the production header painter into
+dark, light, narrow, mid-drag, and fullscreen bitmaps
+(`work/header-preview-*.bmp`), and others render the dropdown with this
+machine's profiles (`work/dropdown-preview.bmp`) and the settings panel mid-drag
+(`work/settings-preview.bmp`), for visual inspection without a desktop:
 
 ```powershell
 cargo test --release --locked --no-default-features -p alacritty preview -- --ignored
