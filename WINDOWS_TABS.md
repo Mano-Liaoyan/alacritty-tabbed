@@ -118,7 +118,7 @@ The executable is `target/release/alacritty.exe`.
 
 ## Validation
 
-The build passes COUNT application unit tests and Clippy with warnings treated as
+The build passes 96 application unit tests and Clippy with warnings treated as
 errors. Geometry tests cover selection/overflow, caption controls, resize hit
 regions, and the fullscreen layout at 100%, 125%, 150%, and 200% scaling. An
 explicitly invoked, ignored test renders the production header painter into
