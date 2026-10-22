@@ -1,6 +1,7 @@
-# Alacritty with Windows tabs
+# Alacritty Tabbed
 
-This is a soft fork of [Alacritty](https://github.com/alacritty/alacritty) that
+Alacritty Tabbed ([`alacritty-tabbed`](https://github.com/Mano-Liaoyan/alacritty-tabbed))
+is a soft fork of [Alacritty](https://github.com/alacritty/alacritty) that
 adds native tabs, shell profiles, and a settings panel on Windows. It tracks
 upstream: the `main` branch is an upstream release (currently v0.17.0) plus the
 Windows tabs work, and `master` mirrors upstream for syncing. It is not an
@@ -11,21 +12,20 @@ terminal state, hosted in one top-level window. No new crates or UI framework
 are added: the header, dropdown, and settings panel are plain Win32 drawn with
 the existing `windows-sys` bindings. Other platforms are unchanged.
 
+![Alacritty Tabbed: opening tabs, choosing a profile, reordering tabs, editing
+profiles in settings, and fullscreen](docs/windows-tabs/demo.gif)
+
+[Watch the demo as MP4](docs/windows-tabs/demo.mp4)
+
 ## Features
 
 **Integrated tab header.** Tabs, the + button, a profile dropdown, settings, and
 the window controls share one row in place of the native caption. Drag tabs
 sideways to reorder them.
 
-![Tab header, dark theme](docs/windows-tabs/header-preview-dark.png)
-
-![Dragging a tab to reorder it](docs/windows-tabs/header-preview-drag.png)
-
 **Profiles with real icons.** The dropdown beside + lists PowerShell 7, Windows
 PowerShell, Command Prompt, Git Bash, and every registered WSL distribution,
 each with the program's or distribution's own icon.
-
-![Profile dropdown](docs/windows-tabs/dropdown-preview.png)
 
 **Settings panel.** The gear opens per-profile settings: name, icon, command
 line, starting directory, environment variables, and Alacritty configuration
@@ -33,19 +33,13 @@ overrides (such as `font.size=14`), plus the default profile and dropdown
 visibility. Duplicate profiles and drag them in the sidebar to reorder them.
 Profiles are saved to `%APPDATA%\alacritty\profiles.toml`.
 
-![Settings panel while reordering profiles](docs/windows-tabs/settings-preview.png)
-
 **Fullscreen keeps the tabs.** F11 or Alt+Enter goes fullscreen with the header
 still visible and the terminal edge to edge below it.
-
-![Fullscreen header](docs/windows-tabs/header-preview-fullscreen.png)
 
 **Light and dark themes.** Header colors come from your configured color
 scheme. Narrow windows get overflow arrows.
 
 ![Tab header, light theme](docs/windows-tabs/header-preview-light.png)
-
-![Narrow window with overflowing tabs](docs/windows-tabs/header-preview-narrow.png)
 
 ## Enable
 
@@ -76,6 +70,8 @@ Building needs Rust 1.85+ with the MSVC toolchain and the Visual Studio C++ buil
 tools.
 
 ```powershell
+git clone https://github.com/Mano-Liaoyan/alacritty-tabbed.git
+cd alacritty-tabbed
 cargo build --release --locked --no-default-features -p alacritty
 ```
 
