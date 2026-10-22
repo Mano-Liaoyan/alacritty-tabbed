@@ -75,9 +75,7 @@ cd alacritty-tabbed
 cargo build --release --locked --no-default-features -p alacritty
 ```
 
-The executable is `target/release/alacritty.exe`. `scripts/Build-WindowsTabs.ps1`
-wraps the build, and `scripts/Test-WindowsTabs.ps1` runs interactive smoke
-checks.
+The executable is `target/release/alacritty.exe`.
 
 ## Syncing with upstream
 

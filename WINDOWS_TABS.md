@@ -131,15 +131,8 @@ machine's profiles (`work/dropdown-preview.bmp`) and the settings panel mid-drag
 cargo test --release --locked --no-default-features -p alacritty preview -- --ignored
 ```
 
-`scripts/Test-WindowsTabs.ps1` exercises the executable with temporary settings.
-`-SkipKeyboard` skips keyboard/WSL shortcut checks and desktop screenshots when
-the environment has no interactive foreground desktop. The integrated-header
-checks cover removal of the separate native caption, tab creation/selection/
-closing, drag-to-reorder, choosing a profile from the dropdown, opening and
-closing settings, minimize/maximize/restore, F11 fullscreen entered and left
-repeatedly (terminal flush with the screen below the header), DPI-scaled header space, terminal
-resize, and closing the entire host. Keyboard/WSL input, actual mouse dragging, and
-double-click behavior need an interactive desktop for end-to-end validation.
+Keyboard/WSL input, real mouse dragging, and double-click behavior need an
+interactive desktop and are checked by hand.
 
 ## Scope
 
