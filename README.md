@@ -27,8 +27,8 @@ with × or a middle click, and scroll over the bar to switch.
 profile's logo, drawn sharp at the screen's scale: the executable's largest icon
 on Windows, with each WSL distribution's own artwork and Git Bash's logo; the
 icon theme's logo on Linux, preferring SVG; the application's icon on macOS.
-Bash, PowerShell and Nushell have bundled logos where the system has none, and
-other shells get a terminal. A profile can set its own SVG or PNG, or an emoji.
+About 40 common shells, tools, languages and WSL distributions have bundled logos
+where the system has none, and other programs get a terminal. A profile can set its own SVG or PNG, or an emoji.
 
 **Settings panel.** The gear opens the profile settings: name, icon, command
 line, starting directory, environment variables, configuration overrides, the
@@ -89,7 +89,8 @@ Icons can be SVG and PNG files everywhere, `.ico`, `.exe` and `.dll` files on
 Windows, and `.icns` files or application bundles on macOS. On Linux, logos come
 from the profile program's desktop entry or are named after it, in the icon
 theme set for KDE or GTK, the themes it inherits, and `hicolor`. The bundled
-logos and their licences are in `alacritty/res/icons`.
+logos, from devicon, Simple Icons and the projects' own repositories, are listed
+with their licences in `alacritty/res/icons/LICENSES.md`.
 
 ## Syncing with upstream
 

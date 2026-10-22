@@ -156,6 +156,8 @@ type Runs = Arc<Vec<(u16, u16, u16, Rgb, f32)>>;
 /// An image, drawn as rectangles of equal pixels.
 pub struct Image {
     source: Source,
+    /// Draw the image in one color, for single-color logos.
+    tint: bool,
     /// The image fit in squares of a size.
     scaled: Mutex<Vec<(u32, Runs)>>,
 }
@@ -171,12 +173,12 @@ impl Image {
     pub fn new(width: u32, height: u32, rgba: Vec<u8>) -> Option<Arc<Self>> {
         let valid = width > 0 && height > 0 && rgba.len() == (width * height * 4) as usize;
         let source = Source::Pixels { width, height, rgba };
-        valid.then(|| Arc::new(Self { source, scaled: Default::default() }))
+        valid.then(|| Arc::new(Self { source, tint: false, scaled: Default::default() }))
     }
 
-    pub fn svg(data: &[u8]) -> Option<Arc<Self>> {
+    pub fn svg(data: &[u8], tint: bool) -> Option<Arc<Self>> {
         let tree = usvg::Tree::from_data(data, &usvg::Options::default()).ok()?;
-        Some(Arc::new(Self { source: Source::Svg(tree), scaled: Default::default() }))
+        Some(Arc::new(Self { source: Source::Svg(tree), tint, scaled: Default::default() }))
     }
 
     /// Runs of the image fit in a `size` square, averaging the pixels each one covers.
@@ -417,10 +419,12 @@ impl Layer {
     }
 
     /// Draw `image` fit in the `rect` square.
-    pub fn image(&mut self, rect: Rect, image: &Image) {
+    /// Draw `image` fit in the `rect` square, in `tint` if it is a single-color image.
+    pub fn image(&mut self, rect: Rect, image: &Image, tint: Rgb) {
         let runs = image.runs(rect.w.min(rect.h) as u32);
         self.rects.extend(runs.iter().map(|&(x, y, w, color, alpha)| {
             let (x, y) = (rect.x + f32::from(x), rect.y + f32::from(y));
+            let color = if image.tint { tint } else { color };
             RenderRect::new(x, y, f32::from(w), 1., color, alpha)
         }));
     }

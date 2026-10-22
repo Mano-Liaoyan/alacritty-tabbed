@@ -258,12 +258,12 @@ fn badge(
     image: Option<&Arc<Image>>,
     text: &str,
     cell: (f32, f32),
-    colors: (Rgb, Rgb),
+    colors: (Rgb, Rgb, Rgb),
 ) {
     match image {
-        Some(image) => layer.image(rect, image),
+        Some(image) => layer.image(rect, image, colors.2),
         None => {
-            let (surface, accent) = colors;
+            let (surface, accent, _) = colors;
             layer.rounded(rect, rect.w / 4., mix(surface, accent, 0.3));
             layer.label(rect, text, cell, accent, true);
         },
@@ -332,7 +332,7 @@ impl Tabs {
         }
 
         // Logo, with the application and computer name beside it.
-        base.image(layout.mark.square(px(24.)), &icons::logo());
+        base.image(layout.mark.square(px(24.)), &icons::logo(), palette.foreground);
         if let Some(brand) = layout.brand {
             let middle = (bar / 2.).round();
             let columns = (brand.w / cell.0) as usize;
@@ -399,7 +399,7 @@ impl Tabs {
 
             let tab = &self.tabs[index];
             let title = if active { window.title() } else { &tab.title };
-            let colors = (surface, palette.accent(title));
+            let colors = (surface, palette.accent(title), palette.foreground);
             badge(layer, layout.badge(rect), tab.icon.as_ref(), &tab.badge, cell, colors);
 
             let close = layout.close(rect);
@@ -448,7 +448,7 @@ impl Tabs {
                 match menu.profiles.get(index) {
                     Some(profile) => {
                         let image = profile.image(config);
-                        let colors = (surface, palette.accent(name));
+                        let colors = (surface, palette.accent(name), palette.foreground);
                         badge(&mut top, icon_rect, image.as_ref(), &profile.badge(), cell, colors);
                     },
                     None => top.gear(icon_rect.center(), px(8.), palette.muted, surface),
