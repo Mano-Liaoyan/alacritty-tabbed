@@ -93,6 +93,44 @@ public static class TabNative {
         PostMessage(hwnd,0x100,(IntPtr)key,down);
         PostMessage(hwnd,0x101,(IntPtr)key,(IntPtr)((long)down|0xC0000000L));
     }
+    [DllImport("user32.dll")] static extern bool PrintWindow(IntPtr hwnd,IntPtr dc,uint flags);
+    [DllImport("user32.dll")] static extern IntPtr GetWindowDC(IntPtr hwnd);
+    [DllImport("user32.dll")] static extern int ReleaseDC(IntPtr hwnd,IntPtr dc);
+    [DllImport("gdi32.dll")] static extern IntPtr CreateCompatibleDC(IntPtr dc);
+    [DllImport("gdi32.dll")] static extern IntPtr CreateCompatibleBitmap(IntPtr dc,int width,int height);
+    [DllImport("gdi32.dll")] static extern IntPtr SelectObject(IntPtr dc,IntPtr obj);
+    [DllImport("gdi32.dll")] static extern bool DeleteObject(IntPtr obj);
+    [DllImport("gdi32.dll")] static extern bool DeleteDC(IntPtr dc);
+    [DllImport("gdi32.dll")] static extern int GetDIBits(IntPtr dc,IntPtr bitmap,uint start,uint lines,int[] bits,int[] info,uint usage);
+    static int[] TopStrip(IntPtr hwnd,int rows,uint flags) {
+        Rect r; GetWindowRect(hwnd,out r);
+        int width=r.Right-r.Left,height=r.Bottom-r.Top;
+        IntPtr dc=GetWindowDC(hwnd),memory=CreateCompatibleDC(dc),bitmap=CreateCompatibleBitmap(dc,width,height);
+        IntPtr old=SelectObject(memory,bitmap);
+        PrintWindow(hwnd,memory,flags);
+        SelectObject(memory,old);
+        var info=new int[11]; info[0]=40; info[1]=width; info[2]=-height; info[3]=1|(32<<16);
+        var bits=new int[width*height];
+        GetDIBits(memory,bitmap,0,(uint)height,bits,info,0);
+        DeleteObject(bitmap); DeleteDC(memory); ReleaseDC(hwnd,dc);
+        Array.Resize(ref bits,width*Math.Min(rows,height));
+        return bits;
+    }
+    // Share of the header's top rows that change when a screenshot tool prints the window
+    // without PW_RENDERFULLCONTENT, which has DefWindowProc draw the native caption.
+    public static double CaptionChange(IntPtr hwnd,int rows) {
+        var before=TopStrip(hwnd,rows,2);
+        TopStrip(hwnd,rows,0);
+        System.Threading.Thread.Sleep(300);
+        var after=TopStrip(hwnd,rows,2);
+        int changed=0;
+        for(int i=0;i<before.Length;i++) {
+            int a=before[i],b=after[i],delta=0;
+            for(int shift=0;shift<24;shift+=8) delta=Math.Max(delta,Math.Abs(((a>>shift)&255)-((b>>shift)&255)));
+            if(delta>48) changed++;
+        }
+        return before.Length==0?0:(double)changed/before.Length;
+    }
     public static void Text(IntPtr host,string text) {
         var inputs=new List<Input>();
         foreach(char c in text){inputs.Add(Key(0,4,c));inputs.Add(Key(0,6,c));}
@@ -230,6 +268,8 @@ try {
     [TabNative]::Click($script:hostWindow,[int]($layout.Plus+[Math]::Round(27*$layout.Scale)),[int](24*$layout.Scale))
     $dropdown=[IntPtr]::Zero
     Wait-For { $script:dropdown=[TabNative]::Find('AlacrittyTabsDropdown'); $script:dropdown -ne [IntPtr]::Zero } 'the profile dropdown opens beside the + button'
+    # The host cannot repaint while the dropdown runs its loop, so a caption drawn now would stay.
+    Assert ([TabNative]::CaptionChange($script:hostWindow,[int](30*$layout.Scale)) -lt 0.05) 'the open dropdown leaves no native caption over the header'
     [TabNative]::Key($script:dropdown,0x28)
     [TabNative]::Key($script:dropdown,0x0D)
     Wait-For { @([TabNative]::Children($script:hostWindow)).Count -eq 4 } 'choosing a profile opens it as a tab in the same window'

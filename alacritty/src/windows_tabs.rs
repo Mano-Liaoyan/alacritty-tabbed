@@ -18,7 +18,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use windows_sys::Win32::Foundation::{HWND, POINT, RECT};
+use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Dwm::{
     DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND, DWMWCP_ROUND, DwmSetWindowAttribute,
 };
@@ -28,9 +28,11 @@ use windows_sys::Win32::Graphics::Gdi::{
     SetTextColor, TRANSPARENT,
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetDoubleClickTime, SetFocus};
+use windows_sys::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    DI_NORMAL, DestroyIcon, DrawIconEx, GetClientRect, HICON, MoveWindow, SW_HIDE,
-    SW_SHOWNOACTIVATE, ShowWindow,
+    DI_NORMAL, DestroyIcon, DrawIconEx, GWL_STYLE, GetClientRect, GetWindowLongPtrW, HICON,
+    MoveWindow, SW_HIDE, SW_SHOWNOACTIVATE, SetWindowLongPtrW, ShowWindow, WM_NCACTIVATE,
+    WM_NCDESTROY, WM_NCPAINT, WS_VISIBLE,
 };
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
@@ -153,6 +155,40 @@ fn round_corners(window: &Window, round: bool) {
     };
 }
 
+/// Never let `DefWindowProcW` paint the host's native caption.
+///
+/// winit hides the frame only through `WM_NCCALCSIZE`, so the host keeps its caption styles and
+/// `DefWindowProcW` draws a classic caption across the header: on `WM_NCPAINT` from
+/// `PrintWindow`, as used by screenshot tools, and, once non-client painting is suppressed, on
+/// every `WM_NCACTIVATE`. The caption stays until the header repaints, which cannot happen while
+/// the dropdown or a menu runs its own message loop. Hiding the window from `DefWindowProcW`
+/// for these messages skips the painting but keeps the default handling; DWM draws the frame.
+unsafe extern "system" fn host_procedure(
+    hwnd: HWND,
+    message: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+    _id: usize,
+    _data: usize,
+) -> LRESULT {
+    unsafe {
+        match message {
+            WM_NCPAINT | WM_NCACTIVATE => {
+                let style = GetWindowLongPtrW(hwnd, GWL_STYLE);
+                SetWindowLongPtrW(hwnd, GWL_STYLE, style & !(WS_VISIBLE as isize));
+                let result = DefSubclassProc(hwnd, message, wparam, lparam);
+                SetWindowLongPtrW(hwnd, GWL_STYLE, style);
+                result
+            },
+            WM_NCDESTROY => {
+                RemoveWindowSubclass(hwnd, Some(host_procedure), 0);
+                DefSubclassProc(hwnd, message, wparam, lparam)
+            },
+            _ => DefSubclassProc(hwnd, message, wparam, lparam),
+        }
+    }
+}
+
 /// The parent HWND is created and owned by TabManager on the same UI thread.
 pub fn child_attributes(attributes: WindowAttributes, parent: isize) -> WindowAttributes {
     let parent_handle = Win32WindowHandle::new(NonZeroIsize::new(parent).expect("live tab host"));
@@ -249,6 +285,7 @@ impl TabManager {
         let window = event_loop.create_window(attributes)?;
         // Undecorated windows are square by default.
         round_corners(&window, fullscreen.is_none());
+        unsafe { SetWindowSubclass(hwnd(&window) as HWND, Some(host_procedure), 0, 0) };
         options.tab_parent = Some(hwnd(&window));
         let shared = self.shared(config);
         self.groups.insert(
