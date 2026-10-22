@@ -83,7 +83,7 @@ impl Default for WindowConfig {
             dimensions: Default::default(),
             decorations: Default::default(),
             startup_mode: Default::default(),
-            tabs: Default::default(),
+            tabs: true,
             dynamic_padding: Default::default(),
             resize_increments: Default::default(),
             decorations_theme_variant: Default::default(),

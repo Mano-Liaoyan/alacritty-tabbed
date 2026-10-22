@@ -37,11 +37,13 @@ which can also be edited by hand.
 
 ![Profile settings](docs/tabs/settings.png)
 
-## Enable
+## Disable
+
+Tabs are on by default. To turn them off:
 
 ```toml
 [window]
-tabs = true
+tabs = false
 ```
 
 Restart Alacritty after changing `window.tabs`.
