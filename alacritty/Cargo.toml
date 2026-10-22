@@ -1,6 +1,6 @@
 [package]
 name = "alacritty"
-version = "0.17.0"
+version = "0.17.0-dev"
 authors = ["Christian Duerr <contact@christianduerr.com>", "Joe Wilm <joe@jwilm.com>"]
 license = "Apache-2.0"
 description = "A fast, cross-platform, OpenGL terminal emulator"
@@ -12,15 +12,15 @@ rust-version.workspace = true
 
 [dependencies.alacritty_terminal]
 path = "../alacritty_terminal"
-version = "0.26.0"
+version = "0.25.2-dev"
 
 [dependencies.alacritty_config_derive]
 path = "../alacritty_config_derive"
-version = "0.2.5"
+version = "0.2.6-dev"
 
 [dependencies.alacritty_config]
 path = "../alacritty_config"
-version = "0.2.3"
+version = "0.2.4-dev"
 
 [dependencies]
 ahash = { version = "0.8.6", features = ["no-rng"] }
@@ -79,22 +79,7 @@ windows-sys = { version = "0.59", features = [
     "Win32_UI_WindowsAndMessaging",
     "Win32_System_Threading",
     "Win32_System_Console",
-    "Win32_System_LibraryLoader",
-    "Win32_System_Registry",
     "Win32_Foundation",
-    "Win32_Graphics_Dwm",
-    "Win32_Graphics_Gdi",
-    "Win32_UI_Input_KeyboardAndMouse",
-    "Win32_Graphics_GdiPlus",
-    "Win32_Storage_FileSystem",
-    "Win32_Storage_Packaging_Appx",
-    "Win32_System_Com",
-    "Win32_System_Environment",
-    "Win32_UI_Controls",
-    "Win32_UI_Controls_Dialogs",
-    "Win32_UI_HiDpi",
-    "Win32_UI_Shell",
-    "Win32_UI_Shell_Common",
 ]}
 
 [target.'cfg(windows)'.build-dependencies]
@@ -117,3 +102,22 @@ wayland = [
     "winit/wayland-csd-adwaita-crossfont",
 ]
 nightly = []
+
+# --- Alacritty Tabbed: fork-only dependencies ---------------------------------------------------
+# Kept apart from upstream's tables, so syncing with upstream does not conflict. Both are upstream's
+# own dependencies, enabled on every platform (`png`) or with more features (`windows-sys`), so
+# Cargo.lock gains no packages.
+
+[target.'cfg(all())'.dependencies]
+png = { version = "0.17.5", default-features = false }
+
+[target.'cfg(all(windows))'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Graphics_Gdi",
+    "Win32_Storage_Packaging_Appx",
+    "Win32_System_Com",
+    "Win32_System_Registry",
+    "Win32_UI_Controls_Dialogs",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
+]}

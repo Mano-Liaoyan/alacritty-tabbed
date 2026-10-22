@@ -44,6 +44,8 @@ use crate::message_bar::MessageBuffer;
 use crate::scheduler::Scheduler;
 use crate::{input, renderer};
 
+pub mod tabs;
+
 /// Event context for one individual Alacritty window.
 pub struct WindowContext {
     pub message_buffer: MessageBuffer,
@@ -165,12 +167,6 @@ impl WindowContext {
         Ok(window_context)
     }
 
-    /// Remember config overrides that were applied to the initial window's config.
-    #[cfg(windows)]
-    pub fn set_window_config(&mut self, config_overrides: ParsedOptions) {
-        self.window_config = config_overrides;
-    }
-
     /// Create a new terminal window context.
     fn new(
         display: Display,
@@ -180,6 +176,7 @@ impl WindowContext {
     ) -> Result<Self, Box<dyn Error>> {
         let mut pty_config = config.pty_config();
         options.terminal_options.override_pty_config(&mut pty_config);
+        tabs::launch(&config, &options, &mut pty_config, &display.tabs);
 
         let preserve_title = options.window_identity.title.is_some();
 

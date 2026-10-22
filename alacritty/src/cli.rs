@@ -166,20 +166,9 @@ pub struct TerminalOptions {
     /// Command and args to execute (must be last argument).
     #[clap(short = 'e', long, allow_hyphen_values = true, num_args = 1..)]
     command: Vec<String>,
-
-    /// Extra environment for the shell, set by tab profiles.
-    #[clap(skip)]
-    #[serde(skip)]
-    #[cfg(windows)]
-    pub env: HashMap<String, String>,
 }
 
 impl TerminalOptions {
-    #[cfg(windows)]
-    pub fn set_command(&mut self, command: Vec<String>) {
-        self.command = command;
-    }
-
     /// Shell override passed through the CLI.
     pub fn command(&self) -> Option<Program> {
         let (program, args) = self.command.split_first()?;
@@ -201,9 +190,6 @@ impl TerminalOptions {
         }
 
         pty_config.drain_on_exit |= self.hold;
-
-        #[cfg(windows)]
-        pty_config.env.extend(self.env.clone());
     }
 }
 
@@ -213,9 +199,6 @@ impl From<TerminalOptions> for PtyOptions {
             working_directory: options.working_directory.take(),
             shell: options.command().map(Into::into),
             drain_on_exit: options.hold,
-            #[cfg(windows)]
-            env: std::mem::take(&mut options.env),
-            #[cfg(not(windows))]
             env: HashMap::new(),
             #[cfg(target_os = "windows")]
             escape_args: false,
@@ -322,18 +305,6 @@ pub struct WindowOptions {
     /// The window tabbing identifier to use when building a window.
     pub window_tabbing_id: Option<String>,
 
-    /// Internal parent HWND. Never accepted from CLI or deserialized input.
-    #[clap(skip)]
-    #[serde(skip)]
-    #[cfg(windows)]
-    pub tab_parent: Option<isize>,
-
-    /// Internal name of the tab profile to start. Never accepted from CLI or deserialized input.
-    #[clap(skip)]
-    #[serde(skip)]
-    #[cfg(windows)]
-    pub tab_profile: Option<String>,
-
     #[clap(skip)]
     #[cfg(not(any(target_os = "macos", windows)))]
     /// `ActivationToken` that we pass to winit.
@@ -348,12 +319,6 @@ impl WindowOptions {
     /// Get the parsed set of CLI config overrides.
     pub fn config_overrides(&self) -> ParsedOptions {
         ParsedOptions::from_options(&self.option)
-    }
-
-    /// Add configuration overrides, such as those of a tab profile.
-    #[cfg(windows)]
-    pub fn add_options(&mut self, options: impl IntoIterator<Item = String>) {
-        self.option.extend(options);
     }
 }
 

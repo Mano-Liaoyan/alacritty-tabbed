@@ -18,10 +18,6 @@ const POWERLINE_TRIANGLE_LTR: char = '\u{e0b0}';
 const POWERLINE_ARROW_LTR: char = '\u{e0b1}';
 const POWERLINE_TRIANGLE_RTL: char = '\u{e0b2}';
 const POWERLINE_ARROW_RTL: char = '\u{e0b3}';
-const POWERLINE_HALF_CIRCLE_LTR: char = '\u{e0b4}';
-const POWERLINE_HALF_CIRCLE_OUTLINE_LTR: char = '\u{e0b5}';
-const POWERLINE_HALF_CIRCLE_RTL: char = '\u{e0b6}';
-const POWERLINE_HALF_CIRCLE_OUTLINE_RTL: char = '\u{e0b7}';
 
 /// Returns the rasterized glyph if the character is part of the built-in font.
 pub fn builtin_glyph(
@@ -38,10 +34,6 @@ pub fn builtin_glyph(
         // Powerline symbols: '','','',''
         POWERLINE_TRIANGLE_LTR..=POWERLINE_ARROW_RTL => {
             powerline_drawing(character, metrics, offset)?
-        },
-        // Rounded powerline caps: '','','',''
-        POWERLINE_HALF_CIRCLE_LTR..=POWERLINE_HALF_CIRCLE_OUTLINE_RTL => {
-            powerline_half_circle(character, metrics, offset)
         },
         _ => return None,
     };
@@ -677,72 +669,6 @@ fn powerline_drawing(
     })
 }
 
-/// Draw the rounded powerline caps.
-///
-/// Fonts design these glyphs for their own advance and ascent/descent and often let them overhang
-/// it, so once the advance is floored to the terminal's cell width the curve no longer lines up
-/// with the cell. Drawing them here makes the half ellipse span exactly one cell, like the
-/// powerline triangles.
-fn powerline_half_circle(
-    character: char,
-    metrics: &Metrics,
-    offset: &Delta<i8>,
-) -> RasterizedGlyph {
-    // Number of samples per pixel axis used for anti-aliasing.
-    const SAMPLES: usize = 8;
-
-    let height = (metrics.line_height as i32 + offset.y as i32).max(1) as usize;
-    let width = (metrics.average_advance as i32 + offset.x as i32).max(1) as usize;
-    let stroke_size = calculate_stroke_size(width) as f32;
-    let outline =
-        matches!(character, POWERLINE_HALF_CIRCLE_OUTLINE_LTR | POWERLINE_HALF_CIRCLE_OUTLINE_RTL);
-
-    // Half of an ellipse centered on the left cell edge, touching the top, right and bottom
-    // edges of the cell. Outlines are the ring between it and an ellipse shrunk by the stroke.
-    let radius_x = width as f32;
-    let radius_y = height as f32 / 2.;
-    let inner_radius_x = (radius_x - stroke_size).max(0.);
-    let inner_radius_y = (radius_y - stroke_size).max(0.);
-    let inside = |x: f32, y: f32, rx: f32, ry: f32| (x / rx).powi(2) + (y / ry).powi(2) <= 1.;
-
-    let mut canvas = Canvas::new(width, height);
-    for y in 0..height {
-        for x in 0..width {
-            let mut covered = 0;
-            for sample_y in 0..SAMPLES {
-                for sample_x in 0..SAMPLES {
-                    let sx = x as f32 + (sample_x as f32 + 0.5) / SAMPLES as f32;
-                    let sy = y as f32 + (sample_y as f32 + 0.5) / SAMPLES as f32 - radius_y;
-                    if inside(sx, sy, radius_x, radius_y)
-                        && !(outline && inside(sx, sy, inner_radius_x, inner_radius_y))
-                    {
-                        covered += 1;
-                    }
-                }
-            }
-
-            let value = covered * COLOR_FILL._r as usize / (SAMPLES * SAMPLES);
-            canvas.buffer_mut()[y * width + x] = Pixel::gray(value as u8);
-        }
-    }
-
-    if character == POWERLINE_HALF_CIRCLE_RTL || character == POWERLINE_HALF_CIRCLE_OUTLINE_RTL {
-        canvas.flip_horizontal();
-    }
-
-    let top = height as i32 + metrics.descent as i32;
-    let buffer = BitmapBuffer::Rgb(canvas.into_raw());
-    RasterizedGlyph {
-        character,
-        top,
-        left: 0,
-        height: height as i32,
-        width: width as i32,
-        buffer,
-        advance: (width as i32, height as i32),
-    }
-}
-
 #[repr(C, packed)]
 #[derive(Clone, Copy, Debug, Default)]
 struct Pixel {
@@ -1095,65 +1021,12 @@ mod tests {
         let glyph_offset = Default::default();
 
         // Test coverage of box drawing characters.
-        for character in '\u{e0b0}'..='\u{e0b7}' {
+        for character in '\u{e0b0}'..='\u{e0b3}' {
             assert!(builtin_glyph(character, &METRICS, &offset, &glyph_offset).is_some());
         }
 
-        for character in ('\u{e0a0}'..'\u{e0b0}').chain('\u{e0b8}'..'\u{e0c0}') {
+        for character in ('\u{e0a0}'..'\u{e0b0}').chain('\u{e0b4}'..'\u{e0c0}') {
             assert!(builtin_glyph(character, &METRICS, &offset, &glyph_offset).is_none());
         }
-    }
-
-    /// Coverage of the glyph's pixel at (`x`, `y`).
-    fn coverage(glyph: &RasterizedGlyph, x: usize, y: usize) -> u8 {
-        match &glyph.buffer {
-            BitmapBuffer::Rgb(buffer) => buffer[(y * glyph.width as usize + x) * 3],
-            BitmapBuffer::Rgba(_) => unreachable!(),
-        }
-    }
-
-    #[test]
-    fn builtin_powerline_half_circle_shape() {
-        // Cell size of a 0.6em advance font at 20px, with the advance floored like the
-        // terminal grid does.
-        let metrics = Metrics { average_advance: 15.99, line_height: 35.2, ..METRICS };
-        let offset = Default::default();
-        let glyph_offset = Default::default();
-
-        let left_cap = builtin_glyph('\u{e0b6}', &metrics, &offset, &glyph_offset).unwrap();
-        let right_cap = builtin_glyph('\u{e0b4}', &metrics, &offset, &glyph_offset).unwrap();
-
-        // The cap must cover exactly one cell, without overhang.
-        let (width, height) = (15, 35);
-        assert_eq!((left_cap.left, left_cap.width, left_cap.height), (0, width, height));
-        let (width, height) = (width as usize, height as usize);
-
-        for y in 0..height {
-            // Flat side is fully covered along the whole cell height.
-            assert_eq!(coverage(&left_cap, width - 1, y), 255);
-
-            // Both caps are mirror images of each other.
-            for x in 0..width {
-                assert_eq!(coverage(&left_cap, x, y), coverage(&right_cap, width - 1 - x, y));
-            }
-        }
-
-        // The curved side touches the cell edge at mid height only and is round, not flat: the
-        // outermost column is empty near the top and bottom of the cell.
-        assert_eq!(coverage(&left_cap, 0, height / 2), 255);
-        assert_eq!(coverage(&left_cap, 0, 0), 0);
-        assert_eq!(coverage(&left_cap, 0, height / 4), 0);
-        assert_eq!(coverage(&left_cap, 0, height - 1), 0);
-
-        // Coverage grows monotonically towards the vertical center.
-        for y in 1..=height / 2 {
-            assert!(coverage(&left_cap, 0, y) >= coverage(&left_cap, 0, y - 1));
-        }
-
-        // Outlines keep the flat side open and the inside empty.
-        let outline = builtin_glyph('\u{e0b7}', &metrics, &offset, &glyph_offset).unwrap();
-        assert_eq!(coverage(&outline, 0, height / 2), 255);
-        assert_eq!(coverage(&outline, width - 1, height / 2), 0);
-        assert_eq!(coverage(&outline, width / 2, height / 2), 0);
     }
 }

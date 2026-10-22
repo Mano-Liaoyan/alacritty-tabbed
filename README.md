@@ -1,45 +1,41 @@
 # Alacritty Tabbed
 
 Alacritty Tabbed ([`alacritty-tabbed`](https://github.com/Mano-Liaoyan/alacritty-tabbed))
-is a soft fork of [Alacritty](https://github.com/alacritty/alacritty) that
-adds native tabs, shell profiles, and a settings panel on Windows. It tracks
-upstream: the `main` branch is an upstream release (currently v0.17.0) plus the
-Windows tabs work, and `master` mirrors upstream for syncing. It is not an
-official Alacritty release. Upstream's README follows the fork notes below.
+is a soft fork of [Alacritty](https://github.com/alacritty/alacritty) that adds
+tabs, shell profiles and a settings panel on Windows, Linux and macOS. It is not
+an official Alacritty release. Upstream's README follows the fork notes below.
 
-Each tab is a full Alacritty terminal, with its own OpenGL surface, PTY, and
-terminal state, hosted in one top-level window. No new crates or UI framework
-are added: the header, dropdown, and settings panel are plain Win32 drawn with
-the existing `windows-sys` bindings. Other platforms are unchanged.
-
-![Alacritty Tabbed: opening tabs, choosing a profile, reordering tabs, editing
-profiles in settings, and fullscreen](docs/windows-tabs/demo.gif)
-
-[Watch the demo as MP4](docs/windows-tabs/demo.mp4)
+![Tabs in the caption, with the new-tab menu open](docs/tabs/tabs.png)
 
 ## Features
 
-**Integrated tab header.** Tabs, the + button, a profile dropdown, settings, and
-the window controls share one row in place of the native caption. Drag tabs
-sideways to reorder them.
+**Tabs in the caption.** The tab bar replaces the window's title bar: the logo
+and computer name, the tabs on a rounded track, the + button with its profile
+menu, settings, and the window controls share one row, and the terminal sits in
+a rounded panel below it. Drag the empty bar to move the window, double-click it
+to maximize, right-click it for the system menu (Windows and Wayland), and drag
+the edges to resize. Fullscreen keeps the bar and fills the rest of the screen
+with the terminal. The layout is the same everywhere; the window controls take
+each system's look: flat buttons on Windows, round ones on Linux, and the red,
+yellow and green lights on macOS.
 
-**Profiles with real icons.** The dropdown beside + lists PowerShell 7, Windows
-PowerShell, Command Prompt, Git Bash, and every registered WSL distribution,
-each with the program's or distribution's own icon.
+**Tabs.** Each tab is a full Alacritty terminal with its own PTY and state;
+the tabs of a window share its renderer. Drag tabs to reorder them, close them
+with × or a middle click, and scroll over the bar to switch.
 
-**Settings panel.** The gear opens per-profile settings: name, icon, command
-line, starting directory, environment variables, and Alacritty configuration
-overrides (such as `font.size=14`), plus the default profile and dropdown
-visibility. Duplicate profiles and drag them in the sidebar to reorder them.
-Profiles are saved to `%APPDATA%\alacritty\profiles.toml`.
+**Profiles with icons.** The ⌄ menu beside + lists profiles with their
+program's icon: the executable's icon on Windows, with each WSL distribution's
+own artwork and Git Bash's logo; the desktop entry's icon on Linux; the
+application's icon on macOS. A profile can set its own image or an emoji.
 
-**Fullscreen keeps the tabs.** F11 or Alt+Enter goes fullscreen with the header
-still visible and the terminal edge to edge below it.
+**Settings panel.** The gear opens the profile settings: name, icon, command
+line, starting directory, environment variables, configuration overrides, the
+default profile, and whether a profile shows in the menu. Browse buttons use the
+system's file pickers. Profiles can be added, duplicated, deleted, and dragged
+to reorder them. They are saved to `profiles.toml` beside `alacritty.toml`,
+which can also be edited by hand.
 
-**Light and dark themes.** Header colors come from your configured color
-scheme. Narrow windows get overflow arrows.
-
-![Tab header, light theme](docs/windows-tabs/header-preview-light.png)
+![Profile settings](docs/tabs/settings.png)
 
 ## Enable
 
@@ -48,46 +44,53 @@ scheme. Narrow windows get overflow arrows.
 tabs = true
 ```
 
-`window.tabs` is Windows-only, defaults to `false`, and needs a restart to
-change.
+Restart Alacritty after changing `window.tabs`.
 
-| Keys | Action |
-| --- | --- |
-| Ctrl+Shift+T | New tab with the default profile |
-| Ctrl+Shift+U | New tab with the default WSL distribution |
-| Ctrl+Tab / Ctrl+Shift+Tab | Next / previous tab |
-| Ctrl+1 to Ctrl+8, Ctrl+9 | Select a tab, or the last tab |
-| Ctrl+Shift+W, middle click | Close a tab |
-| F11, Alt+Enter | Toggle fullscreen |
+| Keys (Windows, Linux) | macOS | Action |
+| --- | --- | --- |
+| Ctrl+Shift+T, + | Cmd+T, + | New tab with the default profile |
+| ⌄ beside + | ⌄ beside + | Choose a profile (arrow keys and Enter work) |
+| Ctrl+Tab / Ctrl+Shift+Tab | Cmd+Shift+] / Cmd+Shift+[ | Next / previous tab |
+| Ctrl+1 to Ctrl+8, Ctrl+9 | Cmd+1 to Cmd+8, Cmd+9 | Select a tab, or the last tab |
+| Ctrl+Shift+W, ×, middle click | Cmd+W, ×, middle click | Close a tab |
+| Ctrl+Shift+U (Windows) | | New tab with the default WSL distribution |
+| F11 | Ctrl+Cmd+F | Toggle fullscreen |
 
-Bindings can be changed with `keyboard.bindings`. See
-[WINDOWS_TABS.md](WINDOWS_TABS.md) for all controls, profile settings, the
-implementation, and known limits.
+Keys bound in `keyboard.bindings` keep their meaning, and the `CreateNewTab`,
+`SelectNextTab`, `SelectPreviousTab`, `SelectTab1`-`SelectTab9` and
+`SelectLastTab` actions work on every platform. The window's close button closes
+all of its tabs.
 
-## Build
+## Profiles
 
-Building needs Rust 1.85+ with the MSVC toolchain and the Visual Studio C++ build
-tools.
+Until profiles are saved, the menu offers the installed shells: PowerShell,
+Windows PowerShell, Command Prompt, Git Bash and each WSL distribution on
+Windows, and the shells in `/etc/shells` elsewhere. The default profile starts
+the first tab of each window and every new tab.
 
-```powershell
-git clone https://github.com/Mano-Liaoyan/alacritty-tabbed.git
-cd alacritty-tabbed
-cargo build --release --locked --no-default-features -p alacritty
+```toml
+default = "Bash"                      # Profile for new windows, + and the new-tab keys.
+
+[[profile]]
+name = "Bash"
+command = "bash --login"              # Empty uses the shell from alacritty.toml.
+directory = "~/projects"              # Empty starts in the home directory.
+icon = "~/icons/bash.png"             # An image, or text such as "🐧"; empty uses the program's icon.
+env = { EDITOR = "vim" }
+options = ["font.size=14"]            # Configuration overrides for this profile's tabs.
+hidden = false                        # Leave out of the menu.
 ```
 
-The executable is `target/release/alacritty.exe`.
+Icons can be PNG files everywhere, `.ico`, `.exe` and `.dll` files on Windows,
+and `.icns` files or application bundles on macOS. On Linux, icon themes that
+only ship SVG icons fall back to the profile's initial.
 
 ## Syncing with upstream
 
-```sh
-git remote add upstream https://github.com/alacritty/alacritty.git  # once
-git fetch upstream --tags
-git checkout main
-git merge upstream/master   # or a release tag, e.g. v0.18.0
-```
-
-The fork's changes stay out of upstream files where they can, and this section
-sits above upstream's README, so merges should conflict rarely.
+The fork's code lives in `alacritty/src/window_context/tabs*`. Upstream files
+only gain a few isolated lines, and its dependencies are declared in one block at
+the end of `alacritty/Cargo.toml` without adding packages to `Cargo.lock`, so
+GitHub's "Sync fork" or merging `upstream/master` should not conflict.
 
 ---
 
