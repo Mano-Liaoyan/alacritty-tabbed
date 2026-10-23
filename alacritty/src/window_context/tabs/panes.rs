@@ -38,6 +38,8 @@ pub struct Effects {
     area: Option<Rect>,
     /// Where a dragged pane would drop, and how visible that is; updated as it is drawn.
     drop: Cell<Option<(Tween<Rect>, Tween<f32>)>>,
+    /// The moment the terminals are drawn for, which their chrome is drawn for too.
+    clock: Cell<Option<Instant>>,
 }
 
 struct Motion {
@@ -96,6 +98,11 @@ impl Effects {
         })
     }
 
+    /// Draw the chrome for `now`, the moment the terminals of the next frame are drawn for.
+    pub fn hold(&self, now: Instant) {
+        self.clock.set(Some(now));
+    }
+
     fn motion(&self, id: WindowId) -> Option<&Motion> {
         self.panes.iter().find(|motion| motion.id == id)
     }
@@ -115,7 +122,8 @@ impl Effects {
 
     /// Where to draw the drop preview at `now`, and how visible it is, moving to `target`.
     fn preview(&self, target: Option<Rect>, now: Instant) -> Option<(Rect, f32)> {
-        let mut drop = self.drop.get();
+        // A preview that faded out pops in afresh.
+        let mut drop = self.drop.get().filter(|(_, alpha)| alpha.get(now) > 0.);
         match (&mut drop, target) {
             (Some((rect, alpha)), target) => {
                 if let Some(target) = target {
@@ -139,8 +147,9 @@ impl Effects {
 /// Draw the panel of each pane of the active tab, with the chrome around it, the focused pane's
 /// border lit when the tab has several, and where a dragged pane would drop.
 pub fn draw(tabs: &Tabs, layout: &Layout, palette: &Palette, layer: &mut Layer, now: Instant) {
-    let Some(tab) = tabs.tabs.get(tabs.active) else { return };
     let effects = &tabs.pane_effects;
+    let now = effects.clock.take().unwrap_or(now);
+    let Some(tab) = tabs.tabs.get(tabs.active) else { return };
     let grouped = tab.panes.len() > 1;
     // Without a panel, panes are only outlined once there are several.
     let (margin, radius) = match layout.panel {
@@ -164,7 +173,11 @@ pub fn draw(tabs: &Tabs, layout: &Layout, palette: &Palette, layer: &mut Layer, 
         _ => None,
     };
     let line = layout.px(1.).max(1.);
-    for &(index, card) in &cards {
+    let widths = (line, layout.px(2.).round().max(line));
+    // The focused pane is drawn last, over the others that may slide under it.
+    let focused = cards.iter().find(|&&(index, _)| index == tab.focus).map(|&(_, card)| card);
+    let (front, back): (Vec<_>, Vec<_>) = cards.iter().partition(|&&(index, _)| index == tab.focus);
+    for &(index, card) in back.into_iter().chain(front) {
         let lit = grouped && (index == tab.focus || hovered == Some(index));
         let (light, tint) = effects.light(tab.panes[index].id, lit, hovered == Some(index), now);
         if !layout.panel && !grouped {
@@ -173,7 +186,8 @@ pub fn draw(tabs: &Tabs, layout: &Layout, palette: &Palette, layer: &mut Layer, 
         if tint > 0. {
             layer.rounded_alpha(card, radius, palette.primary, TINT * tint);
         }
-        border(layer, card, radius, palette, light, (line, layout.px(2.).round().max(line)));
+        let above = focused.filter(|_| index != tab.focus);
+        border(layer, card, radius, palette, light, widths, above);
     }
 
     // Where the dragged pane would go, beside one of the panes.
@@ -192,39 +206,39 @@ pub fn draw(tabs: &Tabs, layout: &Layout, palette: &Palette, layer: &mut Layer, 
 }
 
 /// The border of a pane's `card`, from the panel's outline to the accent and from the `widths`'
-/// first to second as it is `light`, with a glow around it.
+/// first to second as it is `light`, hidden where the card is under `above`.
 fn border(
     layer: &mut Layer,
     card: Rect,
     radius: f32,
     palette: &Palette,
     light: f32,
-    widths: (f32, f32),
+    (thin, thick): (f32, f32),
+    above: Option<Rect>,
 ) {
     let color = mix(palette.card_outline, palette.primary, light);
-    let width = (widths.0 + (widths.1 - widths.0) * light).round();
+    // A lit border grows by whole pixels.
+    let width = if light > 0. { (thin + (thick - thin) * light).round() } else { thin };
+    if above.is_none_or(|above| !overlap(card, above)) {
+        layer.corners(card, radius, palette.chrome, color, width);
+    }
     let (w, h) = (card.w - 2. * radius, card.h - 2. * radius);
-    layer.corners(card, radius, palette.chrome, color, width);
-    for (rect, alpha) in
-        [(card, 1.), (card.inset(-width), 0.3 * light), (card.inset(-2. * width), 0.12 * light)]
-    {
-        if alpha <= 0. {
-            continue;
-        }
-        let edges = [
-            Rect::new(rect.x + radius, rect.y, w, width),
-            Rect::new(rect.x + radius, rect.bottom() - width, w, width),
-            Rect::new(rect.x, rect.y + radius, width, h),
-            Rect::new(rect.right() - width, rect.y + radius, width, h),
-        ];
-        for edge in edges {
-            if alpha >= 1. {
-                layer.rect(edge, color);
-            } else {
-                layer.rounded_alpha(edge, 0., palette.primary, alpha);
-            }
+    let edges = [
+        Rect::new(card.x + radius, card.y, w, width),
+        Rect::new(card.x + radius, card.bottom() - width, w, width),
+        Rect::new(card.x, card.y + radius, width, h),
+        Rect::new(card.right() - width, card.y + radius, width, h),
+    ];
+    let above: Vec<_> = above.into_iter().collect();
+    for edge in edges {
+        for part in around(edge, &above) {
+            layer.rect(part, color);
         }
     }
+}
+
+fn overlap(a: Rect, b: Rect) -> bool {
+    a.x < b.right() && b.x < a.right() && a.y < b.bottom() && b.y < a.bottom()
 }
 
 /// The smallest rectangle holding both `a` and `b`.
@@ -362,6 +376,26 @@ mod tests {
         assert_eq!(half(rect, Axis::Row, Side::After), Rect::new(60., 20., 50., 50.));
         assert_eq!(half(rect, Axis::Column, Side::Before), Rect::new(10., 20., 100., 25.));
         assert_eq!(half(rect, Axis::Column, Side::After), Rect::new(10., 45., 100., 25.));
+    }
+
+    #[test]
+    fn faded_preview_pops_in_afresh() {
+        let now = Instant::now();
+        let effects = Effects::default();
+        effects.preview(Some(LEFT), now);
+        let end = after(now, DROP_MS);
+        effects.preview(None, end);
+        let later = after(end, DROP_MS) + Duration::from_millis(1);
+        assert_eq!(effects.preview(None, later), None);
+        effects.preview(Some(RIGHT), later);
+        let (rect, _) = effects.drop.get().unwrap();
+        assert_eq!(rect.get(later), if scale() > 0. { popped(RIGHT) } else { RIGHT });
+    }
+
+    #[test]
+    fn overlaps() {
+        assert!(overlap(LEFT, Rect { x: 399., ..RIGHT }));
+        assert!(!overlap(LEFT, RIGHT), "touching is not overlapping");
     }
 
     /// Covered area, by counting whole pixels.

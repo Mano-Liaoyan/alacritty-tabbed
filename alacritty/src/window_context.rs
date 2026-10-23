@@ -43,6 +43,7 @@ use crate::logging::LOG_TARGET_IPC_CONFIG;
 use crate::message_bar::MessageBuffer;
 use crate::renderer::Frame;
 use crate::scheduler::Scheduler;
+use crate::window_context::tabs::Rect;
 use crate::{input, renderer};
 
 pub mod tabs;
@@ -394,7 +395,12 @@ impl WindowContext {
         let now = Instant::now();
         let tabs = &self.display.tabs;
         let panes = tabs.background_panes(now);
-        if panes.is_empty() && !tabs.animating(now) {
+        let rect = tabs.focused_frame(now);
+        let size = self.display.size_info;
+        // A lone terminal at rest fills the window below the bar, as without tabs.
+        if panes.is_empty()
+            && rect == Rect::new(0., tabs.height as f32, size.width(), size.height())
+        {
             let terminal = self.terminal.lock();
             self.display.draw(
                 terminal,
@@ -404,7 +410,6 @@ impl WindowContext {
                 &mut self.search_state,
             );
         } else {
-            let rect = tabs.focused_frame(now);
             let height = self.display.window.inner_size().height as f32;
             self.display.begin(&self.config);
             for pane in panes {
@@ -415,8 +420,7 @@ impl WindowContext {
                 terminal.is_focused = false;
                 self.display.draw_pane(terminal, pane.size, &pane.config, frame);
             }
-            let frame =
-                Frame::new(&self.display.size_info, [rect.x, rect.y, rect.w, rect.h], height);
+            let frame = Frame::new(&size, [rect.x, rect.y, rect.w, rect.h], height);
             self.display.draw_terminal(
                 self.terminal.lock(),
                 &self.message_buffer,
@@ -427,8 +431,9 @@ impl WindowContext {
             self.display.present(scheduler, &self.config);
         }
 
-        // Keep drawing while the panes or the tabs move, which drawing may have started.
-        if self.display.tabs.animating(Instant::now()) {
+        // Keep drawing while the panes or the tabs move, which drawing may have started, until
+        // a frame is drawn at rest.
+        if self.display.tabs.animating(now) {
             if self.display.window.has_frame {
                 self.display.window.request_redraw();
             } else {
