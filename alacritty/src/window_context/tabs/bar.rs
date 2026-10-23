@@ -65,6 +65,9 @@ const EDIT_PROFILES: &str = "Edit profiles…";
 /// Most icons a grouped tab stacks in its badge.
 const STACK: usize = 4;
 
+/// Where the icons of a tab's panes are drawn, by the panes' indices.
+type Icons = Vec<(usize, Rect)>;
+
 /// macOS keeps its own red, yellow and green window buttons at the left.
 const MAC: bool = cfg!(target_os = "macos");
 
@@ -117,7 +120,7 @@ pub struct Layout {
     track: Rect,
     tabs: Vec<(usize, Rect)>,
     /// Icons of the grouped tabs' panes fanned out, by tab, with where the stack ends.
-    stacks: Vec<(usize, f32, Vec<(usize, Rect)>)>,
+    stacks: Vec<(usize, f32, Icons)>,
     buttons: Vec<(Hit, Rect)>,
     terminal: Rect,
     /// The menu and the height of its rows.
@@ -396,7 +399,7 @@ fn stack(
     focus: usize,
     scale: f32,
     motion: impl Fn(usize) -> (f32, f32),
-) -> Vec<(usize, Rect)> {
+) -> Icons {
     let behind = (0..count).filter(|&pane| pane != focus);
     let (left, middle) = (front.x, front.center().1);
     let mut icons: Vec<_> = iter::once(focus)
@@ -962,8 +965,8 @@ mod tests {
 
     #[test]
     fn icon_entered_at_rest_stays_under_a_still_pointer() {
-        for scale in [1., 1.25, 2.] {
-            let front = Rect::new(100., 15., (18. * scale as f32).round(), 18.);
+        for scale in [1f32, 1.25, 2.] {
+            let front = Rect::new(100., 15., (18. * scale).round(), 18.);
             let rest = stack(front, 4, 1, scale, at_rest);
             let fanned = stack(front, 4, 1, scale, |_| (1., 0.));
             let left = rest.last().unwrap().1.x;
