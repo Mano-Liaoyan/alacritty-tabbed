@@ -631,7 +631,10 @@ mod tests {
 
     #[test]
     fn caps_lines_and_bytes() {
-        let input: String = (1..=2_500).map(|n| format!("{n}\r\n")).collect();
+        let input = (1..=2_500).fold(String::new(), |mut input, n| {
+            let _ = write!(input, "{n}\r\n");
+            input
+        });
         let term = written(term(10, 5), &input);
         let all = text(term.grid(), LINES, BYTES);
         let lines: Vec<_> = all.split("\r\n").collect();
