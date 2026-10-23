@@ -42,6 +42,19 @@ which can also be edited by hand.
 
 ![Profile settings](docs/tabs/settings.png)
 
+**Interface font.** The bar, its menus and the settings use a proportional
+interface font of their own, apart from the terminal's font: the system's
+interface font on macOS (San Francisco, else Helvetica Neue) and Windows
+(Segoe UI), and on Linux the first installed of Inter, Adwaita Sans, Noto Sans
+and other common interface fonts. Emphasized text uses the family's SemiBold or Medium face when it has
+one. Choose another family or size in `alacritty.toml`; changes apply live:
+
+```toml
+[window.ui_font]
+family = "Inter"  # Empty picks the system's interface font.
+size = 10         # Points; the default is 10, or 13 on macOS.
+```
+
 ## Disable
 
 Tabs are on by default. To turn them off:

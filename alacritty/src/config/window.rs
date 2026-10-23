@@ -30,6 +30,9 @@ pub struct WindowConfig {
     /// Show a tab bar and group terminals of a window in tabs.
     pub tabs: bool,
 
+    /// Font of the tab bar, its menus and the settings, apart from the terminal's.
+    pub ui_font: UiFont,
+
     /// XEmbed parent.
     #[config(skip)]
     #[serde(skip_serializing)]
@@ -84,6 +87,7 @@ impl Default for WindowConfig {
             decorations: Default::default(),
             startup_mode: Default::default(),
             tabs: true,
+            ui_font: Default::default(),
             dynamic_padding: Default::default(),
             resize_increments: Default::default(),
             decorations_theme_variant: Default::default(),
@@ -156,6 +160,24 @@ impl WindowConfig {
 
     pub fn theme(&self) -> Option<WinitTheme> {
         self.decorations_theme_variant.map(WinitTheme::from)
+    }
+}
+
+/// Font of the interface around the terminal.
+#[derive(ConfigDeserialize, Serialize, Debug, Clone, PartialEq)]
+pub struct UiFont {
+    /// Font family; empty picks the system's interface font.
+    pub family: String,
+
+    /// Font size in points.
+    pub size: f32,
+}
+
+impl Default for UiFont {
+    fn default() -> Self {
+        // macOS sizes fonts in pixels, other systems in points of 4/3 pixels.
+        let size = if cfg!(target_os = "macos") { 13. } else { 10. };
+        Self { family: String::new(), size }
     }
 }
 

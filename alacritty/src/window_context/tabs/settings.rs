@@ -3,7 +3,6 @@
 use std::path::Path;
 use std::sync::mpsc::{Receiver, TryRecvError, channel};
 
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use winit::dpi::PhysicalPosition;
 use winit::event::{KeyEvent, MouseButton};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
@@ -17,8 +16,9 @@ use crate::display::window::Window;
 
 use super::bar::Layout;
 use super::fonts::{self, Family};
-use super::paint::{BLACK, Layer, Palette, Rect, fit, mix};
+use super::paint::{BLACK, Layer, Palette, Rect, mix};
 use super::profiles::{self, Profile, Profiles};
+use super::text::UiFont;
 use super::{icons, platform};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -335,7 +335,7 @@ impl Settings {
 
     fn panel(&self, layout: &Layout) -> Panel {
         let px = |value: f32| layout.px(value);
-        let (cw, ch) = layout.cell;
+        let (font, ch) = (&*layout.font, layout.line);
         let (window, bar, height) = (layout.width, layout.bar, layout.height);
         let w = px(920.).min(window - px(24.)).max(0.);
         let h = px(700.).min(height - bar - px(12.)).max(0.);
@@ -344,11 +344,12 @@ impl Settings {
         let (x, y) = (dialog.x, dialog.y);
         let title = px(48.);
 
-        // Text takes the terminal's font, so text-bound widths follow its cells; a narrow dialog
-        // leaves most of its width to the profile.
-        let side = px(240.).max((20. * cw + px(88.)).round()).min((w * 0.4).round());
+        // Widths bound to text follow the interface's font; a narrow dialog leaves most of its
+        // width to the profile.
+        let side = px(240.).max((20. * font.average() + px(88.)).round()).min((w * 0.4).round());
         let sidebar = Rect::new(x + px(8.), y + title, side, (h - title - px(8.)).max(0.));
-        let (new_width, duplicate_width) = (px(40.) + 11. * cw, px(40.) + 9. * cw);
+        let new_width = px(48.) + font.width("New profile", false);
+        let duplicate_width = px(48.) + font.width("Duplicate", false);
         let shrink = ((side - px(16.)) / (new_width + duplicate_width)).clamp(0., 1.);
         let new_profile = Rect::new(
             x + px(14.),
@@ -379,7 +380,7 @@ impl Settings {
         let width = x1 - x0;
         let narrow = width < px(440.);
         let button = px(88.).min((width * 0.22).round());
-        let all_fonts = (px(32.) + 14. * cw).min((width * 0.45).round());
+        let all_fonts = (px(40.) + font.width("Show all fonts", false)).min((width * 0.45).round());
 
         // Delete, Cancel and Save stay at the card's bottom, with the status beside or above them.
         let (save, cancel) =
@@ -903,47 +904,58 @@ impl Settings {
         point: PhysicalPosition<f64>,
         layout: &Layout,
     ) -> usize {
-        let (rect, (cw, ch)) = (panel.fields[field.index()], layout.cell);
+        let rect = panel.fields[field.index()];
         let text = self.text(field);
-        let (first_line, first_column) = self.scrolled(field, rect, layout);
+        let (first_line, skip) = self.scrolled(field, rect, layout);
         let line = if field.multiline() {
-            first_line + ((point.y as f32 - rect.y - layout.px(8.)) / ch).max(0.) as usize
+            first_line + ((point.y as f32 - rect.y - layout.px(8.)) / layout.line).max(0.) as usize
         } else {
             0
         };
-        let column = first_column
-            + ((point.x as f32 - rect.x - layout.px(10.)) / cw).round().max(0.) as usize;
         let start =
             text.split('\n').take(line).map(|line| line.len() + 1).sum::<usize>().min(text.len());
         let line_text = text[start..].split('\n').next().unwrap_or("");
-        let mut width = 0;
-        let end = line_text.char_indices().find(|(_, c)| {
-            width += c.width().unwrap_or(0);
-            width > column
-        });
-        start + end.map_or(line_text.len(), |(index, _)| index)
+        start + layout.font.offset(line_text, point.x as f32 - rect.x - layout.px(10.) + skip)
     }
 
-    /// Line and column of the caret in the focused field.
-    fn caret_position(&self, field: Field) -> (usize, usize) {
+    /// Line of the caret in the focused field, and its distance from the start of the line.
+    fn caret_position(&self, field: Field, font: &UiFont) -> (usize, f32) {
         let before = &self.text(field)[..self.caret.min(self.text(field).len())];
         let line_start = before.rfind('\n').map_or(0, |index| index + 1);
-        (before.matches('\n').count(), before[line_start..].width() + self.preedit.width())
+        let x = font.width(&before[line_start..], false) + font.width(&self.preedit, false);
+        (before.matches('\n').count(), x)
     }
 
-    /// First line and column shown, keeping the caret visible.
-    fn scrolled(&self, field: Field, rect: Rect, layout: &Layout) -> (usize, usize) {
+    /// The field's text with any text being composed by the input method.
+    fn composed(&self, field: Field) -> String {
+        let mut text = self.text(field).to_owned();
+        if self.focus == Some(field) {
+            text.insert_str(self.caret.min(text.len()), &self.preedit);
+        }
+        text
+    }
+
+    /// First line shown, and the width of text scrolled out at the left, keeping the caret
+    /// visible.
+    fn scrolled(&self, field: Field, rect: Rect, layout: &Layout) -> (usize, f32) {
         if self.focus != Some(field) {
-            return (0, 0);
+            return (0, 0.);
         }
-        let (line, column) = self.caret_position(field);
-        let columns = ((rect.w - layout.px(20.)) / layout.cell.0).max(1.) as usize;
-        let lines = ((rect.h - layout.px(16.)) / layout.cell.1).max(1.) as usize;
+        let (line, x) = self.caret_position(field, &layout.font);
         if field.multiline() {
-            (line.saturating_sub(lines - 1), 0)
-        } else {
-            (0, column.saturating_sub(columns - 1))
+            let lines = ((rect.h - layout.px(16.)) / layout.line).max(1.) as usize;
+            return (line.saturating_sub(lines - 1), 0.);
         }
+        // Scroll by as few whole characters as show the caret.
+        let room = (rect.w - layout.px(20.)).max(1.);
+        let mut skip = 0.;
+        for (_, advance) in layout.font.advances(&self.composed(field), false) {
+            if x - skip <= room {
+                break;
+            }
+            skip += advance;
+        }
+        (0, skip)
     }
 
     /// Insert text at the caret of the focused field.
@@ -1018,7 +1030,7 @@ impl Settings {
                     Key::Named(NamedKey::End) => self.caret = line_end,
                     Key::Named(NamedKey::ArrowUp | NamedKey::ArrowDown) if field.multiline() => {
                         let up = key == Key::Named(NamedKey::ArrowUp);
-                        let column = text[line_start..self.caret].width();
+                        let x = layout.font.width(&text[line_start..self.caret], false);
                         let line = match up {
                             true if line_start > 0 => {
                                 text[..line_start - 1].rfind('\n').map_or(0, |i| i + 1)
@@ -1028,12 +1040,7 @@ impl Settings {
                         };
                         let rest = &text[line..];
                         let rest = &rest[..rest.find('\n').unwrap_or(rest.len())];
-                        let mut width = 0;
-                        let end = rest.char_indices().find(|(_, c)| {
-                            width += c.width().unwrap_or(0);
-                            width > column
-                        });
-                        self.caret = line + end.map_or(rest.len(), |(index, _)| index);
+                        self.caret = line + layout.font.offset(rest, x);
                     },
                     Key::Named(NamedKey::Enter) if field.multiline() => self.insert("\n"),
                     Key::Named(NamedKey::Enter) => self.save(config),
@@ -1163,16 +1170,16 @@ impl Settings {
     ) -> Vec<Layer> {
         let panel = self.panel(layout);
         let px = |value: f32| layout.px(value);
-        let (cw, ch) = layout.cell;
+        let (font, ch) = (&*layout.font, layout.line);
         let line = px(1.).max(1.);
         let mut layer = Layer::default();
         let hover = |target: Target| self.hover == Some(target) && self.enabled(target);
         let center = |layer: &mut Layer, rect: Rect, text: &str, color: Rgb, bold: bool| {
-            layer.label(rect, &fit(text, (rect.w / cw) as usize), (cw, ch), color, bold)
+            layer.label(rect, text, font, color, bold)
         };
         let left = |layer: &mut Layer, rect: Rect, text: &str, color: Rgb, bold: bool| {
             let y = rect.center().1 - ch / 2.;
-            layer.text(rect.x, y, fit(text, (rect.w / cw).max(0.) as usize), color, bold)
+            layer.text(rect.x, y, font.fit(text, rect.w.max(0.), bold), color, bold)
         };
 
         // The dialog floats over the dimmed window.
@@ -1225,9 +1232,9 @@ impl Settings {
             };
             let profile = self.entries[index].draft();
             let icon = Rect::new(rect.x + px(8.), rect.y, px(18.), rect.h).square(px(18.));
-            self.icon(&mut layer, icon, &profile, config, palette, surface, (cw, ch));
+            self.icon(&mut layer, icon, &profile, config, palette, surface, font);
             let name = if profile.name.is_empty() { "Untitled" } else { &profile.name };
-            let tag_width = 7. * cw + px(8.);
+            let tag_width = font.width("Default", false) + px(16.);
             let tag = if self.default == Some(index) { tag_width } else { px(8.) };
             let label = Rect::new(
                 icon.right() + px(10.),
@@ -1290,7 +1297,7 @@ impl Settings {
             config,
             palette,
             palette.raised,
-            (cw, ch),
+            font,
         );
 
         for field in FIELDS {
@@ -1300,27 +1307,19 @@ impl Settings {
             content.outlined(rect, px(7.), palette.field, outline, line);
 
             // Text scrolled to the caret, with any text being composed by the input method.
-            let (first_line, first_column) = self.scrolled(field, rect, layout);
-            let mut text = self.text(field).to_owned();
-            if focused {
-                text.insert_str(self.caret.min(text.len()), &self.preedit);
-            }
-            let columns = ((rect.w - px(20.)) / cw).max(0.) as usize;
+            let (first_line, skip) = self.scrolled(field, rect, layout);
+            let text = self.composed(field);
+            let room = (rect.w - px(20.)).max(0.);
             let lines =
                 if field.multiline() { ((rect.h - px(16.)) / ch).max(1.) as usize } else { 1 };
             let top = if field.multiline() { rect.y + px(8.) } else { rect.center().1 - ch / 2. };
             for (index, line_text) in text.split('\n').skip(first_line).take(lines).enumerate() {
-                let mut width = 0;
-                let visible: String = line_text
-                    .chars()
-                    .skip_while(|c| {
-                        width += c.width().unwrap_or(0);
-                        width <= first_column
-                    })
-                    .collect();
-                let visible = visible.chars().scan(0, |width, c| {
-                    *width += c.width().unwrap_or(0);
-                    (*width <= columns).then_some(c)
+                let mut end = 0.;
+                let advances = font.advances(line_text, false);
+                let visible = line_text.chars().zip(advances).filter_map(|(c, (_, advance))| {
+                    let start = end;
+                    end += advance;
+                    (start >= skip && end - skip <= room).then_some(c)
                 });
                 content.text(
                     rect.x + px(10.),
@@ -1332,16 +1331,16 @@ impl Settings {
             }
 
             if focused {
-                let (caret_line, caret_column) = self.caret_position(field);
-                let x = rect.x + px(10.) + (caret_column - first_column) as f32 * cw;
+                let (caret_line, caret_x) = self.caret_position(field, font);
+                let x = (rect.x + px(10.) + caret_x - skip).round();
                 let y = top + (caret_line - first_line) as f32 * ch;
                 if !self.preedit.is_empty() {
-                    let width = self.preedit.width() as f32 * cw;
+                    let width = font.width(&self.preedit, false);
                     content
                         .rect(Rect::new(x - width, y + ch - line, width, line), palette.foreground);
                 }
                 content.rect(Rect::new(x, y, px(1.5).max(1.), ch), palette.foreground);
-                let size = SizeInfo::new(layout.width, layout.bar, cw, ch, x, y, false);
+                let size = SizeInfo::new(layout.width, layout.bar, font.average(), ch, x, y, false);
                 window.update_ime_position(Point::new(0, Column(0)), &size);
             }
 
@@ -1353,8 +1352,8 @@ impl Settings {
             // Hints show where they fit beside their label.
             let (name, hint) = (field.label(), field.hint());
             left(&mut content, label, name, palette.foreground, true);
-            let hint_width = hint.width() as f32 * cw;
-            if (name.width() + 2) as f32 * cw + hint_width <= label.w {
+            let hint_width = font.width(hint, false);
+            if font.width(name, true) + px(16.) + hint_width <= label.w {
                 let hint_rect = Rect::new(label.right() - hint_width, label.y, hint_width, label.h);
                 left(&mut content, hint_rect, hint, palette.muted, false);
             }
@@ -1442,7 +1441,7 @@ impl Settings {
                     layer.text(
                         text.x,
                         rect.center().1,
-                        fit(hint, (text.w / cw) as usize),
+                        font.fit(hint, text.w, false),
                         palette.muted,
                         false,
                     );
@@ -1486,8 +1485,8 @@ impl Settings {
         if let Some((message, error)) = &self.status {
             let color =
                 if *error { mix(palette.danger, palette.foreground, 0.25) } else { palette.muted };
-            let message = fit(message, (panel.status.w / cw) as usize);
-            let x = panel.status.right() - message.width() as f32 * cw;
+            let message = font.fit(message, panel.status.w, false);
+            let x = panel.status.right() - font.width(&message, false);
             layer.text(x, panel.status.center().1 - ch / 2., message, color, false);
         }
 
@@ -1508,18 +1507,18 @@ impl Settings {
             };
             let current = self.text(Field::Font).trim();
             let tag = "Mono";
-            for (index, font) in candidates.iter().enumerate().skip(first).take(shown) {
+            for (index, family) in candidates.iter().enumerate().skip(first).take(shown) {
                 let item = Rect::new(rows.x, rows.y + (index - first) as f32 * row, rows.w, row);
                 if highlighted == Some(index) {
                     popup.rounded(item, px(6.), palette.hover);
                 }
-                let tagged = self.all_fonts && font.mono;
-                let tag_width = if tagged { (tag.width() + 2) as f32 * cw } else { 0. };
+                let tagged = self.all_fonts && family.mono;
+                let tag_width = if tagged { font.width(tag, false) + px(16.) } else { 0. };
                 let name = Rect::new(item.x + px(10.), item.y, item.w - px(20.) - tag_width, row);
-                let chosen = font.name.eq_ignore_ascii_case(current);
-                left(&mut popup, name, &font.name, palette.foreground, chosen);
+                let chosen = family.name.eq_ignore_ascii_case(current);
+                left(&mut popup, name, &family.name, palette.foreground, chosen);
                 if tagged {
-                    let x = item.right() - px(10.) - tag.width() as f32 * cw;
+                    let x = item.right() - px(10.) - font.width(tag, false);
                     popup.text(x, item.center().1 - ch / 2., tag.into(), palette.muted, false);
                 }
             }
@@ -1566,11 +1565,9 @@ impl Settings {
             );
             let title = "Logos";
             left(&mut popup, header, title, palette.muted, false);
-            let hovered = fit(
-                name(highlighted),
-                ((header.w / cw) as usize).saturating_sub(title.width() + 2),
-            );
-            let x = header.right() - hovered.width() as f32 * cw;
+            let room = header.w - font.width(title, false) - px(16.);
+            let hovered = font.fit(name(highlighted), room.max(0.), false);
+            let x = header.right() - font.width(&hovered, false);
             popup.text(x, header.center().1 - ch / 2., hovered, palette.foreground, false);
 
             let rows = ((cells.h / cell).round() as usize).max(1);
@@ -1594,7 +1591,7 @@ impl Settings {
                     Some(image) => popup.image(icon, &image, palette.foreground),
                     None => {
                         let own = Profile { icon: String::new(), ..profile.clone() };
-                        self.icon(&mut popup, icon, &own, config, palette, surface, (cw, ch));
+                        self.icon(&mut popup, icon, &own, config, palette, surface, font);
                     },
                 }
             }
@@ -1619,14 +1616,14 @@ impl Settings {
         config: &UiConfig,
         palette: &Palette,
         surface: Rgb,
-        cell: (f32, f32),
+        font: &UiFont,
     ) {
         match profile.image(config) {
             Some(image) => layer.image(rect, &image, palette.foreground),
             None => {
                 let accent = palette.accent(&profile.name);
                 layer.rounded(rect, rect.w / 4., mix(surface, accent, 0.3));
-                layer.label(rect, &profile.badge(), cell, accent, true);
+                layer.label(rect, &profile.badge(), font, accent, true);
             },
         }
     }

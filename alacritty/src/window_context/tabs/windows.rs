@@ -318,3 +318,40 @@ pub fn fonts() -> Vec<(String, bool)> {
         })
         .collect()
 }
+
+/// The face of a family in `style`, or else bold or regular, as DirectWrite knows it.
+fn face(family: &str, style: Option<&str>, bold: bool) -> Option<dwrote::Font> {
+    use dwrote::{FontCollection, FontStretch, FontStyle, FontWeight};
+
+    let family = FontCollection::system().font_family_by_name(family).ok()??;
+    match style {
+        Some(style) => (0..family.get_font_count())
+            .filter_map(|index| family.font(index).ok())
+            .find(|font| font.face_name() == style),
+        None => {
+            let weight = if bold { FontWeight::Bold } else { FontWeight::Regular };
+            family.first_matching_font(weight, FontStretch::Normal, FontStyle::Normal).ok()
+        },
+    }
+}
+
+/// Whether DirectWrite has the font family, in `style` if given.
+pub fn installed(family: &str, style: Option<&str>) -> bool {
+    face(family, style, false).is_some()
+}
+
+/// Advances of a face, which the rasterizer does not report on Windows.
+pub fn advances(
+    family: &str,
+    style: Option<&str>,
+    bold: bool,
+    size: crossfont::Size,
+) -> Option<super::text::Advances> {
+    let face = face(family, style, bold)?.create_font_face();
+    let scale = size.as_px() / f32::from(face.metrics().metrics0().designUnitsPerEm);
+    Some(Box::new(move |character| {
+        let index = *face.glyph_indices(&[character as u32]).ok()?.first()?;
+        let metrics = face.design_glyph_metrics(&[index], false).ok()?;
+        (index != 0).then(|| metrics.first().map(|glyph| glyph.advanceWidth as f32 * scale))?
+    }))
+}

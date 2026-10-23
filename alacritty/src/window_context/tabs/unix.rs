@@ -233,3 +233,43 @@ pub fn fonts() -> Vec<(String, bool)> {
     }
     fonts
 }
+
+/// Whether fontconfig has the font family, in `style` if given, rather than a substitute.
+#[cfg(not(target_os = "macos"))]
+pub fn installed(family: &str, style: Option<&str>) -> bool {
+    use std::ffi::CString;
+    use std::ptr;
+
+    use fontconfig_sys::constants::{FC_FAMILY, FC_STYLE};
+    use fontconfig_sys::*;
+
+    let Ok(family) = CString::new(family) else { return false };
+    let style = style.map(CString::new);
+    unsafe {
+        let pattern = FcPatternCreate();
+        FcPatternAddString(pattern, FC_FAMILY.as_ptr(), family.as_ptr().cast());
+        if let Some(Ok(style)) = &style {
+            FcPatternAddString(pattern, FC_STYLE.as_ptr(), style.as_ptr().cast());
+        }
+        let objects = FcObjectSetCreate();
+        FcObjectSetAdd(objects, FC_FAMILY.as_ptr());
+        let set = FcFontList(ptr::null_mut(), pattern, objects);
+        FcObjectSetDestroy(objects);
+        FcPatternDestroy(pattern);
+        let Some(set) = set.as_mut() else { return false };
+        let found = set.nfont > 0;
+        FcFontSetDestroy(set);
+        found
+    }
+}
+
+/// FreeType reports advances itself.
+#[cfg(not(target_os = "macos"))]
+pub fn advances(
+    _family: &str,
+    _style: Option<&str>,
+    _bold: bool,
+    _size: crossfont::Size,
+) -> Option<super::text::Advances> {
+    None
+}

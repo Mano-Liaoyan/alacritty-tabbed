@@ -415,7 +415,7 @@ impl Display {
         let rasterizer = Rasterizer::new()?;
 
         let font_size = config.font.size().scale(scale_factor);
-        debug!("Loading \"{}\" font", &config.font.normal().family);
+        debug!("Loading \"{}\" font", config.font.normal().family);
         let font = config.font.clone().with_size(font_size);
         let mut glyph_cache = GlyphCache::new(rasterizer, &font)?;
 
@@ -647,6 +647,7 @@ impl Display {
         self.renderer.with_loader(|mut api| {
             cache.reset_glyph_cache(&mut api);
         });
+        self.tabs.reset_glyphs();
     }
 
     // XXX: this function must not call to any `OpenGL` related tasks. Renderer updates are
@@ -1022,7 +1023,7 @@ impl Display {
             self.draw_hyperlink_preview(config, cursor_point, display_offset);
         }
 
-        self.tabs.draw(&mut self.renderer, &mut self.glyph_cache, &self.window, &size_info, config);
+        self.tabs.draw(&mut self.renderer, &self.window, &size_info, config);
 
         // Notify winit that we're about to present.
         self.window.pre_present_notify();
