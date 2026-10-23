@@ -118,23 +118,27 @@ impl Frame {
     #[cfg_attr(not(test), expect(dead_code, reason = "split panes are not drawn yet"))]
     pub fn new(size: &SizeInfo, [x, y, width, height]: [f32; 4], window_height: f32) -> Self {
         let y_bottom = window_height - y - height;
-        let clip = [x, y_bottom, width, height].map(|value| value.round() as i32);
-        Self { x, y_bottom, sx: width / size.width(), sy: height / size.height(), clip }
+        let (sx, sy) = (width / size.width(), height / size.height());
+        let frame = Self { x, y_bottom, sx, sy, clip: [0; 4] };
+        Self { clip: frame.area(size), ..frame }
     }
 
-    /// Viewport `[x, y, width, height]` of the whole of `size`, padding included.
+    /// Viewport `[x, y, width, height]` of the whole of `size`, padding included, with its edges
+    /// rounded to whole pixels.
     fn area(&self, size: &SizeInfo) -> [i32; 4] {
-        let (width, height) = (size.width() * self.sx, size.height() * self.sy);
-        [self.x as i32, self.y_bottom as i32, width as i32, height as i32]
+        let (left, bottom) = (self.x.round(), self.y_bottom.round());
+        let right = (self.x + size.width() * self.sx).round();
+        let top = (self.y_bottom + size.height() * self.sy).round();
+        [left, bottom, right - left, top - bottom].map(|value| value as i32)
     }
 }
 
 /// Viewport `[x, y, width, height]` of the cells of `size`, drawn in `frame`.
 fn viewport(size: &SizeInfo, frame: &Frame) -> [i32; 4] {
-    let (padding_x, padding_y) = (size.padding_x() * frame.sx, size.padding_y() * frame.sy);
-    let [_, _, width, height] = frame.area(size);
-    let (x, y) = (frame.x + padding_x, frame.y_bottom + padding_y);
-    [x as i32, y as i32, width - 2 * padding_x as i32, height - 2 * padding_y as i32]
+    let (padding_x, padding_y) =
+        ((size.padding_x() * frame.sx) as i32, (size.padding_y() * frame.sy) as i32);
+    let [x, y, width, height] = frame.area(size);
+    [x + padding_x, y + padding_y, width - 2 * padding_x, height - 2 * padding_y]
 }
 
 /// Wrapper around gl::GetString with error checking and reporting.
@@ -326,15 +330,14 @@ impl Renderer {
         }
 
         // Prepare rect rendering state.
-        let frame = self.frame.unwrap_or(Frame::ORIGIN);
+        let [x, y, width, height] = self.frame.unwrap_or(Frame::ORIGIN).area(size_info);
         unsafe {
             // Remove padding from viewport.
-            let [x, y, width, height] = frame.area(size_info);
             gl::Viewport(x, y, width, height);
             gl::BlendFuncSeparate(src_rgb, dst_rgb, src_alpha, dst_alpha);
         }
 
-        self.rect_renderer.draw(size_info, metrics, rects, [frame.x, frame.y_bottom]);
+        self.rect_renderer.draw(size_info, metrics, rects, [x as f32, y as f32]);
 
         // Activate regular state again.
         unsafe {
@@ -558,5 +561,16 @@ mod tests {
         let size = size();
         let frame = Frame::new(&size, [10.4, 20.6, 99.5, 50.2], 100.);
         assert_eq!(frame.clip, [10, 29, 100, 50]);
+    }
+
+    #[test]
+    fn clip_matches_area_between_pixels() {
+        // Halfway through a slide, edges rounded alike so neighbours neither overlap nor gap.
+        let size = size();
+        let frame = Frame::new(&size, [10.5, 20., 10.5, 50.], 100.);
+        assert_eq!(frame.clip, [11, 30, 10, 50]);
+        assert_eq!(frame.area(&size), frame.clip);
+        let next = Frame::new(&size, [21., 20., 10.5, 50.], 100.);
+        assert_eq!(next.clip[0], frame.clip[0] + frame.clip[2]);
     }
 }

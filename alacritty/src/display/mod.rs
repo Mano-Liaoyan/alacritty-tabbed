@@ -697,6 +697,10 @@ impl Display {
         if let Some(dimensions) = pending_update.dimensions() {
             width = dimensions.width as f32;
             height = dimensions.height as f32;
+
+            // Resize the surface with the window, even when the terminal keeps its size.
+            let renderer_update = self.pending_renderer_update.get_or_insert(Default::default());
+            renderer_update.resize = true;
         }
 
         let padding = config.window.padding(self.window.scale_factor as f32);
@@ -794,12 +798,14 @@ impl Display {
         config: &UiConfig,
         search_state: &mut SearchState,
     ) {
-        self.begin(config);
         self.draw_terminal(terminal, message_buffer, config, search_state, None);
         self.present(scheduler, config);
     }
 
-    /// Start drawing a frame, clearing the whole window.
+    /// Start drawing a window of several terminals, clearing all of it.
+    ///
+    /// Not needed when the window's own terminal is drawn without a frame, which clears it.
+    #[expect(dead_code, reason = "split panes are not drawn yet")]
     pub fn begin(&mut self, config: &UiConfig) {
         // Make sure this window's OpenGL context is active.
         self.make_current();
@@ -872,6 +878,9 @@ impl Display {
             vi_cursor_point.and_then(|cursor| term::point_to_viewport(display_offset, cursor));
         self.damage_tracker.damage_vi_cursor(vi_cursor_viewport_point);
         self.damage_tracker.damage_selection(selection_range, display_offset);
+
+        // Make sure this window's OpenGL context is active.
+        self.make_current();
 
         self.renderer.set_frame(frame);
         self.renderer.set_viewport(&size_info);
@@ -1065,7 +1074,7 @@ impl Display {
     #[expect(dead_code, reason = "split panes are not drawn yet")]
     pub fn draw_pane<T: EventListener>(
         &mut self,
-        terminal: &Term<T>,
+        terminal: MutexGuard<'_, Term<T>>,
         size: SizeInfo,
         config: &UiConfig,
         frame: Frame,
@@ -1081,11 +1090,14 @@ impl Display {
         );
 
         let mut search_state = SearchState::default();
-        let mut content = RenderableContent::new(config, self, terminal, &mut search_state);
+        let mut content = RenderableContent::new(config, self, &terminal, &mut search_state);
         let mut lines = RenderLines::new();
         let cells: Vec<_> = (&mut content).inspect(|cell| lines.update(cell)).collect();
         let background = content.color(NamedColor::Background as usize);
         let cursor = content.cursor();
+
+        // Free the terminal's lock before drawing.
+        drop(terminal);
 
         self.full_damage = true;
         self.renderer.set_frame(Some(frame));
