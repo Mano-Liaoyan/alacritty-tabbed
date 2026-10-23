@@ -405,6 +405,7 @@ impl ApplicationHandler<Event> for Processor {
                     } else {
                         window_context.add_window_config(self.config.clone(), &options);
                     }
+                    tabs::reconfigure(window_context, &self.config);
                 }
 
                 // Persist global options for future windows.
