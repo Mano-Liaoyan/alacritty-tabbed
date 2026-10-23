@@ -745,6 +745,13 @@ pub fn window_event(
             context::unfocused(ctx);
             dnd::cancel(ctx, config);
         },
+        // Only the left button, which drags, drops.
+        WindowEvent::MouseInput { state: ElementState::Released, button, .. }
+            if button != MouseButton::Left
+                && tabs.drag.as_ref().is_some_and(|drag| drag.moving) =>
+        {
+            return None;
+        },
         WindowEvent::MouseInput { state: ElementState::Released, .. } => {
             if let Some(settings) = &mut tabs.settings {
                 settings.release();
