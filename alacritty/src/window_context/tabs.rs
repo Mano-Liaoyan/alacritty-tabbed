@@ -97,6 +97,12 @@ use text::UiFont;
 /// Ids for the terminals of new tabs, far from the platform's window ids.
 static NEXT_ID: AtomicU64 = AtomicU64::new(1 << 62);
 
+/// A new id for a terminal to report its events with: never a window's, which the system may
+/// give the next window once its own is closed, while the terminal lives on in another.
+pub fn next_id() -> WindowId {
+    WindowId::from(NEXT_ID.fetch_add(1, Ordering::Relaxed))
+}
+
 /// Modifiers that drag a pane from anywhere in it, exactly; Control alone selects a block.
 #[cfg(not(target_os = "macos"))]
 const PANE_DRAG: ModifiersState = ModifiersState::CONTROL.union(ModifiersState::ALT);
@@ -303,10 +309,11 @@ impl Tabs {
         self.tabs.iter().map(|tab| tab.panes.len()).sum()
     }
 
-    /// The tab and the pane whose terminal reports events as `id`, in the window `window`.
-    fn locate(&self, window: WindowId, id: WindowId) -> Option<(usize, usize)> {
+    /// The tab and the pane whose terminal reports events as `id`, in a window whose first
+    /// terminal reports them as `first`.
+    fn locate(&self, first: WindowId, id: WindowId) -> Option<(usize, usize)> {
         if self.tabs.is_empty() {
-            return (id == window).then_some((0, 0));
+            return (id == first).then_some((0, 0));
         }
         self.tabs.iter().enumerate().find_map(|(index, tab)| Some((index, tab.position(id)?)))
     }
@@ -316,9 +323,9 @@ impl Tabs {
         (self.active, self.tabs.get(self.active).map_or(0, |tab| tab.focus))
     }
 
-    /// Id of the live terminal, in the window `window`.
-    fn live_id(&self, window: WindowId) -> WindowId {
-        self.tabs.get(self.active).map_or(window, |tab| tab.pane().id)
+    /// Id of the live terminal, in a window whose first terminal has the id `first`.
+    fn live_id(&self, first: WindowId) -> WindowId {
+        self.tabs.get(self.active).map_or(first, |tab| tab.pane().id)
     }
 
     /// The window below the bar, which the active tab's panes share.
@@ -680,7 +687,7 @@ impl Session {
             pty_config.working_directory = directory;
         }
 
-        let id = WindowId::from(NEXT_ID.fetch_add(1, Ordering::Relaxed));
+        let id = next_id();
         let event_proxy = EventProxy::new(proxy.clone(), id);
         let size = ctx.display.size_info;
         let terminal = Term::new(config.term_options(), &size, event_proxy.clone());
@@ -807,7 +814,7 @@ pub fn window_event(
         ctx.display.tabs.window = size;
     }
     sync(ctx, config, matches!(event, WindowEvent::Resized(_)));
-    let window_id = ctx.id();
+    let first = ctx.first;
     if ctx.display.tabs.height == 0 {
         return Some(event);
     }
@@ -997,7 +1004,7 @@ pub fn window_event(
             }
             let tabs = &mut ctx.display.tabs;
             let pointer = tabs.pointer;
-            let wake = waker(tabs.live_id(window_id), proxy);
+            let wake = waker(tabs.live_id(first), proxy);
             if let Some(settings) = &mut tabs.settings {
                 let close = settings.press(&layout, pointer, button, config, wake);
                 restyle(ctx, config, proxy);
@@ -1092,15 +1099,10 @@ pub fn route<S: BuildHasher>(
         (payload, window_id) => return Some(Event::new(payload, window_id)),
     };
 
-    // Most events come from a window's own terminal, so look there first.
-    let window = match windows.get(&id) {
-        Some(ctx) if ctx.display.tabs.locate(id, id).is_some() => id,
-        _ => {
-            *windows.iter().find(|(window, ctx)| ctx.display.tabs.locate(**window, id).is_some())?.0
-        },
-    };
+    let window =
+        *windows.iter().find(|(_, ctx)| ctx.display.tabs.locate(ctx.first, id).is_some())?.0;
     let ctx = windows.get_mut(&window)?;
-    let (tab, index) = ctx.display.tabs.locate(window, id)?;
+    let (tab, index) = ctx.display.tabs.locate(ctx.first, id)?;
     let tabs = &ctx.display.tabs;
 
     if (tab, index) == tabs.live() {
@@ -1156,7 +1158,7 @@ pub fn route<S: BuildHasher>(
 ///
 /// The window's state is only queried on `resize`, since that is slow on some platforms.
 fn sync(ctx: &mut WindowContext, config: &Rc<UiConfig>, resize: bool) {
-    let id = ctx.id();
+    let id = ctx.first;
     let tabs = &mut ctx.display.tabs;
     tabs.scale = ctx.display.window.scale_factor;
     if tabs.window == PhysicalSize::default() {
@@ -1567,7 +1569,7 @@ fn open_settings(
     proxy: &EventLoopProxy<Event>,
     page: Page,
 ) {
-    let wake = waker(ctx.display.tabs.live_id(ctx.id()), proxy);
+    let wake = waker(ctx.display.tabs.live_id(ctx.first), proxy);
     ctx.display.tabs.settings = Some(Settings::new(config, page, wake));
     redraw(ctx);
 }

@@ -33,6 +33,7 @@ use alacritty_terminal::tty;
 use crate::cli::{ParsedOptions, WindowOptions};
 use crate::clipboard::Clipboard;
 use crate::config::UiConfig;
+use crate::config::window::StartupMode;
 use crate::display::window::Window;
 use crate::display::{Display, SizeInfo};
 use crate::event::{
@@ -54,6 +55,8 @@ pub struct WindowContext {
     pub display: Display,
     pub dirty: bool,
     event_queue: Vec<WinitEvent<Event>>,
+    /// Id the window's first terminal reports its events with, never the window's own.
+    first: WindowId,
     terminal: Arc<FairMutex<Term<EventProxy>>>,
     cursor_blink_timed_out: bool,
     prev_bell_cmd: Option<Instant>,
@@ -153,25 +156,30 @@ impl WindowContext {
         mut torn: Torn,
     ) -> Result<Self, (Box<dyn Error>, Box<Torn>)> {
         let (position, size) = (torn.position, torn.size);
-        let display = Self::display(gl_config, event_loop, &config, &mut Default::default(), |w| {
-            if let Some(position) = position {
-                w.winit().set_outer_position(position);
-            }
-            w.request_inner_size(size);
-        });
+        // The window takes the size of the one it was torn off, rather than the startup mode's.
+        let mut windowed = (*config).clone();
+        windowed.window.startup_mode = StartupMode::Windowed;
+        let display =
+            Self::display(gl_config, event_loop, &windowed, &mut Default::default(), |w| {
+                if let Some(position) = position {
+                    w.winit().set_outer_position(position);
+                }
+                w.request_inner_size(size);
+            });
         let display = match display {
             Ok(display) => display,
             Err(err) => return Err((err, Box::new(torn))),
         };
         // The source window hands over a tab whose focused pane is not live.
-        let Some(live) = torn.live() else {
+        let Some((id, live)) = torn.live() else {
             return Err(("the torn tab has no terminal to show".into(), Box::new(torn)));
         };
 
         // From here on the terminal belongs to the new window, whatever happens.
-        let mut window_context = Self::assemble(display, config.clone(), live);
+        let mut window_context = Self::assemble(display, config.clone(), id, live);
         // A configured size gives way to the size of the window it was torn off.
         window_context.display.window.request_inner_size(size);
+        window_context.display.window.hold = torn.hold;
         tabs::adopt(&mut window_context, torn, &config);
         window_context.display.window.winit().focus_window();
         Ok(window_context)
@@ -223,8 +231,8 @@ impl WindowContext {
         options: WindowOptions,
         proxy: EventLoopProxy<Event>,
     ) -> Result<Self, Box<dyn Error>> {
-        let live = Self::spawn(&display, &config, &options, proxy)?;
-        Ok(Self::assemble(display, config, live))
+        let (first, live) = Self::spawn(&display, &config, &options, proxy)?;
+        Ok(Self::assemble(display, config, first, live))
     }
 
     /// Start the terminal of a new window.
@@ -233,7 +241,7 @@ impl WindowContext {
         config: &UiConfig,
         options: &WindowOptions,
         proxy: EventLoopProxy<Event>,
-    ) -> Result<Live, Box<dyn Error>> {
+    ) -> Result<(WindowId, Live), Box<dyn Error>> {
         let mut pty_config = config.pty_config();
         options.terminal_options.override_pty_config(&mut pty_config);
         tabs::launch(config, options, &mut pty_config, &display.tabs);
@@ -246,7 +254,8 @@ impl WindowContext {
             display.size_info.columns()
         );
 
-        let event_proxy = EventProxy::new(proxy, display.window.id());
+        let first = tabs::next_id();
+        let event_proxy = EventProxy::new(proxy, first);
 
         // Create the terminal.
         //
@@ -294,7 +303,7 @@ impl WindowContext {
             event_proxy.send_event(TerminalEvent::CursorBlinkingChange.into());
         }
 
-        Ok(Live {
+        Ok((first, Live {
             terminal,
             notifier: Notifier(loop_tx),
             search_state: Default::default(),
@@ -305,11 +314,12 @@ impl WindowContext {
             master_fd,
             #[cfg(not(windows))]
             shell_pid,
-        })
+        }))
     }
 
-    /// Create the context of a window around its running terminal `live`.
-    fn assemble(display: Display, config: Rc<UiConfig>, mut live: Live) -> Self {
+    /// Create the context of a window around its running terminal `live`, whose events come
+    /// with the id `first`.
+    fn assemble(display: Display, config: Rc<UiConfig>, first: WindowId, mut live: Live) -> Self {
         // The terminal fills the display, whatever it was sized for before.
         let size = display.size_info;
         let mut terminal = live.terminal.lock();
@@ -321,6 +331,7 @@ impl WindowContext {
 
         // Create context for the Alacritty window.
         WindowContext {
+            first,
             preserve_title: live.preserve_title,
             terminal: live.terminal,
             display,

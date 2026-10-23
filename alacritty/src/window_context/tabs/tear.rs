@@ -11,6 +11,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use winit::dpi::{PhysicalPosition, PhysicalSize};
+use winit::window::WindowId;
 
 use alacritty_terminal::event_loop::Notifier;
 use alacritty_terminal::sync::FairMutex;
@@ -23,7 +24,7 @@ use crate::window_context::WindowContext;
 
 use super::bar::Layout;
 use super::dnd::Source;
-use super::{Session, Tab, Tabs, focus_pane, platform, relayout, sync};
+use super::{Tab, Tabs, focus_pane, platform, relayout, sync};
 
 /// Where the pointer holds a tab torn off by dragging: this far into the new window's first tab,
 /// in logical pixels.
@@ -54,13 +55,17 @@ pub struct Torn {
     pub position: Option<PhysicalPosition<i32>>,
     /// Inner size of the new window.
     pub size: PhysicalSize<u32>,
+    /// Whether the window it was torn off keeps terminals open after they exit.
+    pub hold: bool,
 }
 
 impl Torn {
-    /// Take the terminal of the focused pane, which becomes the new window's live one.
-    pub fn live(&mut self) -> Option<Live> {
+    /// Take the terminal of the focused pane, which becomes the new window's live one, with the
+    /// id it reports its events with.
+    pub fn live(&mut self) -> Option<(WindowId, Live)> {
         let focus = self.tab.focus;
-        self.tab.panes[focus].session.take().map(Session::into_live)
+        let pane = &mut self.tab.panes[focus];
+        Some((pane.id, pane.session.take()?.into_live()))
     }
 
     /// Give the tab back to the window `ctx` it was torn off, as its last tab, when no window
@@ -73,7 +78,6 @@ impl Torn {
 }
 
 /// Whether `source` can leave for a window of its own without emptying this one.
-#[allow(dead_code, reason = "menus and drags tear tabs off next")]
 pub fn can_tear(tabs: &Tabs, source: Source) -> bool {
     tearable(&tabs.tabs, source)
 }
@@ -91,7 +95,6 @@ pub(super) fn tearable<S>(tabs: &[Tab<S>], source: Source) -> bool {
 
 /// Take `source` out of the window for a window of its own, placed for the pointer at `pointer`
 /// or else beside this one; returns whether it was taken.
-#[allow(dead_code, reason = "menus and drags tear tabs off next")]
 pub fn tear_off(
     ctx: &mut WindowContext,
     source: Source,
@@ -124,7 +127,7 @@ pub fn tear_off(
     // A drag refers to tabs and panes by their place, which this changes.
     tabs.drag = None;
     let Some(tab) = detach(&mut tabs.tabs, &mut tabs.active, source) else { return false };
-    tabs.torn = Some(Torn { tab, position, size });
+    tabs.torn = Some(Torn { tab, position, size, hold: ctx.display.window.hold });
     sync(ctx, config, false);
     relayout(ctx);
     true
@@ -207,7 +210,6 @@ fn placement(
 
 #[cfg(test)]
 mod tests {
-    use winit::window::WindowId;
 
     use super::super::Pane;
     use super::super::split::{Axis, Side};
