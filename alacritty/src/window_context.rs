@@ -21,7 +21,7 @@ use winit::event_loop::{ActiveEventLoop, EventLoopProxy};
 use winit::raw_window_handle::HasDisplayHandle;
 use winit::window::WindowId;
 
-use alacritty_terminal::event::Event as TerminalEvent;
+use alacritty_terminal::event::{Event as TerminalEvent, OnResize};
 use alacritty_terminal::event_loop::{EventLoop as PtyEventLoop, Msg, Notifier};
 use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::index::Direction;
@@ -33,8 +33,8 @@ use alacritty_terminal::tty;
 use crate::cli::{ParsedOptions, WindowOptions};
 use crate::clipboard::Clipboard;
 use crate::config::UiConfig;
-use crate::display::Display;
 use crate::display::window::Window;
+use crate::display::{Display, SizeInfo};
 use crate::event::{
     ActionContext, Event, EventProxy, InlineSearchState, Mouse, SearchState, TouchPurpose,
 };
@@ -43,7 +43,7 @@ use crate::logging::LOG_TARGET_IPC_CONFIG;
 use crate::message_bar::MessageBuffer;
 use crate::renderer::Frame;
 use crate::scheduler::Scheduler;
-use crate::window_context::tabs::Rect;
+use crate::window_context::tabs::{Live, Rect, Torn};
 use crate::{input, renderer};
 
 pub mod tabs;
@@ -131,6 +131,61 @@ impl WindowContext {
         mut options: WindowOptions,
         config_overrides: ParsedOptions,
     ) -> Result<Self, Box<dyn Error>> {
+        let display = Self::display(gl_config, event_loop, &config, &mut options, |_| ())?;
+
+        let mut window_context = Self::new(display, config, options, proxy)?;
+
+        // Set the config overrides at startup.
+        //
+        // These are already applied to `config`, so no update is necessary.
+        window_context.window_config = config_overrides;
+
+        Ok(window_context)
+    }
+
+    /// Create a window for a tab torn off another, which adopts its running terminals.
+    ///
+    /// Without a window, the tab is handed back with its terminals untouched.
+    pub fn torn(
+        gl_config: &GlutinConfig,
+        event_loop: &ActiveEventLoop,
+        config: Rc<UiConfig>,
+        mut torn: Torn,
+    ) -> Result<Self, (Box<dyn Error>, Box<Torn>)> {
+        let (position, size) = (torn.position, torn.size);
+        let display = Self::display(gl_config, event_loop, &config, &mut Default::default(), |w| {
+            if let Some(position) = position {
+                w.winit().set_outer_position(position);
+            }
+            w.request_inner_size(size);
+        });
+        let display = match display {
+            Ok(display) => display,
+            Err(err) => return Err((err, Box::new(torn))),
+        };
+        // The source window hands over a tab whose focused pane is not live.
+        let Some(live) = torn.live() else {
+            return Err(("the torn tab has no terminal to show".into(), Box::new(torn)));
+        };
+
+        // From here on the terminal belongs to the new window, whatever happens.
+        let mut window_context = Self::assemble(display, config.clone(), live);
+        // A configured size gives way to the size of the window it was torn off.
+        window_context.display.window.request_inner_size(size);
+        tabs::adopt(&mut window_context, torn, &config);
+        window_context.display.window.winit().focus_window();
+        Ok(window_context)
+    }
+
+    /// Create a window and its display with the graphics platform other windows are using,
+    /// letting `prepare` adjust the window before it is shown.
+    fn display(
+        gl_config: &GlutinConfig,
+        event_loop: &ActiveEventLoop,
+        config: &UiConfig,
+        options: &mut WindowOptions,
+        prepare: impl FnOnce(&Window),
+    ) -> Result<Display, Box<dyn Error>> {
         let gl_display = gl_config.display();
 
         let mut identity = config.window.identity.clone();
@@ -145,28 +200,20 @@ impl WindowContext {
 
         let window = Window::new(
             event_loop,
-            &config,
+            config,
             &identity,
-            &mut options,
+            options,
             #[cfg(all(feature = "x11", not(any(target_os = "macos", windows))))]
             gl_config.x11_visual(),
         )?;
+        prepare(&window);
 
         // Create context.
         let raw_window_handle = window.raw_window_handle();
         let gl_context =
             renderer::platform::create_gl_context(&gl_display, gl_config, Some(raw_window_handle))?;
 
-        let display = Display::new(window, gl_context, &config, tabbed)?;
-
-        let mut window_context = Self::new(display, config, options, proxy)?;
-
-        // Set the config overrides at startup.
-        //
-        // These are already applied to `config`, so no update is necessary.
-        window_context.window_config = config_overrides;
-
-        Ok(window_context)
+        Ok(Display::new(window, gl_context, config, tabbed)?)
     }
 
     /// Create a new terminal window context.
@@ -176,9 +223,20 @@ impl WindowContext {
         options: WindowOptions,
         proxy: EventLoopProxy<Event>,
     ) -> Result<Self, Box<dyn Error>> {
+        let live = Self::spawn(&display, &config, &options, proxy)?;
+        Ok(Self::assemble(display, config, live))
+    }
+
+    /// Start the terminal of a new window.
+    fn spawn(
+        display: &Display,
+        config: &UiConfig,
+        options: &WindowOptions,
+        proxy: EventLoopProxy<Event>,
+    ) -> Result<Live, Box<dyn Error>> {
         let mut pty_config = config.pty_config();
         options.terminal_options.override_pty_config(&mut pty_config);
-        tabs::launch(&config, &options, &mut pty_config, &display.tabs);
+        tabs::launch(config, options, &mut pty_config, &display.tabs);
 
         let preserve_title = options.window_identity.title.is_some();
 
@@ -236,30 +294,55 @@ impl WindowContext {
             event_proxy.send_event(TerminalEvent::CursorBlinkingChange.into());
         }
 
-        // Create context for the Alacritty window.
-        Ok(WindowContext {
-            preserve_title,
+        Ok(Live {
             terminal,
-            display,
+            notifier: Notifier(loop_tx),
+            search_state: Default::default(),
+            inline_search_state: Default::default(),
+            window_config: Default::default(),
+            preserve_title,
             #[cfg(not(windows))]
             master_fd,
             #[cfg(not(windows))]
             shell_pid,
+        })
+    }
+
+    /// Create the context of a window around its running terminal `live`.
+    fn assemble(display: Display, config: Rc<UiConfig>, mut live: Live) -> Self {
+        // The terminal fills the display, whatever it was sized for before.
+        let size = display.size_info;
+        let mut terminal = live.terminal.lock();
+        if terminal.columns() != size.columns() || terminal.screen_lines() != size.screen_lines() {
+            terminal.resize(size);
+            live.notifier.on_resize(size.into());
+        }
+        drop(terminal);
+
+        // Create context for the Alacritty window.
+        WindowContext {
+            preserve_title: live.preserve_title,
+            terminal: live.terminal,
+            display,
+            #[cfg(not(windows))]
+            master_fd: live.master_fd,
+            #[cfg(not(windows))]
+            shell_pid: live.shell_pid,
             config,
-            notifier: Notifier(loop_tx),
+            notifier: live.notifier,
             cursor_blink_timed_out: Default::default(),
             prev_bell_cmd: Default::default(),
-            inline_search_state: Default::default(),
+            inline_search_state: live.inline_search_state,
             message_buffer: Default::default(),
-            window_config: Default::default(),
-            search_state: Default::default(),
+            window_config: live.window_config,
+            search_state: live.search_state,
             event_queue: Default::default(),
             modifiers: Default::default(),
             occluded: Default::default(),
             mouse: Default::default(),
             touch: Default::default(),
             dirty: Default::default(),
-        })
+        }
     }
 
     /// Update the terminal window to the latest config.
@@ -411,16 +494,20 @@ impl WindowContext {
             );
         } else {
             let height = self.display.window.inner_size().height as f32;
+            // Each terminal stays inside its card, wherever its neighbours' places overlap it.
+            let framed = |size: &SizeInfo, frame: Rect, clip: Rect| {
+                let frame = Frame::new(size, [frame.x, frame.y, frame.w, frame.h], height);
+                frame.clipped([clip.x, clip.y, clip.w, clip.h], height)
+            };
             self.display.begin(&self.config);
             for pane in panes {
-                let frame = pane.frame;
-                let frame = Frame::new(&pane.size, [frame.x, frame.y, frame.w, frame.h], height);
+                let frame = framed(&pane.size, pane.frame, pane.clip);
                 // Only the live terminal has the focus, so the others show a hollow cursor.
                 let mut terminal = pane.terminal.lock();
                 terminal.is_focused = false;
                 self.display.draw_pane(terminal, pane.size, &pane.config, frame);
             }
-            let frame = Frame::new(&size, [rect.x, rect.y, rect.w, rect.h], height);
+            let frame = framed(&size, rect, self.display.tabs.focused_clip(now));
             self.display.draw_terminal(
                 self.terminal.lock(),
                 &self.message_buffer,
