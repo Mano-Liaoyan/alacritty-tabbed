@@ -70,7 +70,6 @@ pub struct WindowContext {
     preserve_title: bool,
     #[cfg(not(windows))]
     master_fd: RawFd,
-    #[cfg(not(windows))]
     shell_pid: u32,
     window_config: ParsedOptions,
     config: Rc<UiConfig>,
@@ -298,6 +297,8 @@ impl WindowContext {
         let master_fd = pty.file().as_raw_fd();
         #[cfg(not(windows))]
         let shell_pid = pty.child().id();
+        #[cfg(windows)]
+        let shell_pid = pty.child_watcher().pid().map_or(0, |pid| pid.get());
 
         // Create the pseudoterminal I/O loop.
         //
@@ -334,7 +335,6 @@ impl WindowContext {
             preserve_title,
             #[cfg(not(windows))]
             master_fd,
-            #[cfg(not(windows))]
             shell_pid,
             zoom: None,
         }))
@@ -360,7 +360,6 @@ impl WindowContext {
             display,
             #[cfg(not(windows))]
             master_fd: live.master_fd,
-            #[cfg(not(windows))]
             shell_pid: live.shell_pid,
             config,
             notifier: live.notifier,

@@ -17,6 +17,7 @@ mod app_settings;
 mod autohide;
 mod bar;
 mod context;
+mod cwd;
 mod divider;
 mod dnd;
 mod fonts;
@@ -321,7 +322,6 @@ struct Session {
     window_config: ParsedOptions,
     #[cfg(not(windows))]
     master_fd: RawFd,
-    #[cfg(not(windows))]
     shell_pid: u32,
     /// The pane's configuration, with its profile's overrides and padding.
     config: Rc<UiConfig>,
@@ -787,6 +787,8 @@ impl Session {
         let pty = tty::new(&pty_config, size.into(), ctx.id().into())?;
         #[cfg(not(windows))]
         let (master_fd, shell_pid) = (pty.file().as_raw_fd(), pty.child().id());
+        #[cfg(windows)]
+        let shell_pid = pty.child_watcher().pid().map_or(0, |pid| pid.get());
         let event_loop =
             PtyEventLoop::new(terminal.clone(), event_proxy, pty, pty_config.drain_on_exit, false)?;
         let notifier = Notifier(event_loop.channel());
@@ -803,7 +805,6 @@ impl Session {
             preserve_title: false,
             #[cfg(not(windows))]
             master_fd,
-            #[cfg(not(windows))]
             shell_pid,
             config,
             size,
@@ -832,10 +833,8 @@ impl Session {
         mem::swap(&mut self.preserve_title, &mut ctx.preserve_title);
         mem::swap(&mut self.window_config, &mut ctx.window_config);
         #[cfg(not(windows))]
-        {
-            mem::swap(&mut self.master_fd, &mut ctx.master_fd);
-            mem::swap(&mut self.shell_pid, &mut ctx.shell_pid);
-        }
+        mem::swap(&mut self.master_fd, &mut ctx.master_fd);
+        mem::swap(&mut self.shell_pid, &mut ctx.shell_pid);
         self.config = ctx.config.clone();
         self.size = ctx.display.size_info;
         let live = mem::replace(&mut ctx.display.font_size, incoming);
@@ -854,7 +853,6 @@ impl Session {
             preserve_title: self.preserve_title,
             #[cfg(not(windows))]
             master_fd: self.master_fd,
-            #[cfg(not(windows))]
             shell_pid: self.shell_pid,
             zoom: self.zoom,
         }
@@ -1976,10 +1974,12 @@ pub fn split(
     let profiles = Profiles::load(config).list;
     let profile = profiles.into_iter().find(|profile| Some(&profile.name) == name.as_ref());
     // The new shell starts where the focused one is.
+    let reported = ctx.terminal.lock().reported_directory.clone();
     #[cfg(not(windows))]
-    let directory = crate::daemon::foreground_process_path(ctx.master_fd, ctx.shell_pid).ok();
+    let process = || crate::daemon::foreground_process_path(ctx.master_fd, ctx.shell_pid).ok();
     #[cfg(windows)]
-    let directory = None;
+    let process = || cwd::process_directory(ctx.shell_pid);
+    let (profile, directory) = cwd::inherit(profile, reported, process);
     let spawned = Session::spawn(ctx, config, proxy, profile.as_ref(), directory, None);
     let (id, session) = match spawned {
         Ok(pane) => pane,
