@@ -82,7 +82,7 @@ panes and the focused pane's border colour, which the settings pick with a
 colour picker:
 
 ```toml
-[window]
+[tabbed]
 pane_gap = 16                # Logical pixels between panes, 0 to 48.
 pane_highlight = "#ff9500"   # Leave out for the terminal's blue.
 ```
@@ -114,12 +114,12 @@ default; `%LOCALAPPDATA%\alacritty\session.json` on Windows), and is deleted
 once restored.
 
 ```toml
-[window]
+[tabbed]
 restore_session = "off"  # "off", "layout" or "text" (layout and text).
 pin_tab_bar = true       # false: the tab bar slides in at the top edge.
 wheel_zoom = true        # Ctrl+wheel (Cmd+wheel on macOS) zooms the focused pane's text.
 
-[window.brand]
+[tabbed.brand]
 show = true              # The logo and names at the top left of the tab bar.
 icon = "alacritty"       # "alacritty", "" (none), "bundled:<name>" or an .svg/.png path.
 title = "Alacritty"      # "" hides the line.
@@ -140,7 +140,7 @@ In a tab of several panes the logos lie on tiles; turn off **Icon tiles** under
 Appearance, or in `alacritty.toml`, to draw them bare and as large as the tiles:
 
 ```toml
-[window]
+[tabbed]
 icon_tiles = true  # false: no tile behind the logos in a tab's deck.
 ```
 
@@ -171,7 +171,7 @@ one. Choose another family or size under Appearance in the settings, or in
 `alacritty.toml`; changes apply live:
 
 ```toml
-[window.ui_font]
+[tabbed.ui_font]
 family = "Inter"  # Empty picks the system's interface font.
 size = 10         # Points; the default is 10, or 13 on macOS.
 ```
@@ -183,7 +183,7 @@ their curves run parallel. Or make every corner square, under Appearance in the
 settings or in `alacritty.toml`; changes apply live:
 
 ```toml
-[window]
+[tabbed]
 corners = "square"  # "round" (default) or "square".
 ```
 
@@ -196,11 +196,34 @@ itself, and macOS always does.
 Tabs are on by default. To turn them off:
 
 ```toml
-[window]
+[tabbed]
 tabs = false
 ```
 
-Restart Alacritty after changing `window.tabs`.
+Restart Alacritty after changing `tabbed.tabs`.
+
+## Configuration
+
+The fork's keys live in a `[tabbed]` table of their own, apart from upstream's
+tables: `tabs`, `corners`, `panel`, `tab_track`, `icon_tiles`, `pane_gap`,
+`pane_highlight`, `pin_tab_bar`, `wheel_zoom`, `restore_session`, and the
+`[tabbed.ui_font]` and `[tabbed.brand]` tables.
+
+Earlier versions read these keys from `[window]` (and `[window.ui_font]`,
+`[window.brand]`); there they are now ignored, with an "Unused config key"
+warning. Saving the settings moves them to `[tabbed]`, keeping their comments,
+or rename the tables by hand:
+
+```toml
+[window]
+startup_mode = "Maximized"  # Upstream keys stay in [window].
+
+[tabbed]                    # Was [window].
+pane_gap = 6
+
+[tabbed.brand]              # Was [window.brand].
+show = false
+```
 
 | Keys (Windows, Linux) | macOS | Action |
 | --- | --- | --- |

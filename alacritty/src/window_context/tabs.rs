@@ -86,7 +86,7 @@ use alacritty_terminal::vte::ansi::NamedColor;
 use crate::cli::{ParsedOptions, WindowOptions};
 use crate::clipboard::Clipboard;
 use crate::config::font::Font;
-use crate::config::window::tabbed::{Corners, UiFont as UiFontConfig};
+use crate::config::tabbed::{Corners, UiFont as UiFontConfig};
 use crate::config::{Action, BindingKey, BindingMode, UiConfig};
 use crate::display::SizeInfo;
 use crate::event::{Event, EventProxy, EventType, InlineSearchState, SearchState};
@@ -896,12 +896,12 @@ impl Drop for Session {
 
 /// Let the bar replace the system's caption.
 pub fn attributes(attributes: WindowAttributes, config: &UiConfig) -> WindowAttributes {
-    if config.window.tabbed.tabs { platform::attributes(attributes) } else { attributes }
+    if config.tabbed.tabs { platform::attributes(attributes) } else { attributes }
 }
 
 /// Start a window's first terminal with the default profile, unless a command was given.
 pub fn launch(config: &UiConfig, options: &WindowOptions, pty: &mut PtyOptions, tabs: &Tabs) {
-    if !config.window.tabbed.tabs || options.terminal_options.command().is_some() {
+    if !config.tabbed.tabs || options.terminal_options.command().is_some() {
         return;
     }
     let Some(profile) = Profiles::load(config).default_profile().cloned() else { return };
@@ -1276,7 +1276,7 @@ pub fn window_event(
         // The wheel with the zoom modifiers sizes the text of the live pane, under the pointer.
         WindowEvent::MouseWheel { delta, .. }
             if !modal
-                && config.window.tabbed.wheel_zoom
+                && config.tabbed.wheel_zoom
                 && tabs.modifiers == ZOOM_WHEEL
                 && layout.hit(tabs.pointer) == Hit::Terminal
                 && tabs.pane_at(tabs.pointer) == Some(tabs.live().1) =>
@@ -1464,7 +1464,7 @@ fn sync(ctx: &mut WindowContext, config: &Rc<UiConfig>, resize: bool) {
     }
 
     // The interface's font follows the configuration and the window's scale.
-    let source = (config.window.tabbed.ui_font.clone(), tabs.scale);
+    let source = (config.tabbed.ui_font.clone(), tabs.scale);
     if tabs.font_source.as_ref() != Some(&source) {
         match UiFont::new(&source.0, source.1) {
             Ok(font) => tabs.font = Some(Rc::new(font)),
@@ -1474,7 +1474,7 @@ fn sync(ctx: &mut WindowContext, config: &Rc<UiConfig>, resize: bool) {
         redraw(ctx);
     }
     let tabs = &mut ctx.display.tabs;
-    let shown = (ctx.config.window.tabbed.tabs || tabs.count() > 1) && tabs.font.is_some();
+    let shown = (ctx.config.tabbed.tabs || tabs.count() > 1) && tabs.font.is_some();
 
     // The window's own terminal becomes the first tab.
     if shown && tabs.tabs.is_empty() {
@@ -1499,16 +1499,16 @@ fn sync(ctx: &mut WindowContext, config: &Rc<UiConfig>, resize: bool) {
     let px = |value: f32| (value * ctx.display.window.scale_factor as f32).round() as u32;
     // Without its panel the terminal fills the window, its text still lined up with the logo.
     let tabs = &mut ctx.display.tabs;
-    tabs.panel = config.window.tabbed.panel;
+    tabs.panel = config.tabbed.panel;
     tabs.caption = shown;
     // A bar that is not pinned is drawn over the panes, which take the whole window.
-    tabs.autohide.pinned = config.window.tabbed.pin_tab_bar;
-    let gap = f32::from(config.window.tabbed.pane_gap.min(48));
+    tabs.autohide.pinned = config.tabbed.pin_tab_bar;
+    let gap = f32::from(config.tabbed.pane_gap.min(48));
     let regap = mem::replace(&mut tabs.gap, gap) != gap;
     let (offset, inset) = match shown {
         false => (0, 0),
-        _ if !config.window.tabbed.pin_tab_bar => (0, (MARGIN + INSET) as u8),
-        _ if !config.window.tabbed.panel => (px(BAR), (MARGIN + INSET) as u8),
+        _ if !config.tabbed.pin_tab_bar => (0, (MARGIN + INSET) as u8),
+        _ if !config.tabbed.panel => (px(BAR), (MARGIN + INSET) as u8),
         _ => (px(BAR) - px(MARGIN), (MARGIN + INSET) as u8),
     };
     note_font(ctx);
@@ -1627,7 +1627,7 @@ fn resize_live(ctx: &mut WindowContext) {
 /// Systems that round windows themselves are told which corners to give the window; elsewhere
 /// the corners of a window that is not maximized are cut out, which makes it transparent there.
 fn shape(ctx: &mut WindowContext, config: &UiConfig, framed: bool) {
-    let corners = config.window.tabbed.corners;
+    let corners = config.tabbed.corners;
     let round = corners == Corners::Round;
     let cut = framed && round && cfg!(not(any(windows, target_os = "macos")));
     let tabs = &mut ctx.display.tabs;

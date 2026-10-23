@@ -1,5 +1,3 @@
-pub mod tabbed; // tabbed: the fork's own `[window]` keys.
-
 use std::fmt::{self, Formatter};
 
 use log::{error, warn};
@@ -67,11 +65,6 @@ pub struct WindowConfig {
 
     /// Window level.
     pub level: WindowLevel,
-
-    // tabbed: the fork's own keys, flattened beside the upstream ones.
-    #[config(flatten)]
-    #[serde(flatten)]
-    pub tabbed: tabbed::TabbedConfig,
 }
 
 impl Default for WindowConfig {
@@ -92,7 +85,6 @@ impl Default for WindowConfig {
             decorations_theme_variant: Default::default(),
             option_as_alt: Default::default(),
             level: Default::default(),
-            tabbed: Default::default(),
         }
     }
 }

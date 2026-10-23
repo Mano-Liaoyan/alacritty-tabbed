@@ -1,4 +1,4 @@
-//! The fork's own `[window]` keys, flattened into [`WindowConfig`](super::WindowConfig).
+//! The fork's own keys, in a `[tabbed]` table of [`UiConfig`](super::UiConfig) of their own.
 
 use serde::Serialize;
 
@@ -133,32 +133,34 @@ mod tests {
     use alacritty_config::SerdeReplace;
 
     use super::*;
-    use crate::config::window::WindowConfig;
+    use crate::config::UiConfig;
 
-    fn window(text: &str) -> WindowConfig {
-        WindowConfig::deserialize(toml::from_str::<toml::Value>(text).unwrap()).unwrap()
+    fn config(text: &str) -> UiConfig {
+        UiConfig::deserialize(toml::from_str::<toml::Value>(text).unwrap()).unwrap()
     }
 
     #[test]
     fn panes_keep_their_gap_and_highlight_by_default() {
-        let window = WindowConfig::default();
-        assert_eq!(window.tabbed.pane_gap, 16);
-        assert_eq!(window.tabbed.pane_highlight, None);
+        let config = UiConfig::default();
+        assert_eq!(config.tabbed.pane_gap, 16);
+        assert_eq!(config.tabbed.pane_highlight, None);
     }
 
     #[test]
     fn pane_gap_and_highlight_are_read() {
-        let window = window("pane_gap = 4\npane_highlight = \"#FF9500\"");
-        assert_eq!(window.tabbed.pane_gap, 4);
-        assert_eq!(window.tabbed.pane_highlight, Some(Rgb::new(0xff, 0x95, 0x00)));
+        let config = config("[tabbed]
+pane_gap = 4
+pane_highlight = \"#FF9500\"");
+        assert_eq!(config.tabbed.pane_gap, 4);
+        assert_eq!(config.tabbed.pane_highlight, Some(Rgb::new(0xff, 0x95, 0x00)));
     }
 
     #[test]
     fn round_three_keys_default() {
-        let window = WindowConfig::default().tabbed;
-        assert!(window.pin_tab_bar && window.wheel_zoom && window.icon_tiles);
-        assert_eq!(window.restore_session, RestoreSession::Off);
-        let brand = &window.brand;
+        let tabbed = UiConfig::default().tabbed;
+        assert!(tabbed.pin_tab_bar && tabbed.wheel_zoom && tabbed.icon_tiles);
+        assert_eq!(tabbed.restore_session, RestoreSession::Off);
+        let brand = &tabbed.brand;
         assert!(brand.show);
         assert_eq!(
             (&*brand.icon, &*brand.title, &*brand.subtitle),
@@ -173,33 +175,54 @@ mod tests {
             ("layout", RestoreSession::Layout),
             ("text", RestoreSession::Text),
         ] {
-            let window = window(&format!("restore_session = \"{text}\""));
-            assert_eq!(window.tabbed.restore_session, restore);
+            let config = config(&format!("[tabbed]
+restore_session = \"{text}\""));
+            assert_eq!(config.tabbed.restore_session, restore);
         }
-        let text = "pin_tab_bar = false\nwheel_zoom = false\n[brand]\nshow = false\nicon = \
-                    \"bundled:opensuse\"\ntitle = \"\"\n";
-        let window = window(text).tabbed;
-        assert!(!window.pin_tab_bar && !window.wheel_zoom && !window.brand.show);
-        assert_eq!((&*window.brand.icon, &*window.brand.title), ("bundled:opensuse", ""));
+        let text = "[tabbed]
+pin_tab_bar = false
+wheel_zoom = false
+[tabbed.brand]
+show =                     false
+icon = \"bundled:opensuse\"
+title = \"\"
+";
+        let tabbed = config(text).tabbed;
+        assert!(!tabbed.pin_tab_bar && !tabbed.wheel_zoom && !tabbed.brand.show);
+        assert_eq!((&*tabbed.brand.icon, &*tabbed.brand.title), ("bundled:opensuse", ""));
         // Keys left out keep their defaults.
-        assert_eq!(window.brand.subtitle, "{host}");
+        assert_eq!(tabbed.brand.subtitle, "{host}");
     }
 
     #[test]
-    fn keys_sit_beside_the_upstream_window_keys() {
-        let text = "tabs = false\ntitle = \"Mine\"\ndynamic_title = false\n[ui_font]\nsize = 12";
-        let window = window(text);
-        assert!(!window.tabbed.tabs && !window.dynamic_title);
-        assert_eq!(window.tabbed.ui_font.size, 12.);
-        assert_eq!(window.identity.title, "Mine");
+    fn keys_sit_in_their_own_table() {
+        let text = "[tabbed]
+tabs = false
+[tabbed.ui_font]
+size = 12
+[window]
+title =                     \"Mine\"
+dynamic_title = false";
+        let config = config(text);
+        assert!(!config.tabbed.tabs && !config.window.dynamic_title);
+        assert_eq!(config.tabbed.ui_font.size, 12.);
+        assert_eq!(config.window.identity.title, "Mine");
 
-        let mut window = WindowConfig::default();
-        let value = toml::from_str("tab_track = false\ndynamic_padding = true").unwrap();
-        window.replace(value).unwrap();
-        assert!(!window.tabbed.tab_track && window.dynamic_padding);
+        // The old place beside the upstream `[window]` keys is not read.
+        let old = self::config("[window]
+tabs = false
+pane_gap = 4");
+        assert!(old.tabbed.tabs);
+        assert_eq!(old.tabbed.pane_gap, 16);
 
-        let json = serde_json::to_value(&window).unwrap();
-        assert_eq!(json["tab_track"], false);
-        assert_eq!(json["ui_font"]["family"], "");
+        let mut config = UiConfig::default();
+        let value = toml::from_str("tabbed.tab_track = false
+window.dynamic_padding = true");
+        config.replace(value.unwrap()).unwrap();
+        assert!(!config.tabbed.tab_track && config.window.dynamic_padding);
+
+        let json = serde_json::to_value(&config).unwrap();
+        assert_eq!(json["tabbed"]["tab_track"], false);
+        assert_eq!(json["tabbed"]["ui_font"]["family"], "");
     }
 }

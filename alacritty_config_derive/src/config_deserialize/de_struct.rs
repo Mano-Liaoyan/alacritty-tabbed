@@ -2,9 +2,10 @@ use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
 use syn::punctuated::Punctuated;
+use syn::spanned::Spanned;
 use syn::{Error, Field, Generics, Ident, Type};
 
-use crate::{Attr, GenericsStreams, serde_replace};
+use crate::{Attr, GenericsStreams, MULTIPLE_FLATTEN_ERROR, serde_replace};
 
 /// Use this crate's name as log target.
 const LOG_TARGET: &str = env!("CARGO_PKG_NAME");
@@ -17,7 +18,7 @@ pub fn derive_deserialize<T>(
     // Create all necessary tokens for the implementation.
     let GenericsStreams { unconstrained, constrained, phantoms } =
         crate::generics_streams(&generics.params);
-    let FieldStreams { flatten, match_assignments, keys } = fields_deserializer(&fields);
+    let FieldStreams { flatten, match_assignments } = fields_deserializer(&fields);
     let visitor = format_ident!("{}Visitor", ident);
 
     // Generate deserialization impl.
@@ -72,14 +73,6 @@ pub fn derive_deserialize<T>(
                 deserializer.deserialize_map(#visitor :: default())
             }
         }
-
-        #[allow(clippy::extra_unused_lifetimes)]
-        impl <'de, #constrained> #ident <#unconstrained> {
-            /// Keys of all fields, to flatten this struct after another flattened field.
-            #[doc(hidden)]
-            #[allow(dead_code)]
-            pub const CONFIG_KEYS: &'static [&'static str] = &[#(#keys),*];
-        }
     };
 
     // Automatically implement [`alacritty_config::SerdeReplace`].
@@ -93,7 +86,6 @@ pub fn derive_deserialize<T>(
 struct FieldStreams {
     match_assignments: TokenStream2,
     flatten: TokenStream2,
-    keys: Vec<String>,
 }
 
 /// Create the deserializers for match arms and flattened fields.
@@ -142,21 +134,13 @@ fn field_deserializer(field_streams: &mut FieldStreams, field: &Field) -> Result
         match parsed.ident.as_str() {
             // Skip deserialization for `#[config(skip)]` fields.
             "skip" => return Ok(()),
-            // Flattened fields after the first only take their own keys, before the first.
-            "flatten" if !field_streams.flatten.is_empty() => {
-                let (ty, flatten) = (&field.ty, &field_streams.flatten);
-                field_streams.flatten = quote! {
-                    let flattened = <#ty>::CONFIG_KEYS
-                        .iter()
-                        .filter_map(|key| Some((key.to_string(), unused.remove(*key)?)))
-                        .collect::<toml::Table>();
-
-                    config.#ident = serde::Deserialize::deserialize(flattened).unwrap_or_default();
-
-                    #flatten
-                };
-            },
             "flatten" => {
+                // NOTE: Currently only a single instance of flatten is supported per struct
+                // for complexity reasons.
+                if !field_streams.flatten.is_empty() {
+                    return Err(Error::new(attr.span(), MULTIPLE_FLATTEN_ERROR));
+                }
+
                 // Create the tokens to deserialize the flattened struct from the unused fields.
                 field_streams.flatten.extend(quote! {
                     // Drain unused fields since they will be used for flattening.
@@ -202,7 +186,6 @@ fn field_deserializer(field_streams: &mut FieldStreams, field: &Field) -> Result
     }
 
     // Create the token stream for deserialization and error handling.
-    field_streams.keys.extend(literals.iter().cloned());
     field_streams.match_assignments.extend(quote! {
         #(#literals)|* => { #match_assignment_stream },
     });

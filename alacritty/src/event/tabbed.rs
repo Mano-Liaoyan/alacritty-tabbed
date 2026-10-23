@@ -13,7 +13,7 @@ use winit::event_loop::ActiveEventLoop;
 use winit::window::WindowId;
 
 use crate::cli::{Options as CliOptions, WindowOptions};
-use crate::config::window::tabbed::RestoreSession;
+use crate::config::tabbed::RestoreSession;
 use crate::event::{Event, Processor};
 use crate::window_context::WindowContext;
 use crate::window_context::tabs::hooks::torn_window;
@@ -132,7 +132,7 @@ impl Processor {
     /// window closes: windows closed as windows within a moment are saved together, while a
     /// session ended by closing its tabs or shells is not saved.
     pub(super) fn remember(&mut self, window_context: &WindowContext) {
-        let level = self.config.window.tabbed.restore_session;
+        let level = self.config.tabbed.restore_session;
         let whole = window_context.display.tabs.closed_whole();
         let now = Instant::now();
         let saved = self.tabbed.plain && level != RestoreSession::Off && whole;
@@ -146,7 +146,7 @@ impl Processor {
 
     /// Forget the saved session at once when the new config turns restoring off.
     pub(super) fn forget_session(&mut self) {
-        if self.tabbed.plain && self.config.window.tabbed.restore_session == RestoreSession::Off {
+        if self.tabbed.plain && self.config.tabbed.restore_session == RestoreSession::Off {
             self.tabbed.closed.clear();
             restore::forget();
         }
@@ -155,7 +155,7 @@ impl Processor {
     /// Save all the windows, as Alacritty quits with windows open, such as by
     /// `alacritty msg shutdown`.
     pub(super) fn save_session(&mut self) {
-        let level = self.config.window.tabbed.restore_session;
+        let level = self.config.tabbed.restore_session;
         if self.tabbed.plain && level != RestoreSession::Off && !self.windows.is_empty() {
             let now = Instant::now();
             let mut windows = restore::kept(mem::take(&mut self.tabbed.closed), now, true);
@@ -166,7 +166,7 @@ impl Processor {
 
     /// Save the session of `windows` as Alacritty quits, or forget it, as the setting asks.
     fn quit(&self, windows: Vec<restore::Window>) {
-        match restore::quit(self.tabbed.plain, self.config.window.tabbed.restore_session, windows) {
+        match restore::quit(self.tabbed.plain, self.config.tabbed.restore_session, windows) {
             restore::Quit::Save(windows) => {
                 if let Err(err) = restore::save(windows) {
                     error!("Could not save the session: {err}");
