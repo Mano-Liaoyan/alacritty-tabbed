@@ -511,12 +511,13 @@ impl WindowContext {
                 frame.clipped([clip.x, clip.y, clip.w, clip.h], height)
             };
             self.display.begin(&self.config);
+            let font = self.config.font.clone().with_size(self.display.font_size);
             for pane in panes {
                 let frame = framed(&pane.size, pane.frame, pane.clip);
                 // Only the live terminal has the focus, so the others show a hollow cursor.
                 let mut terminal = pane.terminal.lock();
                 terminal.is_focused = false;
-                self.display.draw_pane(terminal, pane.size, &pane.config, frame);
+                self.display.draw_pane(terminal, pane.size, &pane.config, frame, &font);
             }
             let frame = framed(&size, rect, self.display.tabs.focused_clip(now));
             self.display.draw_terminal(
