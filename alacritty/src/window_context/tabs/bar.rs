@@ -103,6 +103,9 @@ pub struct Layout {
     /// Whether the terminal is held in a panel, with a margin around it.
     pub panel: bool,
     pub height: f32,
+    /// Distance between the left edges of neighbouring tabs.
+    #[allow(dead_code)] // Until tab entries slide between slots.
+    step: f32,
     brand: Option<Rect>,
     mark: Rect,
     track: Rect,
@@ -225,6 +228,7 @@ impl Layout {
             border,
             panel,
             height,
+            step,
             brand,
             mark,
             track,
