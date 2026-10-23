@@ -280,7 +280,6 @@ pub struct PaneDraw {
     /// The pane's card, which nothing of it is drawn outside of.
     pub clip: Rect,
     /// The pane's font, at its own size.
-    #[allow(dead_code, reason = "lanes X and V draw panes in their own font")]
     pub font: Font,
 }
 
