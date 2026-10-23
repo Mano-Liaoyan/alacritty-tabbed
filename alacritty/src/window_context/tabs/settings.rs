@@ -188,6 +188,8 @@ enum Toggle {
     Panel,
     /// The track behind the tabs.
     TabTrack,
+    /// The tiles behind the icons of a tab's panes.
+    IconTiles,
     /// The logo at the left of the tab bar.
     Logo,
     Pin,
@@ -199,6 +201,7 @@ impl Toggle {
         match self {
             Toggle::Panel => settings.panel,
             Toggle::TabTrack => settings.tab_track,
+            Toggle::IconTiles => settings.icon_tiles,
             Toggle::Logo => settings.brand.show,
             Toggle::Pin => settings.pin_tab_bar,
             Toggle::WheelZoom => settings.wheel_zoom,
@@ -209,6 +212,7 @@ impl Toggle {
         let on = match self {
             Toggle::Panel => &mut settings.panel,
             Toggle::TabTrack => &mut settings.tab_track,
+            Toggle::IconTiles => &mut settings.icon_tiles,
             Toggle::Logo => &mut settings.brand.show,
             Toggle::Pin => &mut settings.pin_tab_bar,
             Toggle::WheelZoom => &mut settings.wheel_zoom,
@@ -252,6 +256,7 @@ enum Row {
     Gap,
     Highlight,
     TabTrack,
+    IconTiles,
     Logo,
     LogoIcon,
     LogoText,
@@ -272,6 +277,7 @@ impl Row {
             Row::Gap => "Pane gap",
             Row::Highlight => "Focus highlight",
             Row::TabTrack => "Tab track",
+            Row::IconTiles => "Icon tiles",
             Row::Logo => "Logo",
             Row::LogoIcon => "Logo icon",
             Row::LogoText => "Logo text",
@@ -291,6 +297,7 @@ impl Row {
             Row::Gap => "Space between a tab's panes",
             Row::Highlight => "Border of the focused pane",
             Row::TabTrack => "Behind the tabs",
+            Row::IconTiles => "Behind the icons in tabs",
             Row::Logo => "Top left of the tab bar",
             Row::LogoIcon => "Alacritty's, a bundled logo or none",
             Row::LogoText => "{host} is this computer's name",
@@ -304,6 +311,7 @@ impl Row {
             Row::WheelZoom => Some(Toggle::WheelZoom),
             Row::Panel => Some(Toggle::Panel),
             Row::TabTrack => Some(Toggle::TabTrack),
+            Row::IconTiles => Some(Toggle::IconTiles),
             Row::Logo => Some(Toggle::Logo),
             _ => None,
         }
@@ -333,6 +341,7 @@ impl Page {
                 Row::Gap,
                 Row::Highlight,
                 Row::TabTrack,
+                Row::IconTiles,
                 Row::Logo,
                 Row::LogoIcon,
                 Row::LogoText,
@@ -994,9 +1003,12 @@ impl Settings {
                     Row::Highlight => control_at(rect, px(24.) + px(8.) + hex),
                     Row::LogoIcon => control_at(rect, px(30.)),
                     Row::LogoText => control_at(rect, 2. * name + px(8.)),
-                    Row::Pin | Row::WheelZoom | Row::Panel | Row::TabTrack | Row::Logo => {
-                        control_at(rect, px(40.))
-                    },
+                    Row::Pin
+                    | Row::WheelZoom
+                    | Row::Panel
+                    | Row::TabTrack
+                    | Row::IconTiles
+                    | Row::Logo => control_at(rect, px(40.)),
                 };
                 // Fields fill their controls, but for the buttons and wells beside them.
                 let half = ((control.w - px(8.)) / 2.).round();
@@ -3045,8 +3057,9 @@ mod tests {
     fn pages_list_their_rows() {
         assert_eq!(Page::General.rows(), [Row::Restore, Row::Pin, Row::WheelZoom]);
         let appearance = Page::Appearance.rows();
-        assert_eq!(appearance.len(), 11);
-        assert_eq!(appearance[8..], [Row::Logo, Row::LogoIcon, Row::LogoText]);
+        assert_eq!(appearance.len(), 12);
+        assert_eq!(appearance[7..9], [Row::TabTrack, Row::IconTiles]);
+        assert_eq!(appearance[9..], [Row::Logo, Row::LogoIcon, Row::LogoText]);
         assert!(Page::Profile.rows().is_empty());
         // Every switch flips the setting it shows.
         for row in appearance.iter().chain(Page::General.rows()) {
