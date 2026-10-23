@@ -261,16 +261,23 @@ report it with `OSC 7` (`ESC ] 7 ; file://host/path ST`) or Windows Terminal's
 - **Command Prompt, Git Bash** (and other MSYS or Cygwin shells): read from the
   shell's process, without any setup.
 - **PowerShell, Windows PowerShell**: `Set-Location` does not change the
-  process's directory, so the prompt has to report it.
-- **WSL**: Windows cannot see where a Linux process is, so the shell has to
-  report it. The split starts `wsl.exe` with `--cd <path>`, or, for paths with
+  process's directory, so the prompt has to report it. Marking the pane does
+  not help here: the process is found, but its directory is not the location.
+- **WSL**: without any setup. Each pane carries an `ALACRITTY_PANE_ID`, which
+  `WSLENV` passes into Linux; a split runs a short `wsl.exe -e sh` that finds
+  the pane's processes in `/proc` and reads the directory of the one in the
+  foreground, or else of the shell, giving up after 1.5 seconds. The split
+  starts `wsl.exe` with `--cd <path>`, `/mnt/c/…` included, or, for paths with
   spaces, in the path's `\\wsl.localhost\<distribution>\…` folder, which WSL
-  translates. Windows paths such as `/mnt/c/…`, `/c/…` or `C:\…` work for every
+  translates; without `-d <distribution>` in the profile, those start at home.
+  Windows paths such as `/mnt/c/…`, `/c/…` or `C:\…` in a report work for every
   profile.
 
 A report from another host, such as a shell over SSH, or of a directory that
-does not exist here, is ignored. One line in the shell's startup file reports
-the directory at each prompt:
+does not exist here, is ignored. Only PowerShell needs setup, but other shells
+can report too, and a report comes before what is read from processes on
+Windows. One line in the shell's startup file reports the directory at each
+prompt:
 
 ```sh
 # bash, ~/.bashrc

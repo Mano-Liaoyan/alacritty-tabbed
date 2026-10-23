@@ -291,6 +291,8 @@ impl WindowContext {
         // The PTY forks a process to run the shell on the slave side of the
         // pseudoterminal. A file descriptor for the master side is retained for
         // reading/writing to the shell.
+        #[cfg(windows)]
+        let marker = tabs::mark_pane(&mut pty_config);
         let pty = tty::new(&pty_config, display.size_info.into(), display.window.id().into())?;
 
         #[cfg(not(windows))]
@@ -299,6 +301,8 @@ impl WindowContext {
         let shell_pid = pty.child().id();
         #[cfg(windows)]
         let shell_pid = pty.child_watcher().pid().map_or(0, |pid| pid.get());
+        #[cfg(windows)]
+        tabs::register_pane(shell_pid, marker);
 
         // Create the pseudoterminal I/O loop.
         //

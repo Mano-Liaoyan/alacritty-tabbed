@@ -95,6 +95,8 @@ use app_settings::AppSettings;
 use bar::{BAR, Hit, INSET, Layout, MARGIN};
 use dnd::{Drag, Source, Target};
 use paint::Image;
+#[cfg(windows)]
+pub use cwd::{mark as mark_pane, register as register_pane};
 pub use paint::Rect;
 use panes::Control;
 use profiles::{Profile, Profiles};
@@ -788,12 +790,16 @@ impl Session {
         }
         let terminal = Arc::new(FairMutex::new(terminal));
 
+        #[cfg(windows)]
+        let marker = cwd::mark(&mut pty_config);
         // Shells and `alacritty msg` refer to the window, not the tab.
         let pty = tty::new(&pty_config, size.into(), ctx.id().into())?;
         #[cfg(not(windows))]
         let (master_fd, shell_pid) = (pty.file().as_raw_fd(), pty.child().id());
         #[cfg(windows)]
         let shell_pid = pty.child_watcher().pid().map_or(0, |pid| pid.get());
+        #[cfg(windows)]
+        cwd::register(shell_pid, marker);
         let event_loop =
             PtyEventLoop::new(terminal.clone(), event_proxy, pty, pty_config.drain_on_exit, false)?;
         let notifier = Notifier(event_loop.channel());
@@ -2000,7 +2006,9 @@ pub fn split(
     #[cfg(not(windows))]
     let process = || crate::daemon::foreground_process_path(ctx.master_fd, ctx.shell_pid).ok();
     #[cfg(windows)]
-    let process = || cwd::process_directory(ctx.shell_pid);
+    let command = profile.as_ref().map(|profile| profile.command.clone());
+    #[cfg(windows)]
+    let process = || cwd::process_directory(ctx.shell_pid, command.as_deref());
     let (profile, directory) = cwd::inherit(profile, reported, process);
     let spawned = Session::spawn(ctx, config, proxy, profile.as_ref(), directory, None);
     let (id, session) = match spawned {

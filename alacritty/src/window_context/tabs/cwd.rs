@@ -3,8 +3,10 @@
 //! A shell can tell its directory with `OSC 7` or `OSC 9 ; 9`, which the terminal keeps. Without
 //! that, the directory of the shell's process is read: from `/proc` or the system on Unix, and
 //! from the process's parameters on Windows, which `cmd` and MSYS shells such as Git Bash keep up
-//! to date but PowerShell does not. WSL shells are out of Windows' reach, so they must report it,
-//! and the new pane's `wsl.exe` is told where to start with `--cd`.
+//! to date but PowerShell does not. WSL shells are out of Windows' reach, so each pane gets a
+//! marker in its environment, which `WSLENV` carries into Linux, and a short `wsl.exe` run finds
+//! the processes carrying it in `/proc`; the new pane's `wsl.exe` is told where to start with
+//! `--cd`.
 
 use std::path::PathBuf;
 
@@ -22,7 +24,10 @@ pub fn inherit(
 ) -> (Option<Profile>, Option<PathBuf>) {
     #[cfg(windows)]
     if let Some(wsl) = profile.as_ref().and_then(|profile| wsl::Command::parse(&profile.command)) {
-        let Some(place) = reported.and_then(|reported| wsl.place(&reported)) else {
+        // A report, or else where the marked shell's foreground program is, by its `/proc`.
+        let place = reported.and_then(|reported| wsl.place(&reported));
+        let place = place.or_else(|| process().and_then(|path| wsl::Place::found(&path)));
+        let Some(place) = place else {
             return (profile, None);
         };
         let (command, directory) = wsl.start_in(place);
@@ -107,6 +112,14 @@ mod wsl {
         Linux(String),
         /// A Windows path, such as `C:\Users\me`, which WSL translates.
         Windows(String),
+    }
+
+    impl Place {
+        /// The Linux path `path` that a lookup in `/proc` found.
+        pub fn found(path: &Path) -> Option<Self> {
+            let path = path.to_str()?;
+            path.starts_with('/').then(|| Self::Linux(path.into()))
+        }
     }
 
     /// A command line running `wsl.exe`.
@@ -235,6 +248,31 @@ mod wsl {
             }
         }
 
+        /// The program and arguments of a run in the same distribution, as the same user, of
+        /// `sh` reading its script from its input, with `args` as its arguments.
+        pub fn helper(&self, args: &[&str]) -> (String, Vec<String>) {
+            const KEPT: [&str; 5] = ["-d", "--distribution", "-u", "--user", "--distribution-id"];
+            let start = self.command_start();
+            let mut words = Vec::new();
+            let mut index = 0;
+            while index < start {
+                let word = self.words[index].as_str();
+                if !VALUED.contains(&word) {
+                    index += 1;
+                    continue;
+                }
+                let end = self.value_end(index + 1);
+                if KEPT.contains(&word) && end > index + 1 {
+                    let value = self.words[index + 1..end].join(" ");
+                    words.extend([word.to_owned(), value.trim_matches('"').to_owned()]);
+                }
+                index = end;
+            }
+            words.extend(["--cd", "/", "-e", "sh", "-s"].map(String::from));
+            words.extend(args.iter().map(|&arg| arg.to_owned()));
+            (self.program.trim_matches('"').to_owned(), words)
+        }
+
         /// The command line with `cd` as its `--cd`, or without one.
         fn with_cd(&self, cd: Option<&str>) -> String {
             let start = self.command_start();
@@ -337,9 +375,262 @@ mod wsl {
 ///
 /// That is the deepest process the shell started, as far as their directory can be read from
 /// their process parameters: shells such as Git Bash's `bash.exe` start another one in turn.
+///
+/// For a pane running `command` in WSL, that is the Linux path its marked processes show.
 #[cfg(windows)]
-pub fn process_directory(pid: u32) -> Option<PathBuf> {
-    process::directory(pid)
+pub fn process_directory(pid: u32, command: Option<&str>) -> Option<PathBuf> {
+    match command.and_then(wsl::Command::parse) {
+        Some(wsl) => marker::directory(&wsl, pid).map(PathBuf::from),
+        None => process::directory(pid),
+    }
+}
+
+/// Mark a pane to be started with `options`, so that its processes can be found in WSL, which
+/// [`register`] then ties to its shell.
+#[cfg(windows)]
+pub fn mark(options: &mut alacritty_terminal::tty::Options) -> String {
+    marker::mark(&mut options.env)
+}
+
+/// Tie the `marker` of a pane to the process id of its shell.
+#[cfg(windows)]
+pub fn register(pid: u32, marker: String) {
+    marker::register(pid, marker);
+}
+
+/// Markers in the environment of panes, which WSL carries into Linux, to find their processes.
+#[cfg(windows)]
+mod marker {
+    use std::collections::{BTreeMap, HashMap, HashSet};
+    use std::io::{Read, Write};
+    use std::os::windows::process::CommandExt;
+    use std::process::{Command, Stdio};
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    use log::debug;
+
+    use super::wsl;
+
+    /// The variable holding a pane's marker.
+    pub const VARIABLE: &str = "ALACRITTY_PANE_ID";
+
+    /// How long a lookup may take before the split gives up on it.
+    const TIMEOUT: Duration = Duration::from_millis(1500);
+
+    /// `CREATE_NO_WINDOW`, so the lookup does not flash a console window.
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+    /// The `sh` script finding the marked processes, with the marker as its argument.
+    ///
+    /// It prints a line for each: its id, its parent's, the foreground process group of its
+    /// terminal, when it started, and its directory. Only the user's own processes can be read.
+    pub const SCRIPT: &str = r#"m="ALACRITTY_PANE_ID=$1"
+for f in $(grep -lzx -- "$m" /proc/[0-9]*/environ 2>/dev/null); do
+  d=${f%/environ}
+  s=$(cat "$d/stat" 2>/dev/null) || continue
+  c=$(readlink "$d/cwd" 2>/dev/null) || continue
+  set -- ${s##*) }
+  echo "${d#/proc/} $2 $6 ${20} $c"
+done
+"#;
+
+    /// Markers by the process id of the shell they were given to.
+    static MARKERS: Mutex<BTreeMap<u32, String>> = Mutex::new(BTreeMap::new());
+
+    /// Give a new marker to the environment `env` of a pane, and tell WSL to carry it.
+    pub fn mark(env: &mut HashMap<String, String>) -> String {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let marker = format!("{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed));
+        let key = env.keys().find(|key| key.eq_ignore_ascii_case("WSLENV")).cloned();
+        let wslenv = match &key {
+            Some(key) => env.remove(key),
+            None => std::env::var("WSLENV").ok(),
+        };
+        env.insert(key.unwrap_or_else(|| "WSLENV".into()), carry(wslenv.as_deref()));
+        env.insert(VARIABLE.into(), marker.clone());
+        marker
+    }
+
+    /// `WSLENV`, from its value `wslenv`, carrying the marker too.
+    pub fn carry(wslenv: Option<&str>) -> String {
+        let wslenv = wslenv.unwrap_or_default().trim_end_matches(':');
+        let name = |entry: &str| entry.split('/').next().unwrap_or_default().to_owned();
+        if wslenv.split(':').any(|entry| name(entry).eq_ignore_ascii_case(VARIABLE)) {
+            wslenv.into()
+        } else if wslenv.is_empty() {
+            VARIABLE.into()
+        } else {
+            format!("{wslenv}:{VARIABLE}")
+        }
+    }
+
+    pub fn register(pid: u32, marker: String) {
+        if let Ok(mut markers) = MARKERS.lock() {
+            markers.insert(pid, marker);
+        }
+    }
+
+    /// The Linux directory of the program in the foreground of the shell with the process id
+    /// `pid`, which `wsl` started.
+    pub fn directory(wsl: &wsl::Command, pid: u32) -> Option<String> {
+        let marker = MARKERS.lock().ok()?.get(&pid)?.clone();
+        let start = Instant::now();
+        let output = run(wsl, &marker);
+        debug!("WSL directory lookup took {:?}", start.elapsed());
+        choose(&parse(&output?))
+    }
+
+    /// Run the script in WSL, for at most [`TIMEOUT`].
+    fn run(wsl: &wsl::Command, marker: &str) -> Option<String> {
+        let (program, args) = wsl.helper(&[marker]);
+        let mut child = Command::new(program)
+            .args(args)
+            .env_remove(VARIABLE)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn()
+            .ok()?;
+        let mut stdin = child.stdin.take()?;
+        let mut stdout = child.stdout.take()?;
+        let (sender, receiver) = mpsc::channel();
+        thread::spawn(move || {
+            let _ = stdin.write_all(SCRIPT.as_bytes());
+            drop(stdin);
+            let mut output = String::new();
+            let _ = sender.send(stdout.read_to_string(&mut output).ok().map(|_| output));
+        });
+        let output = receiver.recv_timeout(TIMEOUT).ok().flatten();
+        if output.is_none() {
+            debug!("WSL directory lookup failed or timed out");
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+        output
+    }
+
+    /// A marked process, as the script tells of it.
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct Process {
+        pub pid: u32,
+        pub parent: u32,
+        /// The foreground process group of its terminal.
+        pub foreground: i64,
+        /// When it started, in clock ticks since the system did.
+        pub started: u64,
+        pub directory: String,
+    }
+
+    /// The processes in the script's `output`.
+    pub fn parse(output: &str) -> Vec<Process> {
+        let process = |line: &str| {
+            let mut fields = line.splitn(5, ' ');
+            let mut number = || fields.next()?.parse::<i64>().ok();
+            let (pid, parent, foreground, started) = (number()?, number()?, number()?, number()?);
+            let directory = fields.next()?;
+            // A deleted directory reads as `/path (deleted)`.
+            if !directory.starts_with('/') || directory.ends_with(" (deleted)") {
+                return None;
+            }
+            Some(Process {
+                pid: u32::try_from(pid).ok()?,
+                parent: u32::try_from(parent).ok()?,
+                foreground,
+                started: u64::try_from(started).ok()?,
+                directory: directory.into(),
+            })
+        };
+        output.lines().map(|line| line.trim_end_matches('\r')).filter_map(process).collect()
+    }
+
+    /// The directory of the newest process leading its terminal's foreground, which is the
+    /// shell itself at its prompt, or else of the oldest one no marked process started, which
+    /// is the shell.
+    pub fn choose(processes: &[Process]) -> Option<String> {
+        let marked: HashSet<u32> = processes.iter().map(|process| process.pid).collect();
+        let leading =
+            processes.iter().filter(|process| i64::from(process.pid) == process.foreground);
+        let shell = || {
+            let first = processes.iter().filter(|process| !marked.contains(&process.parent));
+            first.min_by_key(|process| process.started)
+        };
+        let newest = leading.max_by_key(|process| process.started);
+        Some(newest.or_else(shell)?.directory.clone())
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn wslenv_carries_the_marker_and_keeps_the_rest() {
+            assert_eq!(carry(None), "ALACRITTY_PANE_ID");
+            assert_eq!(carry(Some("")), "ALACRITTY_PANE_ID");
+            assert_eq!(carry(Some("USERPROFILE/p:")), "USERPROFILE/p:ALACRITTY_PANE_ID");
+            assert_eq!(carry(Some("A:alacritty_pane_id/u")), "A:alacritty_pane_id/u");
+            assert_eq!(carry(Some("ALACRITTY_PANE_IDS")), "ALACRITTY_PANE_IDS:ALACRITTY_PANE_ID");
+        }
+
+        #[test]
+        fn panes_get_distinct_markers_in_their_environment() {
+            let mut env = HashMap::from([("WslEnv".to_owned(), "TERM_PROGRAM".to_owned())]);
+            let first = mark(&mut env);
+            assert_eq!(env.get(VARIABLE), Some(&first));
+            let wslenv = Some("TERM_PROGRAM:ALACRITTY_PANE_ID");
+            assert_eq!(env.get("WslEnv").map(String::as_str), wslenv);
+            assert_eq!(env.len(), 2);
+            assert_ne!(mark(&mut env), first);
+            assert_eq!(env.get("WslEnv").map(String::as_str), wslenv);
+        }
+
+        #[test]
+        fn the_script_goes_to_sh_through_its_input() {
+            let wsl = wsl::Command::parse("wsl.exe -d Ubuntu-24.04 --cd ~").unwrap();
+            let (program, args) = wsl.helper(&["12-3"]);
+            assert_eq!(program, "wsl.exe");
+            assert_eq!(args, ["-d", "Ubuntu-24.04", "--cd", "/", "-e", "sh", "-s", "12-3"]);
+
+            let line =
+                r#""C:\Windows\System32\wsl.exe" -u me --distribution "Debian" --cd ~ -e zsh -l"#;
+            let (program, args) = wsl::Command::parse(line).unwrap().helper(&["m"]);
+            assert_eq!(program, r"C:\Windows\System32\wsl.exe");
+            let expected = ["-u", "me", "--distribution", "Debian", "--cd", "/", "-e", "sh", "-s"];
+            assert_eq!(args[..9], expected);
+            let (_, args) = wsl::Command::parse("wsl ~").unwrap().helper(&["m"]);
+            assert_eq!(args, ["--cd", "/", "-e", "sh", "-s", "m"]);
+
+            // `sh` reads it as it is, with Unix line ends.
+            assert!(SCRIPT.contains(&format!("{VARIABLE}=$1")));
+            assert!(!SCRIPT.contains('\r'));
+        }
+
+        #[test]
+        fn the_foreground_program_or_else_the_shell_is_chosen() {
+            // The shell 100 runs `vim` (120) in the foreground, and `sleep` (110) in the back.
+            let output = "100 99 120 5000 /home/me\n110 100 120 5100 /tmp\n\
+                          120 100 120 5200 /home/me/containers/a b\r\n";
+            let processes = parse(output);
+            assert_eq!(processes.len(), 3);
+            assert_eq!(processes[2].directory, "/home/me/containers/a b");
+            assert_eq!(choose(&processes).as_deref(), Some("/home/me/containers/a b"));
+
+            // At its prompt, the shell leads.
+            let windows = choose(&parse("100 99 100 5000 /mnt/c/Users/me"));
+            assert_eq!(windows.as_deref(), Some("/mnt/c/Users/me"));
+
+            // The foreground program cannot be read, such as one run by `sudo`.
+            let output = "100 99 130 5000 /srv\n110 100 130 5100 /tmp\n";
+            assert_eq!(choose(&parse(output)).as_deref(), Some("/srv"));
+
+            assert_eq!(choose(&parse("")), None);
+            assert_eq!(parse("100 99 100 5000 /gone (deleted)\nnoise\n1 2 3 x /a\n"), []);
+        }
+    }
 }
 
 #[cfg(windows)]
@@ -586,8 +877,16 @@ mod tests {
         assert_eq!(directory, None);
 
         let profile = Profile::new("WSL", "wsl.exe -d Ubuntu --cd ~");
-        let (profile, directory) = inherit(Some(profile), None, || panic!("not read"));
-        assert_eq!(profile.unwrap().command, "wsl.exe -d Ubuntu --cd ~");
+        let (found, directory) = inherit(Some(profile.clone()), None, || None);
+        assert_eq!(found.unwrap().command, "wsl.exe -d Ubuntu --cd ~");
         assert_eq!(directory, None);
+
+        // Without a report, where its marked processes are, even on a Windows drive.
+        let (found, directory) = inherit(Some(profile.clone()), None, || Some("/mnt/c/a".into()));
+        assert_eq!(found.unwrap().command, "wsl.exe -d Ubuntu --cd /mnt/c/a");
+        assert_eq!(directory, None);
+        let (found, directory) = inherit(Some(profile), None, || Some("/srv/a b".into()));
+        assert_eq!(found.unwrap().command, "wsl.exe -d Ubuntu");
+        assert_eq!(directory, Some(r"\\wsl.localhost\Ubuntu\srv\a b".into()));
     }
 }
