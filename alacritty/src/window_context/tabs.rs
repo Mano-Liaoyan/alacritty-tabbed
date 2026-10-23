@@ -200,8 +200,9 @@ enum Press {
     None,
     Bar,
     Terminal,
-    /// A pane that was focused by the press, which it does not get.
-    Focus,
+    /// Over something that used the press, such as a pane it focused, so the terminal gets
+    /// neither it nor its release.
+    Swallowed,
 }
 
 /// The open new-tab menu: profiles, then an entry to edit them.
@@ -370,7 +371,8 @@ impl<S> Tab<S> {
     /// Put `pane` beside the pane `target`, returning its index.
     fn insert(&mut self, target: WindowId, pane: Pane<S>, axis: Axis, side: Side) -> usize {
         let id = pane.id;
-        self.layout.insert(target, Split::Pane(id), axis, side);
+        let placed = self.layout.insert(target, Split::Pane(id), axis, side);
+        debug_assert!(placed, "panes go beside a pane of their tab");
         self.panes.push(pane);
         self.order();
         self.position(id).unwrap_or_default()
@@ -385,12 +387,17 @@ impl<S> Tab<S> {
         self.order();
     }
 
+    /// Index of the pane that takes the space of the pane at `index` once it closes.
+    fn neighbour(&self, index: usize) -> Option<usize> {
+        self.layout.neighbour(self.panes[index].id).and_then(|id| self.position(id))
+    }
+
     /// Take out the pane at `index`, of two or more; its neighbour takes its space, and the focus
     /// if it had it.
     fn remove(&mut self, index: usize) -> Pane<S> {
         let id = self.panes[index].id;
-        let focus =
-            if index == self.focus { self.layout.neighbour(id) } else { Some(self.pane().id) };
+        let focus = if index == self.focus { self.neighbour(index) } else { Some(self.focus) };
+        let focus = focus.map(|focus| self.panes[focus].id);
         let layout = mem::replace(&mut self.layout, Split::Pane(id));
         self.layout = layout.remove(id).expect("a tab keeps a pane");
         let pane = self.panes.remove(index);
@@ -622,6 +629,10 @@ pub fn window_event(
     clipboard: &mut Clipboard,
 ) -> Option<WindowEvent> {
     if let WindowEvent::Resized(size) = event {
+        // Minimizing reports an empty size, which the terminal ignores too.
+        if size.width == 0 || size.height == 0 {
+            return Some(event);
+        }
         ctx.display.tabs.window = size;
     }
     sync(ctx, config, matches!(event, WindowEvent::Resized(_)));
@@ -736,7 +747,7 @@ pub fn window_event(
                     hover(ctx, layout.hit(ctx.display.tabs.pointer));
                     return None;
                 },
-                Press::Focus => return None,
+                Press::Swallowed => return None,
                 _ => (),
             }
         },
@@ -758,7 +769,7 @@ pub fn window_event(
             let tabs = &mut ctx.display.tabs;
             let terminal = tabs.menu.is_none() && layout.hit(pointer) == Hit::Terminal;
             if terminal && over_other_pane {
-                tabs.press = Press::Focus;
+                tabs.press = Press::Swallowed;
                 let (active, pane) = (tabs.active, tabs.pane_at(pointer).unwrap_or_default());
                 focus_pane(ctx, active, pane, config);
                 return None;
@@ -897,7 +908,7 @@ fn sync(ctx: &mut WindowContext, config: &Rc<UiConfig>, resize: bool) {
         redraw(ctx);
     }
     let tabs = &mut ctx.display.tabs;
-    let shown = (ctx.config.window.tabs || tabs.tabs.len() > 1) && tabs.font.is_some();
+    let shown = (ctx.config.window.tabs || tabs.count() > 1) && tabs.font.is_some();
 
     // The window's own terminal becomes the first tab.
     if shown && tabs.tabs.is_empty() {
@@ -967,33 +978,45 @@ fn sync(ctx: &mut WindowContext, config: &Rc<UiConfig>, resize: bool) {
     }
 }
 
-/// Fit each pane of every tab in its place, after they or the window changed.
+/// Fit each pane of the active tab in its place, after they or the window changed; the panes of
+/// other tabs are fitted once their tab is selected.
 ///
 /// The live terminal is resized with the window context's other updates, the others at once.
 pub fn relayout(ctx: &mut WindowContext) {
     let size = ctx.display.size_info;
+    let cells = (size.cell_width(), size.cell_height());
     let tabs = &mut ctx.display.tabs;
     let (area, scale) = (tabs.area(), tabs.scale as f32);
-    for tab in &mut tabs.tabs {
-        for ((_, rect), pane) in tab.layout.rects(area).into_iter().zip(&mut tab.panes) {
-            let Some(session) = &mut pane.session else { continue };
-            let padding = session.config.window.padding(scale);
-            let dynamic = session.config.window.dynamic_padding;
-            let (width, height) = (size.cell_width(), size.cell_height());
-            let new = SizeInfo::new(rect.w, rect.h, width, height, padding.0, padding.1, dynamic);
-            let old = mem::replace(&mut session.size, new);
-            if new.columns() != old.columns() || new.screen_lines() != old.screen_lines() {
-                session.terminal.lock().resize(new);
-                session.notifier.on_resize(new.into());
-            }
+    // A minimized window leaves no room for the panes.
+    let active = tabs.active;
+    let Some(tab) = tabs.tabs.get_mut(active).filter(|_| area.w >= 1. && area.h >= 1.) else {
+        return;
+    };
+
+    let rects = tab.layout.rects(area);
+    for (&(_, rect), pane) in rects.iter().zip(&mut tab.panes) {
+        let Some(session) = &mut pane.session else { continue };
+        let new = fit(rect, cells, &session.config, scale);
+        let old = mem::replace(&mut session.size, new);
+        if new.columns() != old.columns() || new.screen_lines() != old.screen_lines() {
+            session.terminal.lock().resize(new);
+            session.notifier.on_resize(new.into());
         }
     }
+    tabs.pane_effects.place(&rects, Instant::now());
 
     let rect = tabs.focused_rect();
-    if !tabs.tabs.is_empty() && (rect.w, rect.h) != (size.width(), size.height()) {
+    if (rect.w, rect.h) != (size.width(), size.height()) {
         resize_live(ctx);
     }
     redraw(ctx);
+}
+
+/// Size of a terminal with `config` in a pane placed at `rect`, with cells of `cells` pixels.
+fn fit(rect: Rect, cells: (f32, f32), config: &UiConfig, scale: f32) -> SizeInfo {
+    let (x, y) = config.window.padding(scale);
+    let dynamic = config.window.dynamic_padding;
+    SizeInfo::new(rect.w, rect.h, cells.0, cells.1, x, y, dynamic)
 }
 
 /// Resize the live terminal to its pane.
@@ -1397,7 +1420,15 @@ pub fn focus_pane(ctx: &mut WindowContext, tab: usize, pane: usize, config: &Rc<
     ctx.update_config(config.clone());
     sync(ctx, config, false);
     ctx.display.window.set_title(title);
-    let size = ctx.display.size_info;
+    // The terminal is fit to its own pane, which the display follows with its next update.
+    let (rect, display) = (ctx.display.tabs.focused_rect(), ctx.display.size_info);
+    let size =
+        if rect.w < 1. || rect.h < 1. || (rect.w, rect.h) == (display.width(), display.height()) {
+            display
+        } else {
+            let cells = (display.cell_width(), display.cell_height());
+            fit(rect, cells, &ctx.config, ctx.display.tabs.scale as f32)
+        };
     let mut terminal = ctx.terminal.lock();
     terminal.is_focused = focused;
     if terminal.columns() != size.columns() || terminal.screen_lines() != size.screen_lines() {
@@ -1457,9 +1488,8 @@ pub fn close_pane(ctx: &mut WindowContext, tab: usize, pane: usize, config: &Rc<
     }
     // The live pane passes the focus to its neighbour first.
     if (tab, pane) == tabs.live() {
-        let Tab { layout, panes, .. } = &tabs.tabs[tab];
-        let next = layout.neighbour(panes[pane].id).and_then(|id| tabs.tabs[tab].position(id));
-        focus_pane(ctx, tab, next.unwrap_or_default(), config);
+        let next = tabs.tabs[tab].neighbour(pane).unwrap_or_default();
+        focus_pane(ctx, tab, next, config);
     }
     drop(ctx.display.tabs.tabs[tab].remove(pane));
     relayout(ctx);
@@ -1530,9 +1560,7 @@ mod tests {
         /// Close a pane of a tab that has others, like `close_pane`.
         fn close(&mut self, (tab, index): (usize, usize)) {
             if (tab, index) == (self.active, self.tabs[tab].focus) {
-                let id = self.tabs[tab].panes[index].id;
-                let next = self.tabs[tab].layout.neighbour(id).unwrap();
-                let next = self.tabs[tab].position(next).unwrap();
+                let next = self.tabs[tab].neighbour(index).unwrap();
                 self.focus((tab, next));
             }
             let pane = self.tabs[tab].remove(index);

@@ -15,6 +15,9 @@ use super::paint::{Layer, Palette, Rect};
 pub struct Effects;
 
 impl Effects {
+    /// Follow the panes of the active tab to their new places `rects`, at `now`.
+    pub fn place(&mut self, _rects: &[(WindowId, Rect)], _now: Instant) {}
+
     /// Where to draw the pane `id`, whose place is `rect`, at `now`.
     pub fn frame(&self, _id: WindowId, rect: Rect, _now: Instant) -> Rect {
         rect

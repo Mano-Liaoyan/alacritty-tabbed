@@ -138,7 +138,7 @@ pub fn scale() -> f32 {
     static SCALE: OnceLock<f32> = OnceLock::new();
     *SCALE.get_or_init(|| {
         let scale = env::var("ALACRITTY_ANIMATION_SCALE").ok().and_then(|s| s.parse().ok());
-        scale.filter(|scale: &f32| scale.is_finite()).unwrap_or(1.).max(0.)
+        scale.filter(|scale: &f32| scale.is_finite()).unwrap_or(1.).clamp(0., 100.)
     })
 }
 
@@ -197,8 +197,9 @@ mod tests {
 
         tween.to(10., now, 100, Curve::EASE_OUT);
         let duration = Duration::from_millis(100).mul_f32(scale());
-        assert_eq!(tween.get(now), 0.);
-        assert!(tween.running(now));
+        // Animations are off with a scale of zero.
+        assert_eq!(tween.get(now), if scale() > 0. { 0. } else { 10. });
+        assert_eq!(tween.running(now), scale() > 0.);
         assert!(!tween.running(now + duration));
         assert_eq!(tween.get(now + duration), 10.);
     }

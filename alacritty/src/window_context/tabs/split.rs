@@ -40,7 +40,8 @@ pub enum Split<P> {
 }
 
 impl<P: Copy + PartialEq> Split<P> {
-    /// The panes in reading order: left to right, then top to bottom.
+    /// The panes in the order of the tree: those of the first part, then of the second, so
+    /// panes side by side or stacked come left to right or top to bottom.
     pub fn panes(&self) -> Vec<P> {
         self.rects(Rect::default()).into_iter().map(|(pane, _)| pane).collect()
     }
