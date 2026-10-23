@@ -50,6 +50,9 @@ pub struct State {
 /// A divider being dragged.
 struct Drag {
     index: usize,
+    /// Its axis and how many dividers the tab had, which must not change while it is dragged.
+    axis: Axis,
+    count: usize,
     /// Pointer offset from the divider's middle at the press.
     grab: f32,
     /// The pair's ratio at the press, which escape restores.
@@ -74,14 +77,11 @@ impl State {
 pub fn moved(ctx: &mut WindowContext, position: PhysicalPosition<f64>) -> bool {
     let tabs = &mut ctx.display.tabs;
     let point = (position.x as f32, position.y as f32);
-    if let Some((index, grab)) = tabs.divider.drag.as_ref().map(|drag| (drag.index, drag.grab)) {
-        let Some(divider) = tabs.dividers().into_iter().find(|d| d.index == index) else {
-            return true;
-        };
+    if let Some((divider, grab, _)) = dragged(tabs) {
         let snap = SNAP * tabs.scale as f32;
         let ratio = ratio(&divider, across(divider.axis, point), grab, tabs.spacing(), snap);
-        tabs.divider.pill_at = Some((index, along(divider.axis, point)));
-        set_ratio(ctx, index, ratio);
+        tabs.divider.pill_at = Some((divider.index, along(divider.axis, point)));
+        set_ratio(ctx, divider.index, ratio);
         redraw(ctx);
         return true;
     }
@@ -132,7 +132,8 @@ pub fn press(ctx: &mut WindowContext, button: MouseButton) -> bool {
     let spacing = tabs.spacing();
     let grab = across(divider.axis, point) - divider.at;
     let ratio = ratio(&divider, divider.at, 0., spacing, 0.);
-    tabs.divider.drag = Some(Drag { index: divider.index, grab, ratio });
+    let (index, axis, count) = (divider.index, divider.axis, tabs.dividers().len());
+    tabs.divider.drag = Some(Drag { index, axis, count, grab, ratio });
     tabs.press = Press::Divider;
     redraw(ctx);
     true
@@ -155,18 +156,45 @@ pub fn release(ctx: &mut WindowContext) {
 /// Handle a key while dragging, returning whether it was used: escape restores the ratio.
 pub fn key(ctx: &mut WindowContext, key: &KeyEvent) -> bool {
     let tabs = &mut ctx.display.tabs;
-    if tabs.divider.drag.is_none() || key.state != ElementState::Pressed {
+    if key.state != ElementState::Pressed {
         return false;
     }
+    let Some((divider, _, ratio)) = dragged(tabs) else { return false };
     if key.logical_key == Key::Named(NamedKey::Escape) {
-        let drag = tabs.divider.drag.take().unwrap();
+        tabs.divider.drag = None;
         // The divider slides back, and the release that follows is nobody's.
         tabs.press = Press::Swallowed;
         (tabs.divider.last_click, tabs.divider.pill_at) = (None, None);
-        set_ratio(ctx, drag.index, drag.ratio);
+        set_ratio(ctx, divider.index, ratio);
     }
     // Keys wait for the drag to end.
     true
+}
+
+/// Forget the hovered divider as the pointer leaves the window.
+pub fn left(ctx: &mut WindowContext) {
+    if ctx.display.tabs.divider.hovered.take().is_some() {
+        redraw(ctx);
+    }
+}
+
+/// Whether a press or release of `button` waits for the dragged divider's button instead.
+pub fn holds(tabs: &Tabs, button: MouseButton) -> bool {
+    button != MouseButton::Left && tabs.press == Press::Divider
+}
+
+/// The dragged divider, with the drag's grab and starting ratio; a drag whose tab's dividers
+/// changed under it, as when a pane exits, ends.
+fn dragged(tabs: &mut Tabs) -> Option<(Divider, f32, f32)> {
+    let drag = tabs.divider.drag.as_ref()?;
+    let dividers = tabs.dividers();
+    let same = dividers.len() == drag.count;
+    let divider = dividers.get(drag.index).copied().filter(|d| same && d.axis == drag.axis);
+    let found = divider.map(|divider| (divider, drag.grab, drag.ratio));
+    if found.is_none() {
+        tabs.divider.drag = None;
+    }
+    found
 }
 
 /// Draw the pill on the hovered or dragged divider, fading as it shows and hides.
@@ -355,6 +383,26 @@ mod tests {
         let mut copy = layout.clone();
         copy.set_ratio(0, ratio);
         assert_eq!(copy.rects(AREA, 16.), layout.rects(AREA, 16.));
+    }
+
+    #[test]
+    fn other_buttons_wait_for_a_dragged_divider() {
+        let mut tabs = Tabs::default();
+        assert!(!holds(&tabs, MouseButton::Right));
+        tabs.press = Press::Divider;
+        assert!(holds(&tabs, MouseButton::Right));
+        assert!(holds(&tabs, MouseButton::Middle));
+        assert!(!holds(&tabs, MouseButton::Left), "the dragging button ends the drag");
+    }
+
+    #[test]
+    fn drags_end_when_the_dividers_change() {
+        let mut tabs = Tabs::default();
+        tabs.divider.drag =
+            Some(Drag { index: 0, axis: Axis::Row, count: 1, grab: 0., ratio: 0.5 });
+        // The tab has no dividers any more.
+        assert!(dragged(&mut tabs).is_none());
+        assert!(tabs.divider.drag.is_none());
     }
 
     #[test]

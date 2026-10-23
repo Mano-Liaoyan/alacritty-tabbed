@@ -204,17 +204,24 @@ pub fn handle(tabs: &Tabs, point: PhysicalPosition<f64>, scale: f32) -> Option<u
         return None;
     }
     let cards: Vec<_> = rects.into_iter().map(|(index, rect)| (index, tabs.card(rect))).collect();
-    grabbed(&cards, tabs.area().y, point, scale)
+    // The zone stops at the middle of the gap above, where a divider takes the pointer.
+    let reach = (tabs.spacing() / 2. + tabs.margin()).max(0.);
+    grabbed(&cards, tabs.area().y, reach, point, scale)
 }
 
-/// The pane of `cards`, by index, whose handle's zone holds `point`, below `top`.
+/// The pane of `cards`, by index, whose handle's zone holds `point`, below `top` and at most
+/// `reach` above its card.
 fn grabbed(
     cards: &[(usize, Rect)],
     top: f32,
+    reach: f32,
     point: PhysicalPosition<f64>,
     scale: f32,
 ) -> Option<usize> {
-    let hit = cards.iter().find(|&&(_, card)| handle_rects(card, top, scale).1.contains(point));
+    let hit = cards.iter().find(|&&(_, card)| {
+        let (_, zone) = handle_rects(card, top, scale);
+        zone.contains(point) && point.y as f32 >= card.y - reach
+    });
     hit.map(|&(index, _)| index)
 }
 
@@ -299,9 +306,15 @@ pub fn draw(tabs: &Tabs, layout: &Layout, palette: &Palette, layer: &mut Layer, 
 
     // A handle on each shown pane's top edge, while there are several.
     if cards.len() > 1 {
+        let top = tabs.area().y;
         for &(index, card) in &cards {
             let level = effects.handle(tab.panes[index].id, tabs.handle == Some(index), now);
-            draw_handle(layer, layout, palette, card, tabs.area().y, level);
+            // Not over the focused pane sliding across it.
+            let (plate, _) = handle_rects(card, top, layout.scale);
+            if index != tab.focus && focused.is_some_and(|focused| overlap(plate, focused)) {
+                continue;
+            }
+            draw_handle(layer, layout, palette, card, top, level);
         }
     }
     divider::draw(tabs, layout, palette, layer, now);
@@ -661,7 +674,7 @@ mod tests {
     #[test]
     fn handles_grab_within_their_zone() {
         let cards = [(0, Rect::new(8., 48., 384., 584.)), (1, Rect::new(408., 48., 384., 584.))];
-        let at = |x: f64, y: f64| grabbed(&cards, 40., PhysicalPosition::new(x, y), 1.);
+        let at = |x: f64, y: f64| grabbed(&cards, 40., 8., PhysicalPosition::new(x, y), 1.);
         assert_eq!(at(200., 48.), Some(0));
         assert_eq!(at(600., 56.), Some(1));
         assert_eq!(at(600. + 23., 48.), Some(1));
@@ -669,6 +682,14 @@ mod tests {
         assert_eq!(at(600., 58.), None);
         assert_eq!(at(600., 39.), None, "the bar keeps the pointer");
         assert_eq!(at(400., 48.), None);
+        // Above the middle of the gap, the divider there has the pointer.
+        let stacked = [(0, Rect::new(8., 48., 784., 284.)), (1, Rect::new(8., 348., 784., 284.))];
+        let at =
+            |y: f64, reach: f32| grabbed(&stacked, 40., reach, PhysicalPosition::new(400., y), 1.);
+        assert_eq!(at(340., 8.), Some(1));
+        assert_eq!(at(339., 8.), None);
+        assert_eq!(at(347., 0.), None, "without a gap, only below the edge");
+        assert_eq!(at(348., 0.), Some(1));
     }
 
     #[test]

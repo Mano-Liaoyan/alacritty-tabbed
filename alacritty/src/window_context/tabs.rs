@@ -955,7 +955,11 @@ pub fn window_event(
             return Some(WindowEvent::CursorLeft { device_id });
         },
         WindowEvent::CursorLeft { .. } => {
-            tabs.handle = None;
+            // The hovered handle or divider is no longer lit.
+            if tabs.handle.take().is_some() {
+                redraw(ctx);
+            }
+            divider::left(ctx);
             hover(ctx, Hit::None);
         },
         // The release that would end a drag may never come once the window loses focus.
@@ -968,6 +972,8 @@ pub fn window_event(
             }
             rename::commit(ctx);
         },
+        // Other buttons wait for the one that drags a divider to be released.
+        WindowEvent::MouseInput { button, .. } if divider::holds(tabs, button) => return None,
         // Only the left button, which drags, drops.
         WindowEvent::MouseInput { state: ElementState::Released, button, .. }
             if button != MouseButton::Left
