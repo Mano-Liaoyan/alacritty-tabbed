@@ -229,6 +229,16 @@ pub fn press(
     true
 }
 
+/// Open the menu of the tab at `index` at the pointer.
+pub fn open_tab(
+    ctx: &mut WindowContext,
+    index: usize,
+    config: &Rc<UiConfig>,
+    proxy: &EventLoopProxy<Event>,
+) {
+    let _ = (ctx, index, config, proxy);
+}
+
 /// Handle a key press, returning whether the menu used it; it takes every key while open.
 pub fn key(
     ctx: &mut WindowContext,

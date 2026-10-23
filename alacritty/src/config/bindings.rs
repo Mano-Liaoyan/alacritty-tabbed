@@ -217,6 +217,9 @@ pub enum Action {
     /// Select the last tab.
     SelectLastTab,
 
+    /// Show only the focused pane of a tab, or all its panes again.
+    TogglePaneZoom,
+
     /// Create a new Alacritty window.
     CreateNewWindow,
 
@@ -596,6 +599,7 @@ pub fn platform_key_bindings() -> Vec<KeyBinding> {
         "7",    ModifiersState::SUPER;                                         Action::SelectTab7;
         "8",    ModifiersState::SUPER;                                         Action::SelectTab8;
         "9",    ModifiersState::SUPER;                                         Action::SelectLastTab;
+        Enter,  ModifiersState::SUPER | ModifiersState::SHIFT;                 Action::TogglePaneZoom;
         "0",    ModifiersState::SUPER;                                         Action::ResetFontSize;
         "=",    ModifiersState::SUPER;                                         Action::IncreaseFontSize;
         "+",    ModifiersState::SUPER;                                         Action::IncreaseFontSize;
