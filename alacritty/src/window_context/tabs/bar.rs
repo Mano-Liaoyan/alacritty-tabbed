@@ -104,6 +104,7 @@ pub struct Layout {
     pub panel: bool,
     pub height: f32,
     /// Distance between the left edges of neighbouring tabs.
+    #[allow(dead_code)] // Until tab entries slide between slots.
     step: f32,
     brand: Option<Rect>,
     mark: Rect,
@@ -317,13 +318,6 @@ impl Layout {
 
     pub fn tab(&self, index: usize) -> Option<Rect> {
         self.tabs.iter().find(|(i, _)| *i == index).map(|(_, rect)| *rect)
-    }
-
-    /// The tab slot under the middle of a tab whose left edge is at `left`.
-    pub fn drop_target(&self, left: f32) -> Option<usize> {
-        let &(first, rect) = self.tabs.first()?;
-        let slot = ((left - rect.x) / self.step).round().clamp(0., (self.tabs.len() - 1) as f32);
-        Some(first + slot as usize)
     }
 
     fn close(&self, tab: Rect) -> Rect {

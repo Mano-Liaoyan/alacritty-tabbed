@@ -21,7 +21,6 @@ pub enum Axis {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Side {
     /// Left or above.
-    #[allow(dead_code)] // Until panes are dropped beside others.
     Before,
     /// Right or below.
     After,
@@ -160,7 +159,6 @@ pub fn auto_axis(area: Rect) -> Axis {
 
 /// Where a pane dropped at `point` on `pane` goes: beside the edge nearest to it, measured
 /// relative to the pane's size, so the pane's diagonals divide it into the four choices.
-#[allow(dead_code)] // Until panes are dropped beside others.
 pub fn drop_zone(pane: Rect, (x, y): (f32, f32)) -> (Axis, Side) {
     let (cx, cy) = pane.center();
     let (dx, dy) = ((x - cx) / (pane.w / 2.), (y - cy) / (pane.h / 2.));
