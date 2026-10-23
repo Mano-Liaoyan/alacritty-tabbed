@@ -103,35 +103,5 @@ wayland = [
 ]
 nightly = []
 
-# --- Alacritty Tabbed: fork-only dependencies ---------------------------------------------------
-# Kept apart from upstream's tables, so syncing with upstream does not conflict. `png` and
-# `windows-sys` are upstream's own dependencies, enabled on every platform (`png`) or with more
-# features (`windows-sys`). `resvg` draws SVG profile icons; without default features it has no
-# text or font support, and it reuses the `tiny-skia` already in Cargo.lock. The font picker lists
-# fonts with the libraries crossfont already uses on each platform.
-
-[target.'cfg(all())'.dependencies]
-png = { version = "0.17.5", default-features = false }
-resvg = { version = "0.45.1", default-features = false }
-
-[target.'cfg(not(any(target_os = "macos", windows)))'.dependencies]
-yeslogic-fontconfig-sys = "5.0.0"
-
-[target.'cfg(all(target_os = "macos"))'.dependencies]
-core-text = "20.1.0"
-
-[target.'cfg(all(windows))'.dependencies]
-dwrote = "0.11.5"
-windows-sys = { version = "0.59", features = [
-    "Wdk_System_Threading",
-    "Win32_Graphics_Dwm",
-    "Win32_Graphics_Gdi",
-    "Win32_Storage_Packaging_Appx",
-    "Win32_System_Com",
-    "Win32_System_Diagnostics_Debug",
-    "Win32_System_Diagnostics_ToolHelp",
-    "Win32_System_Registry",
-    "Win32_UI_Controls_Dialogs",
-    "Win32_UI_Shell",
-    "Win32_UI_Shell_Common",
-]}
+[dependencies.alacritty_tabbed_deps] # tabbed: the fork's own dependencies.
+path = "../alacritty_tabbed_deps"

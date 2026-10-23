@@ -646,6 +646,7 @@ mod process {
     use std::path::PathBuf;
     use std::{mem, ptr};
 
+    use alacritty_tabbed_deps::windows_sys;
     use windows_sys::Wdk::System::Threading::{NtQueryInformationProcess, ProcessBasicInformation};
     use windows_sys::Win32::Foundation::{CloseHandle, FILETIME, HANDLE};
     use windows_sys::Win32::System::Diagnostics::Debug::ReadProcessMemory;

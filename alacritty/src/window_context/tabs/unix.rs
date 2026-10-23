@@ -195,6 +195,7 @@ pub fn fonts() -> Vec<(String, bool)> {
     use std::ffi::CStr;
     use std::ptr;
 
+    use alacritty_tabbed_deps::fontconfig_sys;
     use fontconfig_sys::constants::{FC_DUAL, FC_FAMILY, FC_FAMILYLANG, FC_SPACING};
     use fontconfig_sys::*;
 
@@ -240,6 +241,7 @@ pub fn installed(family: &str, style: Option<&str>) -> bool {
     use std::ffi::CString;
     use std::ptr;
 
+    use alacritty_tabbed_deps::fontconfig_sys;
     use fontconfig_sys::constants::{FC_FAMILY, FC_STYLE};
     use fontconfig_sys::*;
 

@@ -107,6 +107,7 @@ fn in_workspace(monitor: Rect, work: Rect) -> Rect {
 mod windows {
     use std::mem;
 
+    use alacritty_tabbed_deps::windows_sys;
     use windows_sys::Win32::Foundation::{BOOL, HWND, RECT};
     use windows_sys::Win32::Graphics::Dwm::{DWMWA_TRANSITIONS_FORCEDISABLED, DwmSetWindowAttribute};
     use windows_sys::Win32::Graphics::Gdi::{
