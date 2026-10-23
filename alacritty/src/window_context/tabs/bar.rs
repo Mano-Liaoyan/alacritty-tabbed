@@ -9,6 +9,7 @@
 
 use std::rc::Rc;
 use std::sync::Arc;
+use std::time::Instant;
 
 use glutin::surface::Rect as DamageRect;
 use winit::dpi::PhysicalPosition;
@@ -23,7 +24,7 @@ use crate::renderer::Renderer;
 
 use super::paint::{self, BLACK, Image, Layer, Palette, Rect, WHITE, mix};
 use super::text::UiFont;
-use super::{Frame, Tabs, icons};
+use super::{Frame, Tabs, context, icons, panes};
 
 /// Height of the bar in logical pixels, on every platform.
 pub const BAR: f32 = 48.;
@@ -71,6 +72,9 @@ pub enum Hit {
     Drag,
     Resize(ResizeDirection),
     Tab(usize),
+    /// Icon of a pane of a grouped tab: the tab's index, then the pane's.
+    #[allow(dead_code)] // Until grouped tabs show their panes' icons.
+    Icon(usize, usize),
     Close(usize),
     New,
     Menu,
@@ -97,7 +101,7 @@ pub struct Layout {
     round: bool,
     border: f32,
     /// Whether the terminal is held in a panel, with a margin around it.
-    panel: bool,
+    pub panel: bool,
     pub height: f32,
     /// Distance between the left edges of neighbouring tabs.
     step: f32,
@@ -106,19 +110,18 @@ pub struct Layout {
     track: Rect,
     tabs: Vec<(usize, Rect)>,
     buttons: Vec<(Hit, Rect)>,
-    pub card: Rect,
     terminal: Rect,
     /// The menu and the height of its rows.
     menu: Option<(Rect, f32)>,
 }
 
 impl Layout {
-    pub fn new(tabs: &Tabs, size: &SizeInfo) -> Self {
+    pub fn new(tabs: &Tabs) -> Self {
         let scale = tabs.scale as f32;
         let px = |value: f32| (value * scale).round();
         let font = tabs.font.clone().expect("the bar is only shown with its font");
         let line = font.line;
-        let (width, height) = (size.width(), size.height() + tabs.height as f32);
+        let (width, height) = (tabs.window.width as f32, tabs.window.height as f32);
         let (bar, count, fullscreen) = (px(BAR), tabs.len(), tabs.frame == Frame::Fullscreen);
         let mac = MAC;
         let border = if tabs.frame == Frame::Normal && !mac { px(4.) } else { 0. };
@@ -230,7 +233,6 @@ impl Layout {
             track,
             tabs: tab_rects,
             buttons,
-            card,
             terminal,
             menu,
         }
@@ -335,6 +337,17 @@ impl Layout {
     }
 }
 
+/// How the bar's tabs and icons move.
+#[derive(Default)]
+pub struct Effects;
+
+impl Effects {
+    /// Whether something in the bar is still moving at `now`.
+    pub fn running(&self, _now: Instant) -> bool {
+        false
+    }
+}
+
 /// Draw an icon, or else a badge with text, in `rect`.
 pub fn badge(
     layer: &mut Layer,
@@ -357,22 +370,29 @@ pub fn badge(
 
 impl Tabs {
     /// Add the bar, which lies above the terminal, to the damage of a frame.
+    ///
+    /// Panes beside the live terminal, and anything moving, damage the whole window.
     #[cfg_attr(any(target_os = "macos", windows), allow(dead_code))]
-    pub fn damage(&self, mut damage: Vec<DamageRect>, size: &SizeInfo) -> Vec<DamageRect> {
+    pub fn damage(&self, mut damage: Vec<DamageRect>, _size: &SizeInfo) -> Vec<DamageRect> {
+        let (width, height) = (self.window.width as i32, self.window.height as i32);
+        let panes = self.tabs.get(self.active).map_or(1, |tab| tab.panes.len());
+        if panes > 1 || self.animating(Instant::now()) {
+            return vec![DamageRect::new(0, 0, width, height)];
+        }
         if self.height > 0 {
             let bar = (BAR * self.scale as f32).round() as i32;
-            let (width, height) = (size.width() as i32, size.height() as i32);
-            damage.push(DamageRect::new(0, height + self.height as i32 - bar, width, bar));
+            damage.push(DamageRect::new(0, height - bar, width, bar));
         }
         damage
     }
 
-    /// Size of the terminal moved below the bar, for placing the input method's popup.
+    /// Size of the active terminal moved to its pane, for placing the input method's popup.
     pub fn ime(&self, size: &SizeInfo) -> SizeInfo {
-        let height = self.height as f32;
+        let Rect { x: left, y: top, .. } = self.focused_rect();
         let (cell_width, cell_height) = (size.cell_width(), size.cell_height());
-        let (x, y) = (size.padding_x(), size.padding_y() + height);
-        SizeInfo::new(size.width(), size.height() + height, cell_width, cell_height, x, y, false)
+        let (x, y) = (size.padding_x() + left, size.padding_y() + top);
+        let (width, height) = (size.width() + left, size.height() + top);
+        SizeInfo::new(width, height, cell_width, cell_height, x, y, false)
     }
 
     /// Draw the caption and the panel around the terminal, and the menu or settings over them.
@@ -387,8 +407,9 @@ impl Tabs {
             return;
         }
 
-        let layout = Layout::new(self, size);
+        let layout = Layout::new(self);
         self.first = layout.first;
+        let now = Instant::now();
         let palette = Palette::new(&config.colors);
         let (font, line_height) = (&*layout.font, layout.line);
         let (bar, width) = (layout.bar, layout.width);
@@ -398,23 +419,9 @@ impl Tabs {
         let mut base = Layer::default();
         let mut top = Layer::default();
 
-        // Chrome around the panel that holds the terminal.
-        let card = layout.card;
+        // Chrome around the panels that hold the terminals.
         base.rect(Rect::new(0., 0., width, bar), palette.chrome);
-        if layout.panel {
-            let chrome = palette.chrome;
-            base.rect(Rect::new(0., bar, card.x, card.h + px(MARGIN)), chrome);
-            base.rect(Rect::new(card.right(), bar, card.x, card.h + px(MARGIN)), chrome);
-            base.rect(Rect::new(card.x, card.bottom(), card.w, px(MARGIN)), chrome);
-            let radius = layout.radius(PANEL_RADIUS).round();
-            base.corners(card, radius, chrome, palette.card_outline, line);
-            let outline = palette.card_outline;
-            let (w, h) = (card.w - 2. * radius, card.h - 2. * radius);
-            base.rect(Rect::new(card.x + radius, card.y, w, line), outline);
-            base.rect(Rect::new(card.x + radius, card.bottom() - line, w, line), outline);
-            base.rect(Rect::new(card.x, card.y + radius, line, h), outline);
-            base.rect(Rect::new(card.right() - line, card.y + radius, line, h), outline);
-        }
+        panes::draw(self, &layout, &palette, &mut base, now);
 
         // Logo, with the application and computer name beside it.
         base.image(layout.mark, &icons::logo(), palette.foreground);
@@ -479,11 +486,11 @@ impl Tabs {
                 track
             };
 
-            let tab = &self.tabs[index];
-            let title = if active { window.title() } else { &tab.title };
+            let pane = self.tabs[index].pane();
+            let title = if active { window.title() } else { &pane.title };
             let colors = (surface, palette.accent(title), palette.foreground);
-            let image = tab.icon.as_ref();
-            badge(layer, &layout, layout.badge(rect), image, &tab.badge, font, colors);
+            let image = pane.icon.as_ref();
+            badge(layer, &layout, layout.badge(rect), image, &pane.badge, font, colors);
 
             let close = layout.close(rect);
             if lit(index) {
@@ -544,13 +551,13 @@ impl Tabs {
         }
 
         let mut layers = vec![base, top];
+        layers.extend(context::draw(self, &layout, &palette, now));
         if let Some(settings) = &self.settings {
             layers.extend(settings.draw(&layout, &palette, config, window));
         }
 
         // Draw over the whole window, then give the terminal its own viewport back.
-        let height = size.height() + self.height as f32;
-        let window = SizeInfo::new(size.width(), height, 1., 1., 0., 0., false);
+        let window = SizeInfo::new(width, layout.height, 1., 1., 0., 0., false);
         Layer::draw(layers, renderer, font, &window);
 
         // Round the window by cutting its corners out of everything drawn there.
