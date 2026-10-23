@@ -45,6 +45,13 @@ impl Rect {
         x >= self.x && x < self.right() && y >= self.y && y < self.bottom()
     }
 
+    pub fn intersects(&self, other: &Rect) -> bool {
+        self.x < other.right()
+            && other.x < self.right()
+            && self.y < other.bottom()
+            && other.y < self.bottom()
+    }
+
     pub fn inset(self, by: f32) -> Self {
         Self::new(self.x + by, self.y + by, self.w - 2. * by, self.h - 2. * by)
     }

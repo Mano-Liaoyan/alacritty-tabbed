@@ -68,9 +68,8 @@ const DECK_MAX: usize = 4;
 const DECK_SHOWN: usize = 3;
 /// Most icons in a row of a fanned deck; more wrap into rows below it, a shelf over the terminal.
 const ROW_MAX: usize = 8;
-/// Distance between the icons of a fanned deck, and between its rows.
+/// Distance between the icons of a fanned deck, along its rows and between them.
 const PITCH: f32 = 26.;
-const ROW_PITCH: f32 = 30.;
 /// How opaque the cards at rest are, from the front of a deck to its back.
 const DEPTH_FADE: [f32; DECK_MAX] = [1., 0.8, 0.6, 0.45];
 
@@ -275,9 +274,7 @@ impl Layout {
                 let deck = |fan| deck(front, count, tab.focus, scale, row, chip, |_| (fan, 0.));
                 let fanned = deck(1.).icons;
                 let area = if matches!(tabs.hover, Hit::Icon(i, _) if i == index) {
-                    let (left, right) = extent(&fanned);
-                    let below = (count.div_ceil(row) - 1) as f32 * ROW_PITCH * scale;
-                    Rect::new(left, rect.y, right - left, rect.h + below)
+                    plate(rect, &fanned, count.div_ceil(row), 1., bar, scale).0
                 } else {
                     Rect::new(front.x, rect.y, deck(0.).end() - front.x, rect.h)
                 };
@@ -354,6 +351,9 @@ impl Layout {
         // A fanned deck covers what is beside it, the end of its tab and the buttons after it, and
         // its shelf what is below the bar.
         for (index, area, icons) in &self.stacks {
+            // The plate's padding picks the icon nearest it.
+            let (left, right) = extent(icons);
+            let x = x.clamp(left, right - 0.5);
             if let Some(pane) = icon_at(icons, (x, y)).filter(|_| area.contains(point)) {
                 return Hit::Icon(*index, pane);
             }
@@ -490,8 +490,7 @@ fn deck(
             let size = (shrunk + 4. * lift * scale).round();
             let spread = 6. * (1. - fan) * depth as f32 + PITCH * fan * column;
             let right = left + base + spread * scale;
-            let (x, y) =
-                (right - shrunk / 2., middle + (ROW_PITCH * fan * line - 2. * lift) * scale);
+            let (x, y) = (right - shrunk / 2., middle + (PITCH * fan * line - 2. * lift) * scale);
             Some((pane, Rect::new((x - size / 2.).round(), (y - size / 2.).round(), size, size)))
         })
         .collect();
@@ -513,6 +512,27 @@ fn chip(front: Rect, (width, height): (f32, f32), scale: f32) -> Rect {
 fn opacity(order: usize, count: usize, fan: f32) -> f32 {
     let rest = if order < shown(count) { DEPTH_FADE[order] } else { 0. };
     rest + (1. - rest) * fan.clamp(0., 1.)
+}
+
+/// The plate under the fanned `icons` of the tab `tab`, grown down by `fan` to hold their `rows`,
+/// and how far it floats like a popover: once it reaches past its tab or the `bar`, it takes more
+/// padding, an outline and a shadow, so it reads as lying over what is beside it.
+fn plate(
+    tab: Rect,
+    icons: &[(usize, Rect)],
+    rows: usize,
+    fan: f32,
+    bar: f32,
+    scale: f32,
+) -> (Rect, f32) {
+    let px = |value: f32| (value * scale).round();
+    let (left, right) = extent(icons);
+    let below = (rows.max(1) - 1) as f32 * PITCH * scale * fan;
+    let flat =
+        Rect::new(left - px(3.), tab.y + px(2.), right - left + px(6.), tab.h - px(4.) + below);
+    let past = (flat.right() - tab.right()).max(flat.bottom() - bar);
+    let float = fan * (past / px(4.)).clamp(0., 1.);
+    (flat.inset(-(px(2.) * float).round()), float)
 }
 
 /// The left and right edges of `icons`.
@@ -623,8 +643,11 @@ impl Tabs {
     pub fn damage(&self, mut damage: Vec<DamageRect>, _size: &SizeInfo) -> Vec<DamageRect> {
         let (width, height) = (self.window.width as i32, self.window.height as i32);
         let panes = self.tabs.get(self.active).map_or(1, |tab| tab.panes.len());
-        // A fanned deck may reach over the terminal.
-        let fanned = matches!(self.hover, Hit::Icon(..));
+        // A fanned deck may reach over the terminal; a lone tab's badge does not fan out.
+        let fanned = match self.hover {
+            Hit::Icon(index, _) => self.tabs.get(index).is_some_and(|tab| tab.panes.len() > 1),
+            _ => false,
+        };
         if panes > 1 || fanned || self.animating(Instant::now()) {
             return vec![DamageRect::new(0, 0, width, height)];
         }
@@ -788,15 +811,17 @@ impl Tabs {
                 fade = fan;
                 let into = if fanned_out { &mut fanned } else { &mut *layer };
                 if fanned_out {
-                    // A plate under the icons, which grows down to hold their rows; once past the
-                    // bar it floats over the terminal like a popover.
-                    let (left, right) = extent(&deck.icons);
-                    let below = (count.div_ceil(row) - 1) as f32 * ROW_PITCH * layout.scale * fan;
-                    let (x, y) = (left - px(3.), rect.y + px(2.));
-                    let plate = Rect::new(x, y, right - left + px(6.), rect.h - px(4.) + below);
-                    let radius = layout.radius(TAB_RADIUS - 2.);
-                    let float = fan * ((plate.bottom() - bar) / px(4.)).clamp(0., 1.);
+                    let rows = count.div_ceil(row);
+                    let (plate, float) = plate(rect, &deck.icons, rows, fan, bar, layout.scale);
+                    let radius =
+                        layout.radius(TAB_RADIUS - 2.) + layout.curve(rect.y + px(2.) - plate.y);
                     if float > 0. {
+                        // The buttons it lies over give way to it rather than show half cut.
+                        let under = layout.buttons.iter().filter(|(_, b)| b.intersects(&plate));
+                        for &(_, button) in under {
+                            let corner = layout.radius(BUTTON_RADIUS);
+                            into.rounded_alpha(button, corner, palette.chrome, float);
+                        }
                         let shadow = Rect::new(plate.x, plate.y + px(2.), plate.w, plate.h);
                         into.rounded_alpha(shadow, radius + layout.radius(2.), BLACK, 0.3 * float);
                         into.rounded_alpha(plate, radius, palette.popup_outline, float);
@@ -805,25 +830,11 @@ impl Tabs {
                         into.rounded_alpha(plate, radius, surface, fan);
                     }
                 }
-                // The count of the panes behind the cards, which come out from under them.
-                if let Some((chip, _)) = deck.chip.filter(|_| fan < 1.) {
-                    let fill = mix(surface, palette.foreground, 0.12);
-                    into.rounded_alpha(chip, layout.curve(chip.h / 2.), fill, 1. - fan);
-                    let tuck = px(4.) + line;
-                    let label = Rect::new(chip.x + tuck, chip.y, chip.w - tuck, chip.h);
-                    let color = if lit(index) { palette.foreground } else { palette.muted };
-                    let color = mix(fill, color, 1. - fan);
-                    into.label(label, &count_label(count), font, color, false);
-                }
-                let icons = &deck.icons;
-                for (order, &(pane, icon)) in icons.iter().rev().enumerate().rev() {
-                    if source == Some(Source::Pane(index, pane)) {
-                        continue;
-                    }
+                let card = |into: &mut Layer, order: usize, pane: usize, icon: Rect| {
                     let (fan, lift) = motion(pane);
                     let alpha = opacity(order, count, fan);
                     // Icons are cards, each cut out of the ones behind it.
-                    if order + 1 < icons.len() || deck.chip.is_some() {
+                    if order + 1 < deck.icons.len() || deck.chip.is_some() {
                         let cut = icon.inset(-px(1.));
                         let backed = if order < shown(count) { 1. } else { fan.min(1.) };
                         into.rounded_alpha(cut, layout.curve(cut.w / 4.), surface, backed);
@@ -838,6 +849,28 @@ impl Tabs {
                         },
                         None => badge(into, &layout, icon, None, text, font, colors(pane, alpha)),
                     }
+                };
+                // From the back: the panes left out of the deck, which come out from under the
+                // count of them, then the cards.
+                let back_to_front = deck.icons.iter().rev().enumerate().rev();
+                let dragged = |pane: usize| source == Some(Source::Pane(index, pane));
+                let (cards, hidden): (Vec<_>, Vec<_>) = back_to_front
+                    .filter(|&(_, &(pane, _))| !dragged(pane))
+                    .partition(|&(order, _)| order < shown(count));
+                for (order, &(pane, icon)) in hidden {
+                    card(into, order, pane, icon);
+                }
+                if let Some((chip, _)) = deck.chip.filter(|_| fan < 1.) {
+                    let fill = mix(surface, palette.foreground, 0.12);
+                    into.rounded_alpha(chip, layout.curve(chip.h / 2.), fill, 1. - fan);
+                    let tuck = px(4.) + line;
+                    let label = Rect::new(chip.x + tuck, chip.y, chip.w - tuck, chip.h);
+                    let color = if lit(index) { palette.foreground } else { palette.muted };
+                    let color = mix(fill, color, 1. - fan);
+                    into.label(label, &count_label(count), font, color, false);
+                }
+                for (order, &(pane, icon)) in cards {
+                    card(into, order, pane, icon);
                 }
             }
 
@@ -1171,7 +1204,7 @@ mod tests {
             for (index, line) in rows.iter().enumerate() {
                 assert!(line.len() <= row);
                 assert_eq!(line[0].x, FRONT.x);
-                assert_eq!(line[0].y - rows[0][0].y, index as f32 * ROW_PITCH);
+                assert_eq!(line[0].y - rows[0][0].y, index as f32 * PITCH);
                 assert!(line.windows(2).all(|pair| pair[1].x - pair[0].x == PITCH));
             }
         }
@@ -1244,11 +1277,34 @@ mod tests {
         for y in (9..bottom as i32 + 4).map(|y| y as f32 + 0.5) {
             for x in (left as i32..right as i32).map(|x| x as f32 + 0.5) {
                 let pane = icon_at(&icons, (x, y)).unwrap();
-                let row = if y < MIDDLE + ROW_PITCH / 2. { 0 } else { 1 };
+                let row = if y < MIDDLE + PITCH / 2. { 0 } else { 1 };
                 // The lifted icon reaches a little further into the gap between the rows.
-                if (y - MIDDLE - ROW_PITCH / 2.).abs() > 3. {
+                if (y - MIDDLE - PITCH / 2.).abs() > 3. {
                     assert_eq!(pane / ROW_MAX, row, "{x} {y}");
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn plate_floats_once_past_its_tab_or_the_bar() {
+        let tab = Rect::new(91., 9., 150., 30.);
+        let plate = |count: usize, row: usize| {
+            let icons = deck(FRONT, count, 0, 1., row, chip_size(count), fanned).icons;
+            (icons.clone(), plate(tab, &icons, count.div_ceil(row), 1., 48., 1.))
+        };
+        // Within its tab it lies flat, as before.
+        let (icons, (flat, float)) = plate(4, ROW_MAX);
+        assert_eq!(float, 0.);
+        assert_eq!(flat, Rect::new(97., 11., 106., 26.));
+        assert!(icons.iter().all(|(_, icon)| flat.x < icon.x && icon.right() < flat.right()));
+        // Past its tab's end, or below the bar, it floats with more room around its icons.
+        for (count, row) in [(6, ROW_MAX), (12, ROW_MAX), (4, 2)] {
+            let (icons, (plate, float)) = plate(count, row);
+            assert_eq!(float, 1., "{count} {row}");
+            for (_, icon) in icons {
+                assert!(icon.x - plate.x >= 5. && plate.right() - icon.right() >= 5.);
+                assert!(icon.y - plate.y >= 4. && plate.bottom() - icon.bottom() >= 4.);
             }
         }
     }
