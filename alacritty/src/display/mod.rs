@@ -1126,9 +1126,8 @@ impl Display {
         if let Some(peek) = self.tabs.peek(Instant::now()) {
             let height = self.window.inner_size().height as f32;
             let (rect, clip) = (peek.frame, peek.clip);
-            let mut frame = Frame::new(&peek.size, [rect.x, rect.y, rect.w, rect.h], height);
-            let bottom = height - clip.y - clip.h;
-            frame.clip = [clip.x, bottom, clip.w, clip.h].map(|value| value.round() as i32);
+            let frame = Frame::new(&peek.size, [rect.x, rect.y, rect.w, rect.h], height)
+                .clipped([clip.x, clip.y, clip.w, clip.h], height);
             let mut terminal = peek.terminal.lock();
             terminal.is_focused = false;
             self.draw_pane(terminal, peek.size, &peek.config, frame);
