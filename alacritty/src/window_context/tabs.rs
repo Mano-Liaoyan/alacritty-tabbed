@@ -651,13 +651,14 @@ fn tidy(name: Option<String>) -> Option<String> {
 }
 
 /// Move the live pane to `target`, where it stays live; `Dock` refers to the panes of the tab
-/// `shown`. Returns whether it moved.
+/// `shown`, and a `Merge` finds it a place where each pane of the tab keeps `min` in `area`, as
+/// `join_spot` does. Returns whether it moved.
 fn place<S>(
     tabs: &mut Vec<Tab<S>>,
     active: &mut usize,
     shown: usize,
     target: Target,
-    area: Rect,
+    (area, min, spacing): (Rect, (f32, f32), f32),
 ) -> bool {
     let (from, pane) = (*active, tabs[*active].focus);
     let alone = tabs[from].panes.len() == 1;
@@ -681,7 +682,9 @@ fn place<S>(
     let (tab, index) = match target {
         Target::Merge(tab) => {
             let (tab, id) = (shift(tab), moved.id);
-            tabs[tab].join(Tab::new(moved), None, split::auto_axis(area), Side::After);
+            let (beside, axis, side) =
+                join_spot(&tabs[tab].layout, &Split::Pane(id), area, min, spacing);
+            tabs[tab].join(Tab::new(moved), beside, axis, side);
             (tab, tabs[tab].position(id).unwrap_or_default())
         },
         Target::Dock { axis, side, .. } => {
@@ -707,27 +710,39 @@ fn reorder<S>(tabs: &mut Vec<Tab<S>>, active: &mut usize, to: usize) {
     tabs.insert(*active, tab);
 }
 
+/// Where `new` joins the panes of `group` in `area`, each keeping `min`, `spacing` apart, as
+/// [`Split::spot`] finds; beside them all when it fits nowhere, as before there was a check.
+fn join_spot(
+    group: &Split<WindowId>,
+    new: &Split<WindowId>,
+    area: Rect,
+    min: (f32, f32),
+    spacing: f32,
+) -> (Option<WindowId>, Axis, Side) {
+    group.spot(new, area, min, spacing).unwrap_or((None, split::auto_axis(area), Side::After))
+}
+
 /// Group the active tab with the tab `into`, which takes its place and its focus: docked beside
-/// the pane of `dock`, or else beside all of its panes. Returns whether they were grouped.
+/// the pane of `dock`, or else where `join_spot` finds room in `area`. Returns whether they were
+/// grouped.
 fn group<S>(
     tabs: &mut Vec<Tab<S>>,
     active: &mut usize,
     into: usize,
     dock: Option<(usize, Axis, Side)>,
-    area: Rect,
+    (area, min, spacing): (Rect, (f32, f32), f32),
 ) -> bool {
     let from = *active;
     if into == from || into >= tabs.len() {
         return false;
     }
-    let beside = match dock {
-        Some((pane, ..)) => match tabs[into].panes.get(pane) {
-            Some(pane) => Some(pane.id),
+    let (beside, axis, side) = match dock {
+        Some((pane, axis, side)) => match tabs[into].panes.get(pane) {
+            Some(pane) => (Some(pane.id), axis, side),
             None => return false,
         },
-        None => None,
+        None => join_spot(&tabs[into].layout, &tabs[from].layout, area, min, spacing),
     };
-    let (axis, side) = dock.map_or((split::auto_axis(area), Side::After), |(_, a, s)| (a, s));
     let tab = tabs.remove(from);
     let into = if into > from { into - 1 } else { into };
     let focus = tab.pane().id;
@@ -2182,12 +2197,13 @@ pub fn move_pane(
     let effects = mem::take(&mut ctx.display.tabs.pane_effects);
     focus_pane(ctx, tab, pane, config);
     ctx.display.tabs.pane_effects = effects;
+    let min = min_pane(&ctx.display.size_info);
     let tabs = &mut ctx.display.tabs;
-    let area = tabs.area();
+    let room = (tabs.area(), min, tabs.spacing());
     if tabs.tabs.is_empty() || tabs.live() != (tab, pane) {
         return;
     }
-    if place(&mut tabs.tabs, &mut tabs.active, shown, target, area) {
+    if place(&mut tabs.tabs, &mut tabs.active, shown, target, room) {
         relayout(ctx);
     }
 }
@@ -2205,12 +2221,13 @@ pub fn merge(
     let effects = mem::take(&mut ctx.display.tabs.pane_effects);
     select(ctx, from, config);
     ctx.display.tabs.pane_effects = effects;
+    let min = min_pane(&ctx.display.size_info);
     let tabs = &mut ctx.display.tabs;
-    let area = tabs.area();
+    let room = (tabs.area(), min, tabs.spacing());
     if tabs.active != from || from >= tabs.tabs.len() {
         return;
     }
-    if group(&mut tabs.tabs, &mut tabs.active, into, dock, area) {
+    if group(&mut tabs.tabs, &mut tabs.active, into, dock, room) {
         relayout(ctx);
     }
 }
@@ -2310,8 +2327,8 @@ mod tests {
         fn place(&mut self, from: (usize, usize), target: Target) -> bool {
             let shown = self.active;
             self.focus(from);
-            let area = Rect::new(0., 40., 1000., 600.);
-            let placed = place(&mut self.tabs, &mut self.active, shown, target, area);
+            let room = (Rect::new(0., 40., 1000., 600.), (0., 0.), 0.);
+            let placed = place(&mut self.tabs, &mut self.active, shown, target, room);
             self.check();
             placed
         }
@@ -2411,7 +2428,7 @@ mod tests {
         model.check();
 
         // Grouping whole tabs keeps the focus of the tab that moved.
-        let area = Rect::new(0., 0., 800., 600.);
+        let area = (Rect::new(0., 0., 800., 600.), (0., 0.), 0.);
         model.tabs.push(Tab::new(pane(7, Some(7))));
         assert!(group(&mut model.tabs, &mut model.active, 2, None, area));
         assert_eq!((model.tabs.len(), model.ids(1), model.live), (2, vec![7, 3], 3));
@@ -2441,7 +2458,7 @@ mod tests {
         assert!(!model.tabs[0].zoom, "remove");
 
         zoom(&mut model);
-        let area = Rect::new(0., 0., 800., 600.);
+        let area = (Rect::new(0., 0., 800., 600.), (0., 0.), 0.);
         model.focus((1, 0));
         assert!(group(&mut model.tabs, &mut model.active, 0, None, area));
         assert!(!model.tabs[0].zoom, "join");

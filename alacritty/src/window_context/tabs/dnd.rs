@@ -139,11 +139,11 @@ impl Scene {
     }
 
     /// Whether what is dragged can group with the tab `into`, each pane keeping the smallest size
-    /// once it is placed beside them all, as grouping places it.
+    /// once it is placed beside them all or, where that leaves too little, beside one of them, as
+    /// grouping places it.
     fn joins(&self, into: usize) -> bool {
         let (Some(group), Some(new)) = (self.groups.get(into), &self.docked) else { return false };
-        let joined = group.clone().join(new.clone(), split::auto_axis(self.area), Side::After);
-        joined.fits_in(self.area, self.min, self.spacing)
+        group.spot(new, self.area, self.min, self.spacing).is_some()
     }
 }
 
@@ -402,7 +402,10 @@ mod tests {
         // A pane joins tab 1's two panes as a third, a quarter of the width beside the others.
         let roomy = scene();
         assert_eq!(merge(&roomy, Source::Pane(0, 0), 250.), Some(Target::Merge(1)));
-        let small = Scene { min: (250., 50.), ..scene() };
+        // Too narrow for that, it shares one of them, stacked, where they are tall enough.
+        let narrow = Scene { min: (250., 50.), ..scene() };
+        assert_eq!(merge(&narrow, Source::Pane(0, 0), 250.), Some(Target::Merge(1)));
+        let small = Scene { min: (250., 200.), ..scene() };
         assert_eq!(merge(&small, Source::Pane(0, 0), 250.), None);
         // Beside a lone pane, each still has half.
         assert_eq!(merge(&small, Source::Pane(1, 0), 150.), Some(Target::Merge(0)));
@@ -410,7 +413,7 @@ mod tests {
         let group = pane(8).join(pane(9), Axis::Row, Side::After);
         let grouped = Scene { docked: Some(group), ..small };
         assert_eq!(merge(&grouped, Source::Tab(2), 150.), None);
-        let grouped = Scene { min: (200., 50.), ..grouped };
+        let grouped = Scene { min: (200., 200.), ..grouped };
         assert_eq!(merge(&grouped, Source::Tab(2), 150.), Some(Target::Merge(0)));
         assert_eq!(merge(&grouped, Source::Tab(0), 250.), Some(Target::Merge(1)));
         // The space between panes counts too.
@@ -418,6 +421,24 @@ mod tests {
         assert_eq!(merge(&spaced, Source::Tab(2), 150.), None);
         // Reordering never shrinks anything.
         assert_eq!(merge(&spaced, Source::Tab(2), 105.), Some(Target::Reorder(0)));
+    }
+
+    #[test]
+    fn merging_into_a_full_group() {
+        // Four panes side by side would each keep too little beside a fifth taking half, but one
+        // of them shares its room with it, whichever tab is shown.
+        let four = pane(1).join(pane(2), Axis::Row, Side::After);
+        let four = four.join(pane(3).join(pane(5), Axis::Row, Side::After), Axis::Row, Side::After);
+        for shown in 0..3 {
+            let scene = Scene {
+                groups: vec![pane(6), four.clone(), pane(4)],
+                min: (150., 50.),
+                shown,
+                ..scene()
+            };
+            assert_eq!(scene.target(Source::Tab(0), at(250., 20.)), Some(Target::Merge(1)));
+            assert_eq!(scene.target(Source::Tab(2), at(250., 20.)), Some(Target::Merge(1)));
+        }
     }
 
     #[test]

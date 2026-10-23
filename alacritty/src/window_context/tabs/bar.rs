@@ -177,6 +177,8 @@ impl Layout {
         // of the rounded corner and lines it up with the terminal's text below. macOS puts it
         // beside its window buttons instead.
         let left = if mac { lights + px(7.) } else { px(MARGIN + INSET) };
+        // Without either, the track's own edge lines up with the edge of the panes' cards below.
+        let edge = if mac { left } else { px(MARGIN) };
         let default = Brand::default();
         let config = tabs.configs.as_ref().map_or(&default, |(config, _)| &config.window.brand);
         let image = config.show.then(|| icons::brand(&config.icon)).flatten();
@@ -189,7 +191,7 @@ impl Layout {
         // Names only beside a wide enough window.
         let text = names.iter().map(|(name, title)| font.width(name, *title)).fold(0., f32::max);
         let text = (width >= px(780.) && !names.is_empty()).then_some(text);
-        let (mark, label, brand) = brand(left, image.is_some(), text, bar, scale);
+        let (mark, label, brand) = brand(left, edge, image.is_some(), text, bar, scale);
 
         let min_tab = px(124.);
         let available = pin - px(48.) - brand - 2. * pad - px(6.) - control - chevron;
@@ -466,9 +468,10 @@ fn ends(controls: f32, scale: f32) -> [f32; 2] {
 /// Where the logo and the names beside it go, from `left` in a bar `bar` high, and where the tab
 /// track begins after them: an `icon` is a square as wide as the bar's buttons are tall less
 /// some, and names `text` wide take at most 160 logical pixels. Without either the track begins
-/// at `left`, lined up with the terminal's text.
+/// at `edge`, lined up with the edge of the panes' cards, as the logo is with their text.
 fn brand(
     left: f32,
+    edge: f32,
     icon: bool,
     text: Option<f32>,
     bar: f32,
@@ -481,7 +484,7 @@ fn brand(
     let track = match (label, mark) {
         (Some(label), _) => label.right() + px(4.),
         (None, Some(mark)) => mark.right() + px(21.),
-        (None, None) => left,
+        (None, None) => edge,
     };
     (mark, label, track)
 }
@@ -575,12 +578,13 @@ fn deck(
     Deck { icons, chip }
 }
 
-/// Where the capsule counting the panes left out of a deck with the badge `front` is: tucked
-/// behind its last card like one more, centered on the badge, showing `size` beside the card.
+/// Where the capsule counting the panes left out of a deck with the badge `front` is: just past
+/// its last card, centered on the badge, all of its `size` clear of the cards so none of them
+/// covers it or its count.
 fn chip(front: Rect, (width, height): (f32, f32), scale: f32) -> Rect {
-    let (edge, tuck) = (front.right() + 6. * (DECK - 1) as f32 * scale, 4. * scale);
+    let (edge, gap) = (front.right() + 6. * (DECK - 1) as f32 * scale, 3. * scale);
     let y = front.center().1 - height / 2.;
-    Rect::new((edge - tuck).round(), y.round(), width + tuck.round(), height)
+    Rect::new((edge + gap).round(), y.round(), width, height)
 }
 
 /// How opaque the icon `order`th from the front of a deck of `count` is, fanned out by `fan`: the
@@ -996,8 +1000,8 @@ impl Tabs {
                         None => badge(into, &layout, icon, None, text, font, colors(pane, alpha)),
                     }
                 };
-                // From the back: the panes left out of the deck, which come out from under the
-                // count of them, then the cards.
+                // From the back: the panes left out of the deck, which come out from behind its
+                // last card, the count of them, then the cards.
                 let back_to_front = deck.icons.iter().rev().enumerate().rev();
                 let dragged = |pane: usize| source == Some(Source::Pane(index, pane));
                 let (cards, hidden): (Vec<_>, Vec<_>) = back_to_front
@@ -1009,11 +1013,9 @@ impl Tabs {
                 if let Some((chip, _)) = deck.chip.filter(|_| fan < 1.) {
                     let fill = mix(surface, palette.foreground, 0.12);
                     into.rounded_alpha(chip, layout.curve(chip.h / 2.), fill, 1. - fan);
-                    let tuck = px(4.) + line;
-                    let label = Rect::new(chip.x + tuck, chip.y, chip.w - tuck, chip.h);
                     let color = if lit(index) { palette.foreground } else { palette.muted };
                     let color = mix(fill, color, 1. - fan);
-                    into.label(label, &count_label(count), font, color, false);
+                    into.label(chip, &count_label(count), font, color, false);
                 }
                 for (order, &(pane, icon)) in cards {
                     card(into, order, pane, icon);
@@ -1331,9 +1333,11 @@ mod tests {
             assert_eq!(order, [3, 2, 1, 0, 4]);
             let (chip, hidden) = deck.chip.unwrap();
             assert_eq!((hidden, count_label(count).as_str()), (count - 5, label));
-            // The count overlaps the last card and is centered on the badge.
+            // The count is clear of the last card, and of the outline cut around it, and is
+            // centered on the badge.
             let last = deck.icons[0].1;
-            assert!(chip.x < last.right() && chip.right() > last.right(), "{chip:?} {last:?}");
+            assert!(chip.x > last.right() + 1., "{chip:?} {last:?}");
+            assert_eq!(chip.w, chip_size(count).0);
             assert!((chip.center().1 - FRONT.center().1).abs() <= 0.5);
             // However many panes, the deck leaves the title its room.
             assert!(last.right() < FRONT.x + 70., "{count}: {last:?}");
@@ -1538,26 +1542,26 @@ mod tests {
 
     #[test]
     fn brand_lays_out_its_icon_and_names() {
-        let (left, bar) = (12., 48.);
         // Both: the names after the icon, the track after the names.
-        let (mark, label, track) = brand(left, true, Some(90.), bar, 1.);
+        let (left, edge, bar) = (12., 8., 48.);
+        let (mark, label, track) = brand(left, edge, true, Some(90.), bar, 1.);
         let (mark, label) = (mark.unwrap(), label.unwrap());
         assert_eq!(mark, Rect::new(12., 12., 24., 24.));
         assert_eq!((label.x, label.w), (mark.right() + 11., 90.));
         assert_eq!(track, label.right() + 4.);
         // Long names are cut.
-        let (_, label, _) = brand(left, true, Some(400.), bar, 1.);
+        let (_, label, _) = brand(left, edge, true, Some(400.), bar, 1.);
         assert_eq!(label.unwrap().w, 160.);
         // Icon only, as in a narrow window.
-        let (mark, label, track) = brand(left, true, None, bar, 1.);
+        let (mark, label, track) = brand(left, edge, true, None, bar, 1.);
         assert_eq!((label, track), (None, mark.unwrap().right() + 21.));
         // Names only begin where the icon would.
-        let (mark, label, _) = brand(left, false, Some(50.), bar, 1.);
+        let (mark, label, _) = brand(left, edge, false, Some(50.), bar, 1.);
         assert_eq!((mark, label.unwrap().x), (None, left));
-        // Hidden: the tabs begin where the logo did.
-        assert_eq!(brand(left, false, None, bar, 1.), (None, None, left));
+        // Hidden: the track begins at the edge of the panes' cards, not where the logo did.
+        assert_eq!(brand(left, edge, false, None, bar, 1.), (None, None, edge));
         // Scaled.
-        let (mark, label, _) = brand(24., true, Some(90.), 96., 2.);
+        let (mark, label, _) = brand(24., 16., true, Some(90.), 96., 2.);
         assert_eq!(mark.unwrap().w, 48.);
         assert_eq!(label.unwrap().x, mark.unwrap().right() + 22.);
     }
