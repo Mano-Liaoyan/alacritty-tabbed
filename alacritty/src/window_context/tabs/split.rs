@@ -121,16 +121,18 @@ impl<P: Copy + PartialEq> Split<P> {
         }
     }
 
-    /// Smallest size this can be laid out in with every pane at least `min`, `spacing` apart.
+    /// Smallest size this can be laid out in, keeping its ratios, with every pane at least
+    /// `min`, `spacing` apart.
     #[allow(dead_code, reason = "dividers are dragged next")]
     pub fn min_size(&self, min: (f32, f32), spacing: f32) -> (f32, f32) {
         match self {
             Split::Pane(_) => min,
-            Split::Pair { axis, first, second, .. } => {
+            Split::Pair { axis, ratio, first, second } => {
                 let (a, b) = (first.min_size(min, spacing), second.min_size(min, spacing));
+                let len = |a: f32, b: f32| spacing + (a / ratio).max(b / (1. - ratio));
                 match axis {
-                    Axis::Row => (a.0 + spacing + b.0, a.1.max(b.1)),
-                    Axis::Column => (a.0.max(b.0), a.1 + spacing + b.1),
+                    Axis::Row => (len(a.0, b.0), a.1.max(b.1)),
+                    Axis::Column => (a.0.max(b.0), len(a.1, b.1)),
                 }
             },
         }
@@ -539,6 +541,14 @@ mod tests {
         split.set_ratio(0, hi);
         assert_eq!(split.ratio_range(1, area, min, 10.), Some((0.5, 0.5)));
         assert_eq!(split.ratio_range(2, area, min, 10.), None);
+        // A pair keeps its ratio as its parent moves, so its parts need room in that ratio.
+        let mut split =
+            pair(Axis::Row, Split::Pane(1), pair(Axis::Row, Split::Pane(2), Split::Pane(3)));
+        split.set_ratio(1, 0.3);
+        let area = Rect::new(0., 0., 1010., 200.);
+        let (_, hi) = split.ratio_range(0, area, min, 10.).unwrap();
+        split.set_ratio(0, hi);
+        assert!(split.fits_in(area, min, 10.), "{:?}", split.rects(area, 10.));
         // Too small for both: the middle.
         let small = Rect::new(0., 0., 150., 200.);
         assert_eq!(three().ratio_range(0, small, min, 10.), Some((0.5, 0.5)));
