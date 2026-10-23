@@ -307,11 +307,13 @@ pub fn draw(tabs: &Tabs, layout: &Layout, palette: &Palette, layer: &mut Layer, 
     // A handle on each shown pane's top edge, while there are several.
     if cards.len() > 1 {
         let top = tabs.area().y;
+        let rests = tabs.pane_rects();
+        let resting =
+            rests.into_iter().find(|&(index, _)| index == tab.focus).map(|(_, r)| r.inset(margin));
         for &(index, card) in &cards {
             let level = effects.handle(tab.panes[index].id, tabs.handle == Some(index), now);
-            // Not over the focused pane sliding across it.
             let (plate, _) = handle_rects(card, top, layout.scale);
-            if index != tab.focus && focused.is_some_and(|focused| overlap(plate, focused)) {
+            if index != tab.focus && hidden(plate, focused, resting) {
                 continue;
             }
             draw_handle(layer, layout, palette, card, top, level);
@@ -391,6 +393,12 @@ fn border(
             layer.rect(part, color);
         }
     }
+}
+
+/// Whether a handle's `plate` is under the focused pane's card while it moves: drawn at
+/// `focused`, away from its place `resting`. At rest, handles in narrow gaps stay shown.
+fn hidden(plate: Rect, focused: Option<Rect>, resting: Option<Rect>) -> bool {
+    focused.is_some_and(|focused| Some(focused) != resting && overlap(plate, focused))
 }
 
 fn overlap(a: Rect, b: Rect) -> bool {
@@ -572,6 +580,16 @@ mod tests {
         effects.preview(Some(RIGHT), later);
         let (rect, _) = effects.drop.get().unwrap();
         assert_eq!(rect.get(later), if scale() > 0. { popped(RIGHT) } else { RIGHT });
+    }
+
+    #[test]
+    fn handles_hide_only_under_a_moving_focused_pane() {
+        let plate = Rect::new(184., 395., 32., 10.);
+        let card = Rect::new(8., 48., 384., 350.);
+        assert!(!hidden(plate, Some(card), Some(card)), "at rest, in a narrow gap");
+        assert!(hidden(plate, Some(card), Some(Rect { h: 300., ..card })));
+        assert!(!hidden(plate, Some(Rect { h: 300., ..card }), Some(card)));
+        assert!(!hidden(plate, None, None));
     }
 
     #[test]
