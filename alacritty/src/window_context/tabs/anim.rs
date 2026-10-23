@@ -13,6 +13,8 @@ use super::paint::Rect;
 pub struct Curve(pub f32, pub f32, pub f32, pub f32);
 
 impl Curve {
+    /// Slow to start, then quick, for what leaves.
+    pub const EASE_IN: Curve = Curve(0.4, 0.0, 1.0, 1.0);
     /// Quick, slowing down to the target.
     pub const EASE_OUT: Curve = Curve(0.23, 1.0, 0.32, 1.0);
     /// Quick, slightly overshooting the target before settling, like Hyprland's windows.
@@ -136,7 +138,8 @@ pub fn scale() -> f32 {
 mod tests {
     use super::*;
 
-    const CURVES: [Curve; 3] = [Curve::SNAP, Curve::EASE_OUT, Curve(0.42, 0., 0.58, 1.)];
+    const CURVES: [Curve; 4] =
+        [Curve::SNAP, Curve::EASE_OUT, Curve::EASE_IN, Curve(0.42, 0., 0.58, 1.)];
 
     #[test]
     fn curves_start_and_end_in_place() {
@@ -168,14 +171,18 @@ mod tests {
     }
 
     #[test]
-    fn ease_out_is_monotonic() {
-        let mut last = 0.;
-        for i in 0..=100 {
-            let value = Curve::EASE_OUT.at(i as f32 / 100.);
-            assert!(value >= last, "{i}");
-            assert!(value <= 1.);
-            last = value;
+    fn easing_is_monotonic() {
+        for curve in [Curve::EASE_OUT, Curve::EASE_IN] {
+            let mut last = 0.;
+            for i in 0..=100 {
+                let value = curve.at(i as f32 / 100.);
+                assert!(value >= last, "{curve:?} {i}");
+                assert!(value <= 1.);
+                last = value;
+            }
         }
+        // Easing out is ahead of a straight line half way, easing in behind it.
+        assert!(Curve::EASE_OUT.at(0.5) > 0.5 && Curve::EASE_IN.at(0.5) < 0.5);
     }
 
     #[test]

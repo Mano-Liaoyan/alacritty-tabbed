@@ -510,6 +510,13 @@ impl Layer {
         self.texts.iter_mut().for_each(|text| text.3 = mix(under, text.3, opacity));
     }
 
+    /// Move everything drawn by `dx`, `dy`, kept on whole pixels so text stays sharp.
+    pub fn translate(&mut self, dx: f32, dy: f32) {
+        let (dx, dy) = (dx.round(), dy.round());
+        self.rects.iter_mut().for_each(|rect| (rect.x, rect.y) = (rect.x + dx, rect.y + dy));
+        self.texts.iter_mut().for_each(|text| (text.0, text.1) = (text.0 + dx, text.1 + dy));
+    }
+
     /// Draw the layers over the window, whose size is `window`.
     pub fn draw(layers: Vec<Layer>, renderer: &mut Renderer, font: &UiFont, window: &SizeInfo) {
         for layer in layers {
@@ -586,5 +593,16 @@ mod tests {
         assert_eq!(Palette::on(Rgb::new(0x0a, 0x3d, 0x91)), WHITE);
         assert_eq!(Palette::on(WHITE), BLACK);
         assert_eq!(Palette::on(BLACK), WHITE);
+    }
+
+    #[test]
+    fn translate_moves_shapes_and_text_by_whole_pixels() {
+        let mut layer = Layer::default();
+        layer.rect(Rect::new(10., 20., 30., 4.), WHITE);
+        layer.text(5., 6., "a".into(), WHITE, false);
+        layer.translate(2., -12.4);
+        let rect = &layer.rects[0];
+        assert_eq!((rect.x, rect.y, rect.width, rect.height), (12., 8., 30., 4.));
+        assert_eq!((layer.texts[0].0, layer.texts[0].1), (7., -6.));
     }
 }

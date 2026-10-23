@@ -95,6 +95,48 @@ pub fn logo() -> Arc<Image> {
     LOGO.get_or_init(|| Image::svg(logo, false).expect("invalid embedded logo")).clone()
 }
 
+/// The icon at the left of the tab bar, as the configuration names it: Alacritty's logo with
+/// `alacritty`, a bundled logo with `bundled:<name>`, else an image file; none when empty.
+pub fn brand(icon: &str) -> Option<Arc<Image>> {
+    static BRANDS: OnceLock<Mutex<HashMap<String, Option<Arc<Image>>>>> = OnceLock::new();
+    let mut brands = BRANDS.get_or_init(Default::default).lock().unwrap();
+    let brand = brands.entry(icon.into()).or_insert_with(|| match icon {
+        "" => None,
+        "alacritty" => Some(logo()),
+        _ => match icon.strip_prefix(BUNDLED_PREFIX) {
+            Some(name) => named(name),
+            None => load(Path::new(icon)),
+        },
+    });
+    brand.clone()
+}
+
+/// A pushpin turned `angle` degrees clockwise from upright, its head filled `fill` of the way,
+/// in one color to tint: upright and solid while the tab bar is pinned, laid over as an outline
+/// while it is not, and every step between them as it changes.
+pub fn pin(angle: f32, fill: f32) -> Arc<Image> {
+    type Pins = HashMap<(i32, u8), Arc<Image>>;
+    static PINS: OnceLock<Mutex<Pins>> = OnceLock::new();
+    // Whole degrees and eighths of fill are finer than the eye follows at this size.
+    let key = (angle.round() as i32, (fill.clamp(0., 1.) * 8.).round() as u8);
+    let mut pins = PINS.get_or_init(Default::default).lock().unwrap();
+    let pin = pins.entry(key).or_insert_with(|| {
+        let (angle, fill) = (key.0, f32::from(key.1) / 8.);
+        // A head and a collar joined by a waist, over a needle; drawn in a 24 unit square with
+        // strokes as wide as the bar's other icons'.
+        let svg = format!(
+            r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+<g transform="rotate({angle} 12 12)" fill="none" stroke="#000" stroke-width="1.6"
+   stroke-linejoin="round" stroke-linecap="round">
+<path fill="#000" fill-opacity="{fill}" d="M8.25 2.5H15.75A1.25 1.25 0 0 1 15.75 5H15V10L18 13.5V15H6V13.5L9 10V5H8.25A1.25 1.25 0 0 1 8.25 2.5Z"/>
+<path d="M12 15.5V21.5"/>
+</g></svg>"##
+        );
+        Image::svg(svg.as_bytes(), true).expect("invalid pushpin")
+    });
+    pin.clone()
+}
+
 /// The icon of an image file, or of the program a command line runs.
 pub fn get(file: Option<&Path>, command: &str) -> Option<Arc<Image>> {
     type Icons = HashMap<(Option<String>, String), Option<Arc<Image>>>;
@@ -199,6 +241,22 @@ mod tests {
             assert!(named(name).is_some(), "{name}");
         }
         assert!(named("unknown").is_none());
+    }
+
+    #[test]
+    fn brand_icons_follow_the_configuration() {
+        assert!(Arc::ptr_eq(&brand("alacritty").unwrap(), &logo()));
+        assert!(brand("").is_none());
+        assert!(brand("bundled:opensuse").is_some());
+        assert!(brand("bundled:unknown").is_none());
+        assert!(brand("/nonexistent/logo.svg").is_none());
+    }
+
+    #[test]
+    fn pins_are_cached_by_step() {
+        let pinned = pin(0., 1.);
+        assert!(Arc::ptr_eq(&pinned, &pin(0.2, 0.99)));
+        assert!(!Arc::ptr_eq(&pinned, &pin(45., 0.)));
     }
 
     #[test]
