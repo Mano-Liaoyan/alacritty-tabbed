@@ -1503,9 +1503,12 @@ pub fn move_pane(
     target: Target,
     config: &Rc<UiConfig>,
 ) {
-    // Docking refers to the panes shown before the moving one is focused.
+    // Docking refers to the panes shown before the moving one is focused, and so do the
+    // animations: those panes slide aside and only the moving one pops in.
     let shown = ctx.display.tabs.active;
+    let effects = mem::take(&mut ctx.display.tabs.pane_effects);
     focus_pane(ctx, tab, pane, config);
+    ctx.display.tabs.pane_effects = effects;
     let tabs = &mut ctx.display.tabs;
     let area = tabs.area();
     if tabs.tabs.is_empty() || tabs.live() != (tab, pane) {
@@ -1525,7 +1528,10 @@ pub fn merge(
     dock: Option<(usize, Axis, Side)>,
     config: &Rc<UiConfig>,
 ) {
+    // The panes on screen slide aside and only the arriving ones pop in.
+    let effects = mem::take(&mut ctx.display.tabs.pane_effects);
     select(ctx, from, config);
+    ctx.display.tabs.pane_effects = effects;
     let tabs = &mut ctx.display.tabs;
     let area = tabs.area();
     if tabs.active != from || from >= tabs.tabs.len() {
@@ -1731,13 +1737,19 @@ mod tests {
         reorder(&mut model.tabs, &mut model.active, 0);
         model.check();
 
-        // A whole group docks as it is beside one pane of another, keeping the focus it had.
+        // Grouping whole tabs keeps the focus of the tab that moved.
         let area = Rect::new(0., 0., 800., 600.);
+        model.tabs.push(Tab::new(pane(7, Some(7))));
+        assert!(group(&mut model.tabs, &mut model.active, 2, None, area));
+        assert_eq!((model.tabs.len(), model.ids(1), model.live), (2, vec![7, 3], 3));
+        model.check();
+
+        // A whole group docks as it is beside one pane of another, keeping the focus it had.
         model.split(6, Axis::Column, Side::After);
         let dock = |pane| Some((pane, Axis::Row, Side::After));
-        assert!(!group(&mut model.tabs, &mut model.active, 1, dock(9), area));
-        assert!(group(&mut model.tabs, &mut model.active, 1, dock(0), area));
-        assert_eq!((model.tabs.len(), model.ids(0), model.live), (1, vec![1, 3, 6, 2, 5, 4], 6));
+        assert!(!group(&mut model.tabs, &mut model.active, 0, dock(9), area));
+        assert!(group(&mut model.tabs, &mut model.active, 0, dock(0), area));
+        assert_eq!((model.tabs.len(), model.ids(0), model.live), (1, vec![1, 7, 3, 6, 2, 5, 4], 6));
         model.check();
     }
 }
