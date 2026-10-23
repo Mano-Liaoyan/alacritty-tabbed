@@ -1146,20 +1146,26 @@ impl Display {
         let metrics = self.glyph_cache.font_metrics();
         let size_info = self.size_info;
 
+        // The cells of a preview's font, which its card's size depends on.
+        let now = Instant::now();
+        if let Some((font, pane)) = self.tabs.peek_font(now) {
+            let cells = self.cell_size(&pane, &font);
+            self.tabs.set_peek_cells(font, cells);
+        }
+
         self.renderer.set_frame(None);
         self.renderer.set_viewport(&size_info);
         self.tabs.draw(&mut self.renderer, &self.window, &size_info, config);
 
         // A pane previewed from its icon, over the bar's card that holds it.
-        if let Some(peek) = self.tabs.peek(Instant::now()) {
+        if let Some(peek) = self.tabs.peek(now) {
             let height = self.window.inner_size().height as f32;
             let (rect, clip) = (peek.frame, peek.clip);
             let frame = Frame::new(&peek.size, [rect.x, rect.y, rect.w, rect.h], height)
                 .clipped([clip.x, clip.y, clip.w, clip.h], height);
             let mut terminal = peek.terminal.lock();
             terminal.is_focused = false;
-            let font = config.font.clone().with_size(self.font_size);
-            self.draw_pane(terminal, peek.size, &peek.config, frame, &font);
+            self.draw_pane(terminal, peek.size, &peek.config, frame, &peek.font);
             self.tabs.draw_over(&mut self.renderer, &size_info, config);
         }
 

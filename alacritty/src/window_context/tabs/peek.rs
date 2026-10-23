@@ -3,21 +3,33 @@
 //!
 //! Like macOS' tooltips, the first card waits for the pointer to rest on an icon; once one has
 //! shown, the cards of other icons show at once, until a moment after the last one hid.
+//!
+//! The preview is drawn unscaled in a smaller font, so its glyphs are rasterized for their size
+//! and stay crisp; a pane too large to show whole at a readable size shows its tail.
 
 use std::mem;
+use std::ops::Range;
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
+use alacritty_terminal::grid::Dimensions;
+use alacritty_terminal::index::Line;
+use alacritty_terminal::term::{Term, TermMode};
+use alacritty_terminal::vte::ansi::NamedColor;
+use crossfont::Size as FontSize;
 use winit::dpi::PhysicalPosition;
 use winit::window::WindowId;
 
 use crate::config::UiConfig;
+use crate::config::font::Font;
 use crate::display::SizeInfo;
+use crate::display::color::Rgb;
 use crate::renderer::Renderer;
 
 use super::anim::{Curve, Tween};
 use super::bar::{self, Hit, Layout, MARGIN, TRACK_RADIUS};
 use super::paint::{BLACK, Layer, Palette, Rect, mix};
-use super::{PaneDraw, Press, Tabs};
+use super::{PaneDraw, Press, Session, Tabs};
 
 /// How long the pointer rests on an icon before its card shows.
 const DWELL: Duration = Duration::from_millis(300);
@@ -26,9 +38,14 @@ const WARM: Duration = Duration::from_millis(500);
 /// How long a card takes to show, and to hide, in milliseconds.
 const SHOW_MS: u64 = 160;
 const HIDE_MS: u64 = 120;
-/// Largest preview of a pane, in logical pixels, and of the pane's own size.
-const THUMBNAIL: (f32, f32) = (320., 200.);
-const THUMBNAIL_SCALE: f32 = 0.5;
+/// Largest preview of a pane, in logical pixels.
+const THUMBNAIL: (f32, f32) = (360., 220.);
+/// Smallest text of a preview, in points and relative to the pane's own.
+const MIN_PT: f32 = 9.;
+const MIN_SHARE: f32 = 0.6;
+/// Fades over the edges of a preview where it cuts the pane, in logical pixels.
+const FADE_RIGHT: f32 = 24.;
+const FADE_TOP: f32 = 12.;
 /// Space around the card's content, and between its header and preview, in logical pixels.
 const PAD: f32 = 8.;
 /// Widest line of text in a card, in logical pixels.
@@ -53,16 +70,34 @@ pub struct State {
     clicked: Option<Instant>,
     /// Where the preview of a pane not on screen is drawn, once the card is.
     thumbnail: Option<Thumbnail>,
+    /// The cells of the last preview font the display measured.
+    cells: Option<(Font, (f32, f32))>,
 }
 
-/// The preview's place in its card, and the scale of the pane in it.
-#[derive(Clone, Copy)]
+/// The preview's place in its card, and the cells of the pane it shows.
 struct Thumbnail {
     rect: Rect,
-    scale: f32,
     radius: f32,
     /// Width of its hairline.
     line: f32,
+    font: Font,
+    cells: (f32, f32),
+    plan: Plan,
+    /// The pane's background, which its cut edges fade into.
+    background: Rgb,
+}
+
+/// The part of a pane a preview shows.
+#[derive(Debug, PartialEq)]
+struct Plan {
+    /// The rows of the pane's screen shown, and how many of its columns, from the left.
+    rows: Range<usize>,
+    cols: usize,
+    /// Size of the shown cells, in pixels.
+    size: (f32, f32),
+    /// Whether columns are left out on the right, or rows at the top.
+    cut_right: bool,
+    cut_top: bool,
 }
 
 impl Default for State {
@@ -77,6 +112,7 @@ impl Default for State {
             dismissed: None,
             clicked: None,
             thumbnail: None,
+            cells: None,
         }
     }
 }
@@ -132,34 +168,68 @@ impl State {
 }
 
 impl Tabs {
+    /// The font and configuration of the pane whose preview shows or is about to, for the
+    /// display to measure its cells with [`Self::set_peek_cells`] before the bar is drawn.
+    pub fn peek_font(&self, now: Instant) -> Option<(Font, Rc<UiConfig>)> {
+        if !self.peeking.visible(now) {
+            return None;
+        }
+        let (tab, pane) = match self.hover {
+            Hit::Icon(tab, pane) => (tab, pane),
+            _ => self.peeking.target?,
+        };
+        if self.on_screen(tab, pane) {
+            return None;
+        }
+        let session = self.tabs.get(tab)?.panes.get(pane)?.session.as_ref()?;
+        Some((self.preview_font(session), session.config.clone()))
+    }
+
+    /// Remember the cells of the preview font `font`.
+    pub fn set_peek_cells(&mut self, font: Font, cells: (f32, f32)) {
+        self.peeking.cells = Some((font, cells));
+    }
+
     /// The hovered pane that is not on screen, drawn into its card's thumbnail.
     pub fn peek(&self, now: Instant) -> Option<PaneDraw> {
-        let thumbnail = self.peeking.thumbnail.filter(|_| self.peeking.visible(now))?;
+        let thumbnail = self.peeking.thumbnail.as_ref().filter(|_| self.peeking.visible(now))?;
         if thumbnail.rect.w < 1. || thumbnail.rect.h < 1. {
             return None;
         }
         let session = self.peeked()?.session.as_ref()?;
-        // The pane's card fills the thumbnail; its margin is left out.
-        let (margin, size, scale) = (self.margin(), session.size, thumbnail.scale);
+        // The pane's whole screen in the preview's cells, its first shown row at the top.
+        let (cell_width, cell_height) = thumbnail.cells;
+        let width = session.size.columns() as f32 * cell_width;
+        let height = session.size.screen_lines() as f32 * cell_height;
+        let size = SizeInfo::new(width, height, cell_width, cell_height, 0., 0., false);
         let Rect { x, y, .. } = thumbnail.rect;
-        let (width, height) = (size.width() * scale, size.height() * scale);
-        let frame = Rect::new(x - margin * scale, y - margin * scale, width, height);
+        let top = y - thumbnail.plan.rows.start as f32 * cell_height;
         Some(PaneDraw {
             terminal: session.terminal.clone(),
             config: session.config.clone(),
             size,
-            frame,
+            frame: Rect::new(x, top, width, height),
             clip: thumbnail.rect,
-            font: session.font(self.scale as f32),
+            font: thumbnail.font.clone(),
         })
     }
 
-    /// Draw over the thumbnail, once its terminal is drawn: its corners and hairline.
+    /// Draw over the thumbnail, once its terminal is drawn: fades where it cuts the pane, its
+    /// corners and hairline.
     pub fn draw_over(&self, renderer: &mut Renderer, size: &SizeInfo, config: &UiConfig) {
-        let (Some(thumbnail), Some(font)) = (self.peeking.thumbnail, &self.font) else { return };
+        let (Some(thumbnail), Some(font)) = (&self.peeking.thumbnail, &self.font) else { return };
         let palette = Palette::new(&config.colors);
-        let Thumbnail { rect, radius, line, .. } = thumbnail;
+        let Thumbnail { rect, radius, line, background, .. } = *thumbnail;
         let mut edges = Layer::default();
+        let px = |value: f32| (value * self.scale as f32).round();
+        if thumbnail.plan.cut_right {
+            let strip = |i| Rect::new(rect.right() - i - 1., rect.y, 1., rect.h);
+            fade(&mut edges, strip, px(FADE_RIGHT).min(rect.w), background);
+        }
+        if thumbnail.plan.cut_top {
+            let strip = |i| Rect::new(rect.x, rect.y + i, rect.w, 1.);
+            fade(&mut edges, strip, px(FADE_TOP).min(rect.h), background);
+        }
         edges.corners(rect, [radius; 4], palette.popup, palette.card_outline, line);
         let r = radius.round();
         for edge in [
@@ -175,6 +245,20 @@ impl Tabs {
         let window = SizeInfo::new(width, height, 1., 1., 0., 0., false);
         Layer::draw(vec![edges], renderer, font, &window);
         renderer.resize(size);
+    }
+
+    /// The font of the preview of `session`: as large as shows the whole pane in the largest
+    /// thumbnail, but readable.
+    fn preview_font(&self, session: &Session) -> Font {
+        let scale = self.scale as f32;
+        let font = session.font(scale);
+        let own = font.size().as_px();
+        let min = FontSize::new(MIN_PT).scale(scale).as_px().max(MIN_SHARE * own);
+        let pane = (session.size.columns(), session.size.screen_lines());
+        let cells = (session.size.cell_width(), session.size.cell_height());
+        let max = ((THUMBNAIL.0 * scale).round(), (THUMBNAIL.1 * scale).round());
+        let px = preview_px(pane, cells, own, max, min);
+        if px == own { font } else { font.with_size(FontSize::from_px(px)) }
     }
 
     /// The pane whose card is shown.
@@ -220,7 +304,15 @@ pub fn draw(
     let anchor = layout.anchor(index, position)?;
     let title = if (index, position) == tabs.live() { title } else { &pane.title };
     let profile = pane.profile.as_deref().filter(|profile| *profile != title);
-    let preview = !tabs.on_screen(index, position) && pane.session.is_some();
+    // The preview waits for the display to measure its font's cells.
+    let preview =
+        pane.session.as_ref().filter(|_| !tabs.on_screen(index, position)).and_then(|session| {
+            let font = tabs.preview_font(session);
+            match &tabs.peeking.cells {
+                Some((measured, cells)) if *measured == font => Some((session, font, *cells)),
+                _ => None,
+            }
+        });
 
     let px = |value: f32| layout.px(value);
     let (font, line) = (&*layout.font, layout.line);
@@ -233,22 +325,26 @@ pub fn draw(
     // A preview has a header of the pane's icon, title and profile; a pane on screen only names
     // itself, its profile below.
     let (icon, header) = (px(16.), line.max(px(16.)));
-    let text = if preview {
+    let text = if preview.is_some() {
         let profile = if profile.is_some() { pad + widths.1 } else { 0. };
         (icon + px(6.) + widths.0 + profile).min(text_max)
     } else {
         widths.0.max(widths.1).min(text_max)
     };
-    let (thumbnail, size) = if preview {
-        let session = pane.session.as_ref()?;
-        let content = |length: f32| length - 2. * tabs.margin();
-        let (w, h) = (content(session.size.width()), content(session.size.height()));
+    let (thumbnail, size) = if let Some((session, preview_font, cells)) = preview {
+        let pane = (session.size.columns(), session.size.screen_lines());
+        // Where its content ends, and its background as programs in it may have set it.
+        let (bottom, background) = {
+            let term = session.terminal.lock();
+            let background = term.colors()[NamedColor::Background]
+                .map_or(session.config.colors.primary.background, Rgb::from);
+            (bottom(&term), background)
+        };
         let room = window.bottom() - anchor.bottom() - gap - 3. * pad - header;
-        let max = (px(THUMBNAIL.0), px(THUMBNAIL.1).min(room));
-        let scale = fit((w, h), max, session.size.cell_height());
-        let thumbnail = ((w * scale).round(), (h * scale).round(), scale);
-        let size = (thumbnail.0.max(text) + 2. * pad, header + thumbnail.1 + 3. * pad);
-        (Some(thumbnail), size)
+        let plan = plan(pane, bottom, cells, (px(THUMBNAIL.0), px(THUMBNAIL.1).min(room)));
+        let (w, h) = plan.size;
+        let size = (w.max(text) + 2. * pad, header + h + 3. * pad);
+        (Some((preview_font, cells, plan, background)), size)
     } else {
         let lines = if profile.is_some() { 2. } else { 1. };
         (None, (text + 2. * px(10.), lines * line + 2. * pad))
@@ -275,7 +371,8 @@ pub fn draw(
 
     let fitted = |text: &str, room: f32| font.fit(text, room.max(0.), false);
     match thumbnail {
-        Some((w, h, scale)) => {
+        Some((preview_font, cells, plan, background)) => {
+            let (w, h) = plan.size;
             let (x, y) = (card.x + pad, card.y + pad);
             let badge = Rect::new(x, y + ((header - icon) / 2.).round(), icon, icon);
             let accent = palette.accent(title);
@@ -312,7 +409,15 @@ pub fn draw(
                 shown,
             );
             if tabs.peeking.open && shown >= 1. {
-                let thumbnail = Thumbnail { rect, scale, radius, line: stroke };
+                let thumbnail = Thumbnail {
+                    rect,
+                    radius,
+                    line: stroke,
+                    font: preview_font,
+                    cells,
+                    plan,
+                    background,
+                };
                 tabs.peeking.thumbnail = Some(thumbnail);
             }
         },
@@ -333,16 +438,68 @@ pub fn shows(tabs: &Tabs, id: WindowId) -> bool {
     tabs.peeking.thumbnail.is_some() && tabs.peeked().is_some_and(|pane| pane.id == id)
 }
 
-/// Scale of the preview of a pane `pane` large, with cells `cell` pixels tall, within `max`: its
-/// own shape, at most half its size, each line of cells a whole number of pixels tall so the
-/// lines are drawn alike, unless they would be too thin to read either way.
-fn fit((width, height): (f32, f32), (max_width, max_height): (f32, f32), cell: f32) -> f32 {
-    if width <= 0. || height <= 0. {
-        return 0.;
+/// Size in pixels of the text of the preview of a pane `pane` cells large, whose cells are `cells`
+/// large at its own text size `own`: as large as shows the whole pane within `max`, but no smaller
+/// than `min` nor larger than its own; whole pixels, so that previews of panes of any size share
+/// a few fonts.
+fn preview_px(
+    (cols, lines): (usize, usize),
+    (cell_width, cell_height): (f32, f32),
+    own: f32,
+    (max_width, max_height): (f32, f32),
+    min: f32,
+) -> f32 {
+    let fit =
+        (max_width / (cols as f32 * cell_width)).min(max_height / (lines as f32 * cell_height));
+    if fit >= 1. { own } else { (own * fit).floor().max(min.ceil()).min(own) }
+}
+
+/// What a preview with cells `cells` large shows within `max` of a pane `pane` cells large,
+/// whose content ends at the row `bottom`: all of it if it fits, else its left columns and the
+/// rows up to its content's end, or its top rows if those reach below.
+fn plan(
+    (cols, lines): (usize, usize),
+    bottom: usize,
+    (cell_width, cell_height): (f32, f32),
+    (max_width, max_height): (f32, f32),
+) -> Plan {
+    let fits = |room: f32, cell: f32, count: usize| ((room / cell).max(0.) as usize).min(count);
+    let (shown_cols, shown_rows) =
+        (fits(max_width, cell_width, cols), fits(max_height, cell_height, lines));
+    let end = (bottom + 1).max(shown_rows).min(lines);
+    let rows = end - shown_rows..end;
+    Plan {
+        size: (shown_cols as f32 * cell_width, shown_rows as f32 * cell_height),
+        cut_right: shown_cols < cols,
+        cut_top: rows.start > 0,
+        cols: shown_cols,
+        rows,
     }
-    let scale = (max_width / width).min(max_height / height).clamp(0., THUMBNAIL_SCALE);
-    let line = cell * scale;
-    if line >= 2. { line.floor() / cell } else { scale }
+}
+
+/// The last row of the screen of `term` with content: the lower of its cursor's and of the last
+/// that is not blank, or the last in the alternate screen, where programs fill the screen.
+fn bottom<T>(term: &Term<T>) -> usize {
+    let last = term.screen_lines().saturating_sub(1);
+    if term.mode().contains(TermMode::ALT_SCREEN) {
+        return last;
+    }
+    let grid = term.grid();
+    let offset = grid.display_offset() as i32;
+    let row = |line: Line| ((line.0 + offset).max(0) as usize).min(last);
+    let cursor = row(grid.cursor.point.line);
+    let filled = (0..=last).rev().find(|&row| !grid[Line(row as i32 - offset)].is_clear());
+    cursor.max(filled.unwrap_or(0))
+}
+
+/// Fade the edge of `layer` into `color` over `width` pixels, from strips 1 pixel wide: `strip(i)`
+/// is the strip `i` pixels in from the edge.
+fn fade(layer: &mut Layer, strip: impl Fn(f32) -> Rect, width: f32, color: Rgb) {
+    for i in 0..width as usize {
+        let Rect { x, y, w, h } = strip(i as f32);
+        let alpha = 1. - (i as f32 + 0.5) / width;
+        layer.fill(&[(x, y), (x + w, y), (x + w, y + h), (x, y + h)], color, alpha);
+    }
 }
 
 /// Where a card of `size` goes below `anchor`, which reaches from the icon down to whatever the
@@ -387,40 +544,116 @@ mod tests {
         assert_eq!(card(anchor, (200., 40.), WINDOW, 6.).y, anchor.bottom() + 6.);
     }
 
-    /// Size of the preview of a pane `pane` large, with cells 17 pixels tall.
-    fn thumbnail(pane: (f32, f32), max: (f32, f32)) -> (f32, f32) {
-        let scale = fit(pane, max, 17.);
-        ((pane.0 * scale).round(), (pane.1 * scale).round())
+    /// Cells of a font `px` pixels large, as monospace fonts tend to be.
+    fn cells(px: f32) -> (f32, f32) {
+        ((px * 0.6).floor(), (px * 1.2).floor())
+    }
+
+    /// Preview font of a pane at `own` pixels within the thumbnail at scale 1, with the floor
+    /// of 9 pt (12 px) and 60 %.
+    fn font(pane: (usize, usize), own: f32) -> f32 {
+        preview_px(pane, cells(own), own, (360., 220.), (12_f32).max(0.6 * own))
     }
 
     #[test]
-    fn thumbnail_keeps_the_pane_shape_at_most_half_its_size() {
-        let max = (320., 200.);
-        let (w, h) = thumbnail((1000., 600.), max);
-        assert!(w <= 320. && h <= 200.);
-        assert!((w / h - 1000. / 600.).abs() < 0.02, "{w} {h}");
-        // Tall and wide panes fill the height or width, as far as whole lines allow.
-        let (w, h) = thumbnail((400., 1600.), max);
-        assert!(h <= 200. && h > 175. && (w / h - 0.25).abs() < 0.01, "{w} {h}");
-        let (w, h) = thumbnail((3200., 340.), max);
-        assert!(w <= 320. && w > 300., "{w} {h}");
-        // Small panes show at half their size, never larger.
-        assert_eq!(fit((300., 100.), max, 18.), 0.5);
-        assert_eq!(thumbnail((0., 300.), max), (0., 0.));
-        // Little room below the card shrinks it.
-        assert!(thumbnail((1000., 600.), (320., 60.)).1 <= 60.);
+    fn small_pane_shows_whole_at_its_own_size() {
+        // 30 × 8 cells of 9 × 18 pixels: 270 × 144.
+        assert_eq!(font((30, 8), 15.), 15.);
+        let shown = plan((30, 8), 2, cells(15.), (360., 220.));
+        let whole =
+            Plan { rows: 0..8, cols: 30, size: (270., 144.), cut_right: false, cut_top: false };
+        assert_eq!(shown, whole);
     }
 
     #[test]
-    fn thumbnail_lines_are_whole_pixels_tall() {
-        for (pane, cell) in [((990., 600.), 17.), ((480., 580.), 20.), ((1800., 1000.), 35.)] {
-            let scale = fit(pane, (320., 200.), cell);
-            let line = cell * scale;
-            assert!(line >= 1. && (line - line.round()).abs() < 1e-4, "{pane:?} {cell} {line}");
+    fn pane_shrinks_to_fit_in_whole_pixels() {
+        // 30 × 10 cells of 9 × 18 pixels is 270 × 180, 80 % of it fits: 12 px.
+        assert_eq!(preview_px((30, 10), (9., 18.), 15., (216., 220.), 6.), 12.);
+        let font = font((50, 12), 20.);
+        assert_eq!(font, font.floor());
+        assert!((12. ..20.).contains(&font), "{font}");
+        // A pane at a size between whole pixels previews at whole pixels.
+        assert_eq!(preview_px((40, 10), (9., 18.), 15.1, (300., 160.), 6.), 12.);
+    }
+
+    #[test]
+    fn text_never_gets_smaller_than_9_points_or_60_percent() {
+        // A huge pane would need tiny text to show whole.
+        assert_eq!(font((300, 90), 15.), 12.);
+        assert_eq!(font((300, 90), 40.), 24.);
+        // At scale 2, 9 pt is 24 px.
+        assert_eq!(preview_px((300, 90), cells(30.), 30., (720., 440.), 24.), 24.);
+        // A floor between whole pixels rounds up, never below it: 9 pt at scale 1.1 is 13.2 px.
+        assert_eq!(preview_px((300, 90), cells(15.), 15., (396., 242.), 13.2), 14.);
+        // A pane already smaller than the floor keeps its own text.
+        assert_eq!(font((300, 90), 10.), 10.);
+    }
+
+    #[test]
+    fn zoomed_pane_previews_relative_to_its_size() {
+        // Zoomed to 200 %, its preview is no smaller than 60 % of that.
+        assert_eq!(font((100, 30), 30.), 18.);
+        assert_eq!(font((100, 30), 15.), 12.);
+    }
+
+    #[test]
+    fn huge_pane_shows_its_tail() {
+        // 200 × 60 cells at 12 px (7 × 14): 51 columns and 15 rows fit.
+        let shown = plan((200, 60), 59, cells(12.), (360., 220.));
+        assert_eq!((shown.cols, shown.rows.clone()), (51, 45..60));
+        assert_eq!(shown.size, (357., 210.));
+        assert!(shown.cut_right && shown.cut_top);
+    }
+
+    #[test]
+    fn tail_ends_at_the_content_bottom() {
+        // A busy log with its cursor halfway: the rows up to it.
+        let shown = plan((80, 40), 29, (7., 14.), (360., 220.));
+        assert_eq!(shown.rows, 15..30);
+        assert!(shown.cut_top);
+        // A fresh shell at the top shows its top, nothing cut there.
+        let shown = plan((80, 40), 0, (7., 14.), (360., 220.));
+        assert_eq!(shown.rows, 0..15);
+        assert!(!shown.cut_top && shown.cut_right);
+        // Narrow enough, no columns are cut.
+        let shown = plan((40, 40), 39, (7., 14.), (360., 220.));
+        assert_eq!((shown.cols, shown.cut_right, shown.rows), (40, false, 25..40));
+    }
+
+    #[test]
+    fn little_room_shows_fewer_rows() {
+        let shown = plan((80, 24), 23, (7., 14.), (360., 60.));
+        assert_eq!((shown.rows, shown.size.1), (20..24, 56.));
+        // No room at all shows nothing.
+        let shown = plan((80, 24), 23, (7., 14.), (360., -5.));
+        assert_eq!((shown.rows, shown.size.1), (24..24, 0.));
+    }
+
+    #[test]
+    fn content_bottom_is_the_cursor_or_the_last_text() {
+        use alacritty_terminal::event::VoidListener;
+        use alacritty_terminal::term::Config;
+        use alacritty_terminal::term::test::TermSize;
+        use alacritty_terminal::vte::ansi::Handler;
+
+        let mut term = Term::new(Config::default(), &TermSize::new(20, 10), VoidListener);
+        assert_eq!(bottom(&term), 0);
+        for c in "a\n\r\n\r\n\rb".chars() {
+            match c {
+                '\n' => term.linefeed(),
+                '\r' => term.carriage_return(),
+                c => term.input(c),
+            }
         }
-        // Too small to read, it keeps its scale.
-        assert_eq!(fit((4000., 4000.), (100., 100.), 20.), 0.025);
-        assert_eq!(fit((3200., 340.), (320., 200.), 17.), 0.1);
+        assert_eq!(bottom(&term), 3);
+        // Text below the cursor, as a program moving it up leaves.
+        term.goto(1, 0);
+        assert_eq!(bottom(&term), 3);
+        term.goto(6, 0);
+        assert_eq!(bottom(&term), 6);
+        // A full-screen program's tail is its last row.
+        term.swap_alt();
+        assert_eq!(bottom(&term), 9);
     }
 
     #[test]
