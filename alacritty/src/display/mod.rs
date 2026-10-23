@@ -633,6 +633,22 @@ impl Display {
         }
     }
 
+    /// Update font size and cell dimensions.
+    ///
+    /// This will return a tuple of the cell width and height.
+    // tabbed: superseded by `update_font`, kept to ease upstream merges.
+    #[allow(dead_code)]
+    fn update_font_size(
+        glyph_cache: &mut GlyphCache,
+        config: &UiConfig,
+        font: &Font,
+    ) -> (f32, f32) {
+        let _ = glyph_cache.update_font_size(font);
+
+        // Compute new cell sizes.
+        compute_cell_size(config, &glyph_cache.font_metrics())
+    }
+
     /// Reset glyph cache.
     fn reset_glyph_cache(&mut self) {
         let cache = &mut self.glyph_cache;

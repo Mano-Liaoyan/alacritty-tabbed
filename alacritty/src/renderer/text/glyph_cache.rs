@@ -290,8 +290,6 @@ impl GlyphCache {
     ///
     /// NOTE: To reload the renderers's fonts [`Self::reset_glyph_cache`] should be called
     /// afterwards.
-    // tabbed: superseded by `update_font`, kept to ease upstream merges.
-    #[allow(dead_code)]
     pub fn update_font_size(&mut self, font: &Font) -> Result<(), crossfont::Error> {
         // Update dpi scaling.
         self.font_offset = font.offset;
