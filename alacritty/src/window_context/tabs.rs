@@ -236,6 +236,8 @@ enum Press {
     Terminal,
     /// On a divider between panes, which it drags.
     Divider,
+    /// On the close button of the tab at this index, which closes it if released there.
+    Close(usize),
     /// Over something that used the press, such as a pane it focused, so the terminal gets
     /// neither it nor its release.
     Swallowed,
@@ -999,6 +1001,12 @@ pub fn window_event(
                     divider::release(ctx);
                     return None;
                 },
+                Press::Close(index) => {
+                    if layout.hit(tabs.pointer) == Hit::Close(index) {
+                        close(ctx, index, config);
+                    }
+                    return None;
+                },
                 Press::Swallowed => return None,
                 _ => (),
             }
@@ -1054,6 +1062,11 @@ pub fn window_event(
                 return None;
             } else if terminal {
                 tabs.press = Press::Terminal;
+            } else if let (Hit::Close(index), MouseButton::Left) = (layout.hit(pointer), button) {
+                // Like a native button, × acts on release, so a press there that moves away
+                // closes nothing.
+                tabs.press = Press::Close(index);
+                return None;
             } else {
                 tabs.press = Press::Bar;
                 click(ctx, &layout, button, config, proxy);
@@ -1488,8 +1501,7 @@ fn click(
             focus_pane(ctx, index, pane, config);
             dnd::start(ctx, layout, Source::Pane(index, pane), previous);
         },
-        (Hit::Close(index), MouseButton::Left)
-        | (Hit::Tab(index) | Hit::Icon(index, _) | Hit::Close(index), MouseButton::Middle) => {
+        (Hit::Tab(index) | Hit::Icon(index, _) | Hit::Close(index), MouseButton::Middle) => {
             close(ctx, index, config)
         },
         (Hit::Tab(index) | Hit::Icon(index, _) | Hit::Close(index), MouseButton::Right) => {
