@@ -729,13 +729,15 @@ mod tests {
 
     use super::*;
     use crate::window_context::tabs::Frame;
+    use crate::window_context::tabs::anim::scale;
+
     fn id(id: u64) -> WindowId {
         WindowId::from(id)
     }
 
-    /// Instants `ms` milliseconds after `now`.
+    /// Instants `ms` milliseconds of animation, as slowed down, after `now`.
     fn after(now: Instant, ms: u64) -> Instant {
-        now + Duration::from_millis(ms)
+        now + Duration::from_millis(ms).mul_f32(scale())
     }
 
     const LEFT: Rect = Rect { x: 0., y: 40., w: 400., h: 600. };

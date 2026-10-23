@@ -196,7 +196,8 @@ mod tests {
         assert_eq!(tween.get(now), 0.);
 
         tween.to(10., now, 100, Curve::EASE_OUT);
-        let duration = Duration::from_millis(100);
+        // Scaled like the tween's, which some toolchains round up by a nanosecond.
+        let duration = Duration::from_millis(100).mul_f32(scale());
         assert_eq!(tween.get(now), 0.);
         assert!(tween.running(now));
         assert!(!tween.running(now + duration));
@@ -208,7 +209,7 @@ mod tests {
         let now = Instant::now();
         let mut tween = Tween::new(Rect::new(0., 0., 100., 100.));
         tween.to(Rect::new(100., 0., 100., 100.), now, 200, Curve::SNAP);
-        let middle = now + Duration::from_millis(100);
+        let middle = now + Duration::from_millis(100).mul_f32(scale());
         let before = tween.get(middle);
         tween.to(Rect::new(0., 50., 100., 100.), middle, 200, Curve::SNAP);
         assert_eq!(tween.get(middle), before);
