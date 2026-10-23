@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::Line;
 use alacritty_terminal::term::{Term, TermMode};
+use alacritty_terminal::vte::ansi::NamedColor;
 use crossfont::Size as FontSize;
 use winit::dpi::PhysicalPosition;
 use winit::window::WindowId;
@@ -82,6 +83,8 @@ struct Thumbnail {
     font: Font,
     cells: (f32, f32),
     plan: Plan,
+    /// The pane's background, which its cut edges fade into.
+    background: Rgb,
 }
 
 /// The part of a pane a preview shows.
@@ -168,9 +171,12 @@ impl Tabs {
     /// The font and configuration of the pane whose preview shows or is about to, for the
     /// display to measure its cells with [`Self::set_peek_cells`] before the bar is drawn.
     pub fn peek_font(&self, now: Instant) -> Option<(Font, Rc<UiConfig>)> {
+        if !self.peeking.visible(now) {
+            return None;
+        }
         let (tab, pane) = match self.hover {
             Hit::Icon(tab, pane) => (tab, pane),
-            _ => self.peeking.target.filter(|_| self.peeking.visible(now))?,
+            _ => self.peeking.target?,
         };
         if self.on_screen(tab, pane) {
             return None;
@@ -213,20 +219,16 @@ impl Tabs {
     pub fn draw_over(&self, renderer: &mut Renderer, size: &SizeInfo, config: &UiConfig) {
         let (Some(thumbnail), Some(font)) = (&self.peeking.thumbnail, &self.font) else { return };
         let palette = Palette::new(&config.colors);
-        let Thumbnail { rect, radius, line, .. } = *thumbnail;
+        let Thumbnail { rect, radius, line, background, .. } = *thumbnail;
         let mut edges = Layer::default();
-        if let Some(session) = self.peeked().and_then(|pane| pane.session.as_ref()) {
-            let background = session.config.colors.primary.background;
-            let px = |value: f32| (value * self.scale as f32).round();
-            let plan = &thumbnail.plan;
-            if plan.cut_right {
-                let strip = |i| Rect::new(rect.right() - i - 1., rect.y, 1., rect.h);
-                fade(&mut edges, strip, px(FADE_RIGHT).min(rect.w), background);
-            }
-            if plan.cut_top {
-                let strip = |i| Rect::new(rect.x, rect.y + i, rect.w, 1.);
-                fade(&mut edges, strip, px(FADE_TOP).min(rect.h), background);
-            }
+        let px = |value: f32| (value * self.scale as f32).round();
+        if thumbnail.plan.cut_right {
+            let strip = |i| Rect::new(rect.right() - i - 1., rect.y, 1., rect.h);
+            fade(&mut edges, strip, px(FADE_RIGHT).min(rect.w), background);
+        }
+        if thumbnail.plan.cut_top {
+            let strip = |i| Rect::new(rect.x, rect.y + i, rect.w, 1.);
+            fade(&mut edges, strip, px(FADE_TOP).min(rect.h), background);
         }
         edges.corners(rect, [radius; 4], palette.popup, palette.card_outline, line);
         let r = radius.round();
@@ -331,12 +333,18 @@ pub fn draw(
     };
     let (thumbnail, size) = if let Some((session, preview_font, cells)) = preview {
         let pane = (session.size.columns(), session.size.screen_lines());
-        let bottom = bottom(&session.terminal.lock());
+        // Where its content ends, and its background as programs in it may have set it.
+        let (bottom, background) = {
+            let term = session.terminal.lock();
+            let background = term.colors()[NamedColor::Background]
+                .map_or(session.config.colors.primary.background, Rgb::from);
+            (bottom(&term), background)
+        };
         let room = window.bottom() - anchor.bottom() - gap - 3. * pad - header;
         let plan = plan(pane, bottom, cells, (px(THUMBNAIL.0), px(THUMBNAIL.1).min(room)));
         let (w, h) = plan.size;
         let size = (w.max(text) + 2. * pad, header + h + 3. * pad);
-        (Some((preview_font, cells, plan)), size)
+        (Some((preview_font, cells, plan, background)), size)
     } else {
         let lines = if profile.is_some() { 2. } else { 1. };
         (None, (text + 2. * px(10.), lines * line + 2. * pad))
@@ -363,7 +371,7 @@ pub fn draw(
 
     let fitted = |text: &str, room: f32| font.fit(text, room.max(0.), false);
     match thumbnail {
-        Some((preview_font, cells, plan)) => {
+        Some((preview_font, cells, plan, background)) => {
             let (w, h) = plan.size;
             let (x, y) = (card.x + pad, card.y + pad);
             let badge = Rect::new(x, y + ((header - icon) / 2.).round(), icon, icon);
@@ -401,8 +409,15 @@ pub fn draw(
                 shown,
             );
             if tabs.peeking.open && shown >= 1. {
-                let thumbnail =
-                    Thumbnail { rect, radius, line: stroke, font: preview_font, cells, plan };
+                let thumbnail = Thumbnail {
+                    rect,
+                    radius,
+                    line: stroke,
+                    font: preview_font,
+                    cells,
+                    plan,
+                    background,
+                };
                 tabs.peeking.thumbnail = Some(thumbnail);
             }
         },
@@ -436,7 +451,7 @@ fn preview_px(
 ) -> f32 {
     let fit =
         (max_width / (cols as f32 * cell_width)).min(max_height / (lines as f32 * cell_height));
-    if fit >= 1. { own } else { (own * fit).floor().max(min.round()).min(own) }
+    if fit >= 1. { own } else { (own * fit).floor().max(min.ceil()).min(own) }
 }
 
 /// What a preview with cells `cells` large shows within `max` of a pane `pane` cells large,
@@ -568,6 +583,8 @@ mod tests {
         assert_eq!(font((300, 90), 40.), 24.);
         // At scale 2, 9 pt is 24 px.
         assert_eq!(preview_px((300, 90), cells(30.), 30., (720., 440.), 24.), 24.);
+        // A floor between whole pixels rounds up, never below it: 9 pt at scale 1.1 is 13.2 px.
+        assert_eq!(preview_px((300, 90), cells(15.), 15., (396., 242.), 13.2), 14.);
         // A pane already smaller than the floor keeps its own text.
         assert_eq!(font((300, 90), 10.), 10.);
     }
