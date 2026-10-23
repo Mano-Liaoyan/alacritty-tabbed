@@ -11,14 +11,14 @@ use std::collections::HashMap;
 use std::iter;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use glutin::surface::Rect as DamageRect;
 use winit::dpi::PhysicalPosition;
 use winit::window::{ResizeDirection, WindowId};
 
 use crate::config::UiConfig;
-use crate::config::window::Corners;
+use crate::config::window::{Brand, Corners};
 use crate::display::SizeInfo;
 use crate::display::color::Rgb;
 use crate::display::window::Window;
@@ -59,19 +59,22 @@ pub const ITEM_RADIUS: f32 = TRACK_RADIUS - 6.;
 /// Radius of GNOME's and KDE's round window buttons.
 const CONTROL_DOT: f32 = 12.;
 
+/// How long the pointer rests on a button before its tooltip shows, and how long that fades in.
+const TIP_DELAY: Duration = Duration::from_millis(500);
+const TIP_FADE: Duration = Duration::from_millis(120);
+
 /// Last entry of the new-tab menu.
 const EDIT_PROFILES: &str = "Edit profiles…";
 
-/// Most panes a grouped tab shows as a deck of cards at rest; more show `DECK_SHOWN` cards and
-/// a count of the others.
-const DECK_MAX: usize = 4;
-const DECK_SHOWN: usize = 3;
+/// Most panes a grouped tab shows as a deck of cards at rest; more show as many cards and a count
+/// of the others.
+const DECK: usize = 5;
 /// Most icons in a row of a fanned deck; more wrap into rows below it, a shelf over the terminal.
 const ROW_MAX: usize = 8;
 /// Distance between the icons of a fanned deck, along its rows and between them.
 const PITCH: f32 = 26.;
 /// How opaque the cards at rest are, from the front of a deck to its back.
-const DEPTH_FADE: [f32; DECK_MAX] = [1., 0.8, 0.6, 0.45];
+const DEPTH_FADE: [f32; DECK] = [1., 0.82, 0.66, 0.52, 0.4];
 
 /// Where the icons of a tab's panes are drawn, by the panes' indices.
 type Icons = Vec<(usize, Rect)>;
@@ -115,7 +118,6 @@ pub struct Layout {
     pub line: f32,
     pub bar: f32,
     /// How far the bar is moved up out of the window while it slides in or out, at most `bar`.
-    #[allow(dead_code, reason = "lane B slides the bar")]
     pub offset: f32,
     /// Whether the bar is shown and takes the pointer: always, unless it is not pinned.
     pub bar_live: bool,
@@ -129,8 +131,10 @@ pub struct Layout {
     pub height: f32,
     /// Distance between the left edges of neighbouring tabs.
     step: f32,
-    brand: Option<Rect>,
-    mark: Rect,
+    /// The logo at the left of the bar.
+    mark: Option<(Rect, Arc<Image>)>,
+    /// The names beside it, each with whether it is the title.
+    label: Option<(Rect, Vec<(String, bool)>)>,
     track: Rect,
     tabs: Vec<(usize, Rect)>,
     /// Icons of the tabs' panes fanned out, by tab, with the area that picks one of them: the
@@ -167,19 +171,26 @@ impl Layout {
             px(MARGIN + INSET) - (caption / 2. - px(CONTROL_DOT))
         };
         let controls = width - trailing - if mac { 0. } else { 3. * caption };
-        let settings = controls - px(4.) - control;
-        let pin = settings - control;
+        let [pin, settings] = ends(controls, scale);
 
         // The logo is set in from the window's edge as far as from its top, which keeps it clear
         // of the rounded corner and lines it up with the terminal's text below. macOS puts it
         // beside its window buttons instead.
-        let logo = px(24.);
         let left = if mac { lights + px(7.) } else { px(MARGIN + INSET) };
-        let mark = Rect::new(left, 0., logo, bar).square(logo);
+        let default = Brand::default();
+        let config = tabs.configs.as_ref().map_or(&default, |(config, _)| &config.window.brand);
+        let image = config.show.then(|| icons::brand(&config.icon)).flatten();
+        let names: Vec<_> = [(&config.title, true), (&config.subtitle, false)]
+            .into_iter()
+            .filter(|_| config.show)
+            .map(|(name, title)| (name.replace("{host}", &tabs.host), title))
+            .filter(|(name, _)| !name.is_empty())
+            .collect();
+        // Names only beside a wide enough window.
+        let text = names.iter().map(|(name, title)| font.width(name, *title)).fold(0., f32::max);
+        let text = (width >= px(780.) && !names.is_empty()).then_some(text);
+        let (mark, label, brand) = brand(left, image.is_some(), text, bar, scale);
 
-        let label = width >= px(780.);
-        let label_width = px(114.);
-        let brand = mark.right() + if label { px(15.) + label_width } else { px(21.) };
         let min_tab = px(124.);
         let available = pin - px(48.) - brand - 2. * pad - px(6.) - control - chevron;
         let overflow = count as f32 > (available / min_tab).floor().max(1.);
@@ -222,8 +233,6 @@ impl Layout {
             }
         }
 
-        let brand = label.then(|| Rect::new(mark.right() + px(11.), 0., label_width, bar));
-
         let panel = tabs.panel;
         let terminal = match panel {
             true => tabs.area().inset(margin + px(INSET)),
@@ -256,8 +265,8 @@ impl Layout {
             panel,
             height,
             step,
-            brand,
-            mark,
+            mark: mark.zip(image),
+            label: label.map(|label| (label, names)),
             track,
             tabs: tab_rects,
             stacks: Vec::new(),
@@ -356,13 +365,8 @@ impl Layout {
             return Hit::Resize(direction);
         }
 
-        // A hidden bar leaves the panes the window, and the strip above them moves it.
         if !self.bar_live {
-            return match self.terminal.contains(point) {
-                true => Hit::Terminal,
-                false if y < self.terminal.y => Hit::Drag,
-                false => Hit::None,
-            };
+            return under_hidden_bar(self.terminal, point);
         }
 
         // A fanned deck covers what is beside it, the end of its tab and the buttons after it, and
@@ -418,7 +422,7 @@ impl Layout {
     /// Where the title of a tab with `panes` panes begins, after its badge or deck of icons.
     fn title(&self, tab: Rect, panes: usize) -> f32 {
         let front = self.badge(tab);
-        if panes > DECK_MAX {
+        if panes > DECK {
             return chip(front, self.chip_size(panes), self.scale).right() + self.px(6.);
         }
         let behind = (panes.max(1) - 1) as f32;
@@ -452,6 +456,55 @@ impl Layout {
     }
 }
 
+/// Where the pin and settings buttons begin, left of the window controls at `controls`.
+fn ends(controls: f32, scale: f32) -> [f32; 2] {
+    let control = (CONTROL * scale).round();
+    let settings = controls - (4. * scale).round() - control;
+    [settings - control, settings]
+}
+
+/// Where the logo and the names beside it go, from `left` in a bar `bar` high, and where the tab
+/// track begins after them: an `icon` is a square as wide as the bar's buttons are tall less
+/// some, and names `text` wide take at most 160 logical pixels. Without either the track begins
+/// at `left`, lined up with the terminal's text.
+fn brand(
+    left: f32,
+    icon: bool,
+    text: Option<f32>,
+    bar: f32,
+    scale: f32,
+) -> (Option<Rect>, Option<Rect>, f32) {
+    let px = |value: f32| (value * scale).round();
+    let mark = icon.then(|| Rect::new(left, 0., px(24.), bar).square(px(24.)));
+    let after = mark.map_or(left, |mark| mark.right() + px(11.));
+    let label = text.map(|text| Rect::new(after, 0., text.min(px(160.)).ceil(), bar));
+    let track = match (label, mark) {
+        (Some(label), _) => label.right() + px(4.),
+        (None, Some(mark)) => mark.right() + px(21.),
+        (None, None) => left,
+    };
+    (mark, label, track)
+}
+
+/// What the pointer at `point` is over while the bar is hidden: the panes have the window, whose
+/// `terminal` they fill, and the strip above them moves it.
+fn under_hidden_bar(terminal: Rect, point: PhysicalPosition<f64>) -> Hit {
+    match terminal.contains(point) {
+        true => Hit::Terminal,
+        false if (point.y as f32) < terminal.y => Hit::Drag,
+        false => Hit::None,
+    }
+}
+
+/// What a button's tooltip says, if it has one.
+fn tooltip(hit: Hit, pinned: bool) -> Option<&'static str> {
+    match hit {
+        Hit::Pin if pinned => Some("Unpin tab bar"),
+        Hit::Pin => Some("Pin tab bar"),
+        _ => None,
+    }
+}
+
 /// A tab's icons, from the back of the deck to its front, and the count of the panes left out.
 struct Deck {
     icons: Icons,
@@ -469,19 +522,19 @@ impl Deck {
 
 /// How many of a tab's `count` panes its deck shows as cards at rest.
 fn shown(count: usize) -> usize {
-    if count > DECK_MAX { DECK_SHOWN } else { count }
+    count.min(DECK)
 }
 
 /// The count of the panes of a deck of `count` that are not shown as cards.
 fn count_label(count: usize) -> String {
-    format!("+{}", count.saturating_sub(DECK_SHOWN))
+    format!("+{}", count.saturating_sub(DECK))
 }
 
 /// Where to draw the icons of a tab's `count` panes, from the back of the deck to its front.
 ///
 /// The focused pane's icon fills the badge `front`. Behind it, to the right, the others peek out
-/// like cards, each smaller than the one before: all of them up to `DECK_MAX`, or else
-/// `DECK_SHOWN` and a capsule of `chip_size` counting the rest, so the deck never grows long.
+/// like cards, each smaller than the one before: up to `DECK` of them, and a capsule of
+/// `chip_size` counting the rest, so the deck never grows long.
 ///
 /// `motion(pane)` says how far the deck is fanned out and how far that pane's icon is lifted
 /// from it, each from 0 to 1: fanned out, the icons grow and spread apart into rows of `row`, and a
@@ -525,27 +578,9 @@ fn deck(
 /// Where the capsule counting the panes left out of a deck with the badge `front` is: tucked
 /// behind its last card like one more, centered on the badge, showing `size` beside the card.
 fn chip(front: Rect, (width, height): (f32, f32), scale: f32) -> Rect {
-    let (edge, tuck) = (front.right() + 6. * (DECK_SHOWN - 1) as f32 * scale, 4. * scale);
+    let (edge, tuck) = (front.right() + 6. * (DECK - 1) as f32 * scale, 4. * scale);
     let y = front.center().1 - height / 2.;
     Rect::new((edge - tuck).round(), y.round(), width + tuck.round(), height)
-}
-
-/// Strokes of a pushpin, in units of half its size: upright when `pinned`, else laid over.
-fn pin_glyph(pinned: bool) -> Vec<[f32; 4]> {
-    let upright = [
-        [-0.45, -1., 0.45, -1.],
-        [-0.3, -1., -0.3, 0.1],
-        [0.3, -1., 0.3, 0.1],
-        [-0.75, 0.1, 0.75, 0.1],
-        [0., 0.1, 0., 1.],
-    ];
-    let (sin, cos) = if pinned { (0., 1.) } else { std::f32::consts::FRAC_PI_4.sin_cos() };
-    let turn = |x: f32, y: f32| (x * cos - y * sin, x * sin + y * cos);
-    let turned = upright.map(|[x0, y0, x1, y1]| {
-        let ((x0, y0), (x1, y1)) = (turn(x0, y0), turn(x1, y1));
-        [x0, y0, x1, y1]
-    });
-    turned.to_vec()
 }
 
 /// How opaque the icon `order`th from the front of a deck of `count` is, fanned out by `fan`: the
@@ -613,6 +648,13 @@ fn icon_at(icons: &[(usize, Rect)], (x, y): (f32, f32)) -> Option<usize> {
 #[derive(Default)]
 pub struct Effects {
     panes: HashMap<WindowId, Motion>,
+    /// How far the pin is pushed in: 1 while the bar is pinned, 0 while it is not.
+    pin: Option<Tween<f32>>,
+    /// The button under the pointer that has a tooltip, the tooltip, and since when.
+    tip: Option<(Hit, &'static str, Instant)>,
+    /// Whether the last frames drew a tooltip, which reaches below the bar: the last, then the one
+    /// before.
+    tip_drawn: [bool; 2],
 }
 
 /// Where a pane's tab is, by its index, and how far its icon is fanned out and lifted.
@@ -623,9 +665,29 @@ struct Motion {
 }
 
 impl Effects {
-    /// Follow the tabs to their places and the icon under the pointer, at `now`; a tab `held` by
-    /// a drag stays at its slot there, to slide on from it once dropped.
-    fn update(&mut self, tabs: &[Tab], hover: Hit, held: Option<(usize, f32)>, now: Instant) {
+    /// Follow the tabs to their places, the icon or button under the pointer and whether the bar
+    /// is `pinned`, at `now`; a tab `held` by a drag stays at its slot there, to slide on from it
+    /// once dropped.
+    fn update(
+        &mut self,
+        tabs: &[Tab],
+        hover: Hit,
+        held: Option<(usize, f32)>,
+        pinned: bool,
+        now: Instant,
+    ) {
+        // The pin is pushed in with a little give, and pulled out the same way.
+        let pin = f32::from(pinned);
+        match &mut self.pin {
+            Some(tween) => tween.to(pin, now, 320, Curve::SNAP),
+            None => self.pin = Some(Tween::new(pin)),
+        }
+        // A tooltip waits again once it says something else, as after a click.
+        let tip = tooltip(hover, pinned).map(|text| (hover, text));
+        if self.tip.map(|(hit, text, _)| (hit, text)) != tip {
+            self.tip = tip.map(|(hit, text)| (hit, text, now));
+        }
+
         self.panes.retain(|id, _| tabs.iter().any(|tab| tab.position(*id).is_some()));
         for (index, tab) in tabs.iter().enumerate() {
             // A lone pane's icon is its tab's badge, which does not fan out.
@@ -656,10 +718,23 @@ impl Effects {
         motion.map_or((0., 0., 0.), |m| (m.slot.get(now), m.fan.get(now), m.lift.get(now)))
     }
 
+    /// How far the pin is pushed in at `now`, from 0 to 1, overshooting a little on the way.
+    fn pin(&self, now: Instant) -> f32 {
+        self.pin.map_or(1., |pin| pin.get(now))
+    }
+
+    /// The button whose tooltip shows at `now`, the tooltip, and how far it has faded in.
+    fn tip(&self, now: Instant) -> Option<(Hit, &'static str, f32)> {
+        let (hit, text, since) = self.tip?;
+        let shown = now.checked_duration_since(since + TIP_DELAY)?;
+        Some((hit, text, Curve::EASE_OUT.at(shown.as_secs_f32() / TIP_FADE.as_secs_f32())))
+    }
+
     /// Whether something in the bar is still moving at `now`.
     pub fn running(&self, now: Instant) -> bool {
-        let mut tweens = self.panes.values().flat_map(|m| [&m.slot, &m.fan, &m.lift]);
-        tweens.any(|tween| tween.running(now))
+        let tweens = self.panes.values().flat_map(|m| [&m.slot, &m.fan, &m.lift]);
+        tweens.chain(&self.pin).any(|tween| tween.running(now))
+            || self.tip.is_some_and(|(.., since)| now < since + TIP_DELAY + TIP_FADE)
     }
 }
 
@@ -698,11 +773,12 @@ impl Tabs {
         };
         let now = Instant::now();
         // A bar that is not pinned lies over the panes, which it uncovers as it hides.
-        let overlay = !self.autohide.pinned;
+        // So does a tooltip, below the bar, and the frame after it.
+        let overlay = self.autohide.overlay(now) || self.bar_effects.tip_drawn.contains(&true);
         if panes > 1 || fanned || overlay || self.animating(now) || self.peeking.visible(now) {
             return vec![DamageRect::new(0, 0, width, height)];
         }
-        if self.caption {
+        if self.caption && self.autohide.pinned {
             let bar = (BAR * self.scale as f32).round() as i32;
             damage.push(DamageRect::new(0, height - bar, width, bar));
         }
@@ -730,9 +806,10 @@ impl Tabs {
             return;
         }
 
+        let now = Instant::now();
+        self.autohide.tick(now);
         let layout = Layout::new(self);
         self.first = layout.first;
-        let now = Instant::now();
         let mut palette = Palette::new(&config.colors);
         palette.highlight = config.window.pane_highlight.unwrap_or(palette.primary);
         let (font, line_height) = (&*layout.font, layout.line);
@@ -743,25 +820,36 @@ impl Tabs {
         let mut chrome = Layer::default();
         let mut base = Layer::default();
         let mut top = Layer::default();
-        // What a drag holds, which fades while it would leave the window.
+        // What a drag holds, which fades while it would leave the window: on the bar, and
+        // following the pointer.
         let mut lifted = Layer::default();
+        let mut carried = Layer::default();
 
         // Chrome around the panels that hold the terminals.
         panes::draw(self, &layout, &palette, &mut chrome, now);
         base.rect(Rect::new(0., 0., width, bar), palette.chrome);
+        // A bar that is not pinned lies over the panes, edged with a hairline and a shadow.
+        if !self.autohide.pinned {
+            base.rect(Rect::new(0., bar - line, width, line), palette.track_outline);
+            let shown = 1. + layout.offset / bar;
+            for (index, alpha) in [0.18, 0.1, 0.05, 0.02].into_iter().enumerate() {
+                let strip = Rect::new(0., bar + index as f32 * px(2.), width, px(2.));
+                base.rounded_alpha(strip, 0., BLACK, alpha * shown);
+            }
+        }
 
-        // Logo, with the application and computer name beside it.
-        base.image(layout.mark, &icons::logo(), palette.foreground);
-        if let Some(brand) = layout.brand {
+        // Logo, with a title and a subtitle beside it, the computer's name by default.
+        if let Some((rect, image)) = &layout.mark {
+            base.image(*rect, image, palette.foreground);
+        }
+        if let Some((rect, names)) = &layout.label {
             let middle = (bar / 2.).round();
-            let (label, host) = ("Alacritty", font.fit(&self.host, brand.w, false));
-            if 2. * line_height <= bar - px(8.) {
-                let y = middle - line_height + px(1.);
-                base.text(brand.x, y, label.into(), palette.foreground, true);
-                base.text(brand.x, middle + px(1.), host, palette.muted, false);
-            } else {
-                let y = middle - line_height / 2.;
-                base.text(brand.x, y, label.into(), palette.foreground, true);
+            let two = names.len() > 1 && 2. * line_height <= bar - px(8.);
+            let top = if two { middle - line_height + px(1.) } else { middle - line_height / 2. };
+            for (index, (name, title)) in names.iter().take(1 + usize::from(two)).enumerate() {
+                let color = if *title { palette.foreground } else { palette.muted };
+                let name = font.fit(name, rect.w, *title);
+                base.text(rect.x, top + index as f32 * line_height, name, color, *title);
             }
         }
 
@@ -802,7 +890,7 @@ impl Tabs {
             },
             _ => None,
         };
-        self.bar_effects.update(&self.tabs, self.hover, held, now);
+        self.bar_effects.update(&self.tabs, self.hover, held, self.autohide.pinned, now);
         // Stacks fanned out cover what is beside them.
         let mut fanned = Layer::default();
         for &(index, mut rect) in &layout.tabs {
@@ -977,15 +1065,34 @@ impl Tabs {
                 let size = px(22.);
                 let icon = Rect::new((x - size / 2.).round(), (y - size / 2.).round(), size, size);
                 let shadow = Rect::new(icon.x, icon.y + px(2.), size, size).inset(-px(2.));
-                lifted.rounded_alpha(shadow, layout.curve(shadow.w / 4.), BLACK, 0.3);
+                carried.rounded_alpha(shadow, layout.curve(shadow.w / 4.), BLACK, 0.3);
                 let colors = (palette.raised, palette.accent(&pane.title), palette.foreground);
-                lifted.rounded(icon.inset(-px(1.)), layout.curve(size / 4.), palette.raised);
-                badge(&mut lifted, &layout, icon, pane.icon.as_ref(), &pane.badge, font, colors);
+                carried.rounded(icon.inset(-px(1.)), layout.curve(size / 4.), palette.raised);
+                badge(&mut carried, &layout, icon, pane.icon.as_ref(), &pane.badge, font, colors);
             }
         }
 
         for &(hit, rect) in &layout.buttons {
-            self.draw_button(&mut base, &layout, &palette, hit, rect);
+            self.draw_button(&mut base, &layout, &palette, hit, rect, now);
+        }
+
+        // The tooltip of the button under the pointer, below it.
+        let mut tip = Layer::default();
+        let tip_shown = self.bar_effects.tip(now);
+        let drawn = self.bar_effects.tip_drawn[0];
+        self.bar_effects.tip_drawn = [tip_shown.is_some(), drawn];
+        if let Some((hit, text, shown)) = tip_shown {
+            if let Some(&(_, button)) = layout.buttons.iter().find(|(h, _)| *h == hit) {
+                let size = (font.width(text, false) + px(16.), line_height + px(8.));
+                let x = (button.center().0 - size.0 / 2.).min(width - px(MARGIN) - size.0);
+                let rect = Rect::new(x.round(), button.bottom() + px(6.), size.0.round(), size.1);
+                let radius = layout.radius(ITEM_RADIUS);
+                let shadow = Rect::new(rect.x, rect.y + px(1.), rect.w, rect.h);
+                tip.rounded_alpha(shadow, radius + layout.radius(1.), BLACK, 0.25);
+                tip.outlined(rect, radius, palette.popup, palette.popup_outline, line);
+                tip.label(rect, text, font, palette.foreground, false);
+                tip.fade(shown, palette.popup);
+            }
         }
 
         if let (Some(menu), Some((rect, row))) = (&self.menu, layout.menu) {
@@ -1027,15 +1134,21 @@ impl Tabs {
 
         if torn {
             lifted.fade(0.5, track);
+            carried.fade(0.5, track);
         }
         let card = peek::draw(self, &layout, &palette, window.title(), now);
         let mut layers = vec![chrome];
-        // A hidden bar is not drawn.
-        if layout.bar_live {
-            layers.extend([base, fanned, lifted]);
-            layers.extend(card);
-            layers.push(top);
+        // A bar that is not pinned slides in and out over the panes, and is not drawn hidden.
+        let shown = layout.offset > -bar;
+        self.autohide.drawn(shown);
+        if shown {
+            let mut over = vec![base, fanned, lifted];
+            over.extend(card);
+            over.extend([top, tip]);
+            over.iter_mut().for_each(|layer| layer.translate(0., layout.offset));
+            layers.extend(over);
         }
+        layers.push(carried);
         layers.extend(context::draw(self, &layout, &palette, now));
         if let Some(settings) = &self.settings {
             layers.extend(settings.draw(&layout, &palette, config, window));
@@ -1061,6 +1174,7 @@ impl Tabs {
         palette: &Palette,
         hit: Hit,
         rect: Rect,
+        now: Instant,
     ) {
         let px = |value: f32| layout.px(value);
         let hovered = self.hover == hit;
@@ -1130,16 +1244,12 @@ impl Tabs {
                     Hit::Menu => (4., &[[-1., -0.5, 0., 0.5], [0., 0.5, 1., -0.5]]),
                     Hit::Previous => (4., &[[0.5, -1., -0.5, 0.], [-0.5, 0., 0.5, 1.]]),
                     Hit::Next => (4., &[[-0.5, -1., 0.5, 0.], [0.5, 0., -0.5, 1.]]),
-                    // A pushpin, upright while pinned and laid over while not.
+                    // A pushpin, upright and solid while pinned, laid over as an outline while not,
+                    // turning and filling between them.
                     Hit::Pin => {
-                        let pin = pin_glyph(self.autohide.pinned);
-                        return layer.icon(
-                            center,
-                            px(6.),
-                            (1.3 * layout.scale).max(1.),
-                            &pin,
-                            color,
-                        );
+                        let pinned = self.bar_effects.pin(now);
+                        let pin = icons::pin(45. * (1. - pinned), pinned);
+                        return layer.image(rect.square(px(20.)), &pin, color);
                     },
                     _ => {
                         let background = if hovered { palette.hover } else { palette.chrome };
@@ -1204,55 +1314,56 @@ mod tests {
     }
 
     #[test]
-    fn deck_of_four_shows_every_card() {
-        let deck = deck(FRONT, 4, 3, 1., ROW_MAX, chip_size(4), at_rest);
-        assert_eq!(deck.icons.len(), 4);
-        assert_eq!(deck.icons.last().unwrap().0, 3);
-        assert_eq!(deck.chip, None);
+    fn decks_of_up_to_five_show_every_card() {
+        for count in 2..=5 {
+            let deck = deck(FRONT, count, count - 1, 1., ROW_MAX, chip_size(count), at_rest);
+            assert_eq!(deck.icons.len(), count);
+            assert_eq!(deck.icons.last().unwrap().0, count - 1);
+            assert_eq!(deck.chip, None);
+        }
     }
 
     #[test]
-    fn larger_decks_show_three_cards_and_count_the_others() {
-        for count in [5, 9, 40] {
+    fn larger_decks_show_five_cards_and_count_the_others() {
+        for (count, label) in [(6, "+1"), (12, "+7"), (40, "+35")] {
             let deck = deck(FRONT, count, 4, 1., ROW_MAX, chip_size(count), at_rest);
             let order: Vec<_> = deck.icons.iter().map(|&(pane, _)| pane).collect();
-            assert_eq!(order, [1, 0, 4]);
+            assert_eq!(order, [3, 2, 1, 0, 4]);
             let (chip, hidden) = deck.chip.unwrap();
-            assert_eq!(hidden, count - 3);
+            assert_eq!((hidden, count_label(count).as_str()), (count - 5, label));
             // The count overlaps the last card and is centered on the badge.
             let last = deck.icons[0].1;
             assert!(chip.x < last.right() && chip.right() > last.right(), "{chip:?} {last:?}");
             assert!((chip.center().1 - FRONT.center().1).abs() <= 0.5);
             // However many panes, the deck leaves the title its room.
-            assert!(deck.end() <= FRONT.x + 64., "{count}: {}", deck.end());
+            assert!(last.right() < FRONT.x + 70., "{count}: {last:?}");
+            assert!(deck.end() <= FRONT.x + 70. + chip_size(count).0, "{count}: {}", deck.end());
         }
     }
 
     #[test]
-    fn count_never_stands_for_a_single_pane() {
+    fn count_stands_only_for_panes_beyond_five() {
         for count in 1..=100 {
             let deck = deck(FRONT, count, 0, 1., ROW_MAX, chip_size(count), at_rest);
-            if let Some((_, hidden)) = deck.chip {
-                assert!(hidden >= 2, "{count}");
-            }
+            assert_eq!(deck.chip.is_some(), count > 5, "{count}");
             assert_eq!(deck.icons.len() + deck.chip.map_or(0, |(_, hidden)| hidden), count);
         }
     }
 
     #[test]
     fn cards_fade_with_depth_until_fanned_out() {
-        let rest: Vec<_> = (0..4).map(|order| opacity(order, 4, 0.)).collect();
+        let rest: Vec<_> = (0..5).map(|order| opacity(order, 5, 0.)).collect();
         assert_eq!(rest, DEPTH_FADE);
-        assert_eq!(opacity(3, 6, 0.), 0.);
+        assert_eq!(opacity(5, 6, 0.), 0.);
         assert!((0..12).all(|order| opacity(order, 12, 1.) == 1.));
         assert_eq!(opacity(5, 12, 0.5), 0.5);
     }
 
     #[test]
     fn panes_left_out_come_from_behind_the_last_card() {
-        let rest = deck(FRONT, 6, 0, 1., ROW_MAX, chip_size(6), at_rest).icons;
-        let opening = deck(FRONT, 6, 0, 1., ROW_MAX, chip_size(6), |_| (0.01, 0.)).icons;
-        assert_eq!(opening.len(), 6);
+        let rest = deck(FRONT, 8, 0, 1., ROW_MAX, chip_size(8), at_rest).icons;
+        let opening = deck(FRONT, 8, 0, 1., ROW_MAX, chip_size(8), |_| (0.001, 0.)).icons;
+        assert_eq!(opening.len(), 8);
         let last = rest[0].1;
         for &(_, icon) in &opening[..3] {
             assert!((icon.center().0 - last.center().0).abs() <= 1., "{icon:?} {last:?}");
@@ -1316,7 +1427,7 @@ mod tests {
 
     #[test]
     fn icon_entered_at_rest_stays_under_a_still_pointer() {
-        for count in [4, 6, 12] {
+        for count in [4, 5, 6, 12] {
             for scale in [1f32, 1.25, 2.] {
                 let front = Rect::new(100., 15., (18. * scale).round(), 18.);
                 let middle = front.center().1;
@@ -1411,5 +1522,88 @@ mod tests {
                 assert!(icon.y - plate.y >= 4. && plate.bottom() - icon.bottom() >= 4.);
             }
         }
+    }
+
+    #[test]
+    fn pin_sits_left_of_the_settings_button() {
+        for scale in [1., 1.5, 2.] {
+            let controls = 900. * scale;
+            let [pin, settings] = ends(controls, scale);
+            let control = (CONTROL * scale).round();
+            // Side by side, the same size, clear of the window controls.
+            assert_eq!(pin + control, settings);
+            assert!(settings + control < controls);
+        }
+    }
+
+    #[test]
+    fn brand_lays_out_its_icon_and_names() {
+        let (left, bar) = (12., 48.);
+        // Both: the names after the icon, the track after the names.
+        let (mark, label, track) = brand(left, true, Some(90.), bar, 1.);
+        let (mark, label) = (mark.unwrap(), label.unwrap());
+        assert_eq!(mark, Rect::new(12., 12., 24., 24.));
+        assert_eq!((label.x, label.w), (mark.right() + 11., 90.));
+        assert_eq!(track, label.right() + 4.);
+        // Long names are cut.
+        let (_, label, _) = brand(left, true, Some(400.), bar, 1.);
+        assert_eq!(label.unwrap().w, 160.);
+        // Icon only, as in a narrow window.
+        let (mark, label, track) = brand(left, true, None, bar, 1.);
+        assert_eq!((label, track), (None, mark.unwrap().right() + 21.));
+        // Names only begin where the icon would.
+        let (mark, label, _) = brand(left, false, Some(50.), bar, 1.);
+        assert_eq!((mark, label.unwrap().x), (None, left));
+        // Hidden: the tabs begin where the logo did.
+        assert_eq!(brand(left, false, None, bar, 1.), (None, None, left));
+        // Scaled.
+        let (mark, label, _) = brand(24., true, Some(90.), 96., 2.);
+        assert_eq!(mark.unwrap().w, 48.);
+        assert_eq!(label.unwrap().x, mark.unwrap().right() + 22.);
+    }
+
+    #[test]
+    fn hidden_bar_leaves_the_window_to_the_panes() {
+        let terminal = Rect::new(12., 12., 600., 400.);
+        let at = |x: f64, y: f64| under_hidden_bar(terminal, PhysicalPosition::new(x, y));
+        assert_eq!(at(100., 5.), Hit::Drag);
+        assert_eq!(at(100., 20.), Hit::Terminal);
+        assert_eq!(at(100., 415.), Hit::None);
+        assert_eq!(at(5., 100.), Hit::None);
+    }
+
+    #[test]
+    fn pin_tooltip_says_what_a_click_does() {
+        assert_eq!(tooltip(Hit::Pin, true), Some("Unpin tab bar"));
+        assert_eq!(tooltip(Hit::Pin, false), Some("Pin tab bar"));
+        assert_eq!(tooltip(Hit::Settings, true), None);
+    }
+
+    #[test]
+    fn tooltip_waits_then_fades_in_and_restarts_when_it_changes() {
+        let now = Instant::now();
+        let mut effects = Effects::default();
+        effects.update(&[], Hit::Pin, None, true, now);
+        assert_eq!(effects.tip(now + TIP_DELAY / 2), None);
+        assert!(effects.running(now + TIP_DELAY / 2));
+        assert_eq!(effects.tip(now + TIP_DELAY + TIP_FADE), Some((Hit::Pin, "Unpin tab bar", 1.)));
+        assert!(!effects.running(now + TIP_DELAY + TIP_FADE));
+        // Clicked: the bar is no longer pinned, and the tooltip waits to say so.
+        let later = now + Duration::from_secs(1);
+        effects.update(&[], Hit::Pin, None, false, later);
+        assert_eq!(effects.tip(later), None);
+        assert_eq!(effects.tip(later + TIP_DELAY + TIP_FADE).unwrap().1, "Pin tab bar");
+        effects.update(&[], Hit::None, None, false, later);
+        assert_eq!(effects.tip(later + TIP_DELAY * 4), None);
+    }
+
+    #[test]
+    fn pin_starts_at_rest_and_turns_to_its_state() {
+        let now = Instant::now();
+        let mut effects = Effects::default();
+        effects.update(&[], Hit::None, None, false, now);
+        assert_eq!(effects.pin(now), 0.);
+        effects.update(&[], Hit::None, None, true, now);
+        assert_eq!(effects.pin(now + Duration::from_secs(60)), 1.);
     }
 }
