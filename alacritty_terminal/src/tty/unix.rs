@@ -130,29 +130,15 @@ impl ShellUser {
         let mut buf = [0; 1024];
         let pw = get_pw_entry(&mut buf);
 
-        let user = match env::var("USER") {
-            Ok(user) => user,
-            Err(_) => match pw {
-                Ok(ref pw) => pw.name.to_owned(),
-                Err(err) => return Err(err),
-            },
+        // A field of the passwd entry, for variables that are not set.
+        let passwd = |field: fn(&Passwd<'_>) -> String| match &pw {
+            Ok(pw) => Ok(field(pw)),
+            Err(err) => Err(Error::new(err.kind(), err.to_string())),
         };
 
-        let home = match env::var("HOME") {
-            Ok(home) => home,
-            Err(_) => match pw {
-                Ok(ref pw) => pw.dir.to_owned(),
-                Err(err) => return Err(err),
-            },
-        };
-
-        let shell = match env::var("SHELL") {
-            Ok(shell) => shell,
-            Err(_) => match pw {
-                Ok(ref pw) => pw.shell.to_owned(),
-                Err(err) => return Err(err),
-            },
-        };
+        let user = env::var("USER").or_else(|_| passwd(|pw| pw.name.into()))?;
+        let home = env::var("HOME").or_else(|_| passwd(|pw| pw.dir.into()))?;
+        let shell = env::var("SHELL").or_else(|_| passwd(|pw| pw.shell.into()))?;
 
         Ok(Self { user, home, shell })
     }
