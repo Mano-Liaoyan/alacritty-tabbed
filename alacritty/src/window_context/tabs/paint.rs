@@ -86,6 +86,9 @@ pub struct Palette {
     pub focus: Rgb,
     /// The main action, from the terminal's blue.
     pub primary: Rgb,
+    /// Accent of the panes: the focused one's border and where a pane would drop.
+    #[allow(dead_code)] // Taken up by the panes with its setting.
+    pub highlight: Rgb,
     /// Backing out of changes, from the terminal's red.
     pub caution: Rgb,
     accents: [Rgb; 5],
@@ -126,6 +129,7 @@ impl Palette {
             field_outline: mix(field, text, 0.1),
             focus: mix(terminal, text, 0.42),
             primary: colors.normal.blue,
+            highlight: colors.normal.blue,
             caution: colors.normal.red,
             accents: [normal.green, normal.yellow, normal.blue, normal.magenta, normal.cyan],
         }
@@ -438,11 +442,16 @@ impl Layer {
 
     /// Draw `image` fit in the `rect` square, in `tint` if it is a single-color image.
     pub fn image(&mut self, rect: Rect, image: &Image, tint: Rgb) {
+        self.image_alpha(rect, image, tint, 1.);
+    }
+
+    /// Draw `image` like [`Self::image`], `opacity` of the way over what is under it.
+    pub fn image_alpha(&mut self, rect: Rect, image: &Image, tint: Rgb, opacity: f32) {
         let runs = image.runs(rect.w.min(rect.h) as u32);
         self.rects.extend(runs.iter().map(|&(x, y, w, color, alpha)| {
             let (x, y) = (rect.x + f32::from(x), rect.y + f32::from(y));
             let color = if image.tint { tint } else { color };
-            RenderRect::new(x, y, f32::from(w), 1., color, alpha)
+            RenderRect::new(x, y, f32::from(w), 1., color, alpha * opacity)
         }));
     }
 

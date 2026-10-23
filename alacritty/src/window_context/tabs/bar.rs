@@ -62,8 +62,17 @@ const CONTROL_DOT: f32 = 12.;
 /// Last entry of the new-tab menu.
 const EDIT_PROFILES: &str = "Edit profiles…";
 
-/// Most icons a grouped tab stacks in its badge.
-const STACK: usize = 4;
+/// Most panes a grouped tab shows as a deck of cards at rest; more show `DECK_SHOWN` cards and
+/// a count of the others.
+const DECK_MAX: usize = 4;
+const DECK_SHOWN: usize = 3;
+/// Most icons in a row of a fanned deck; more wrap into rows below it, a shelf over the terminal.
+const ROW_MAX: usize = 8;
+/// Distance between the icons of a fanned deck, and between its rows.
+const PITCH: f32 = 26.;
+const ROW_PITCH: f32 = 30.;
+/// How opaque the cards at rest are, from the front of a deck to its back.
+const DEPTH_FADE: [f32; DECK_MAX] = [1., 0.8, 0.6, 0.45];
 
 /// Where the icons of a tab's panes are drawn, by the panes' indices.
 type Icons = Vec<(usize, Rect)>;
@@ -118,8 +127,9 @@ pub struct Layout {
     mark: Rect,
     track: Rect,
     tabs: Vec<(usize, Rect)>,
-    /// Icons of the grouped tabs' panes fanned out, by tab, with where the stack ends.
-    stacks: Vec<(usize, f32, Icons)>,
+    /// Icons of the tabs' panes fanned out, by tab, with the area that picks one of them: the
+    /// deck at rest, or all of it fanned out while it is.
+    stacks: Vec<(usize, Rect, Icons)>,
     buttons: Vec<(Hit, Rect)>,
     terminal: Rect,
     /// The menu and the height of its rows.
@@ -249,20 +259,29 @@ impl Layout {
             menu,
         };
 
-        // A stack is entered at rest and fans out under the pointer; its icons are told apart as
+        // A deck is entered at rest and fans out under the pointer; its icons are told apart as
         // they are fanned, so the icon picked stays under a pointer that does not move.
         layout.stacks = layout
             .tabs
             .iter()
             .filter_map(|&(index, rect)| {
-                let tab = tabs.tabs.get(index).filter(|tab| tab.panes.len() > 1)?;
-                let icons = |fan| {
-                    let front = layout.badge(rect);
-                    stack(front, tab.panes.len(), tab.focus, scale, |_| (fan, 0.))
+                let tab = tabs.tabs.get(index)?;
+                let (front, count) = (layout.badge(rect), tab.panes.len());
+                // A lone pane's icon is its tab's badge, which does not fan out.
+                if count == 1 {
+                    return Some((index, front, vec![(0, front)]));
+                }
+                let (row, chip) = (layout.row(front), layout.chip_size(count));
+                let deck = |fan| deck(front, count, tab.focus, scale, row, chip, |_| (fan, 0.));
+                let fanned = deck(1.).icons;
+                let area = if matches!(tabs.hover, Hit::Icon(i, _) if i == index) {
+                    let (left, right) = extent(&fanned);
+                    let below = (count.div_ceil(row) - 1) as f32 * ROW_PITCH * scale;
+                    Rect::new(left, rect.y, right - left, rect.h + below)
+                } else {
+                    Rect::new(front.x, rect.y, deck(0.).end() - front.x, rect.h)
                 };
-                let hovered = matches!(tabs.hover, Hit::Icon(i, _) if i == index);
-                let end = icons(f32::from(hovered)).into_iter().map(|(_, r)| r.right());
-                Some((index, end.fold(f32::MIN, f32::max), icons(1.)))
+                Some((index, area, fanned))
             })
             .collect();
         layout
@@ -332,18 +351,18 @@ impl Layout {
             return Hit::Resize(direction);
         }
 
-        if y >= self.bar {
-            return if self.terminal.contains(point) { Hit::Terminal } else { Hit::None };
+        // A fanned deck covers what is beside it, the end of its tab and the buttons after it, and
+        // its shelf what is below the bar.
+        for (index, area, icons) in &self.stacks {
+            if let Some(pane) = icon_at(icons, (x, y)).filter(|_| area.contains(point)) {
+                return Hit::Icon(*index, pane);
+            }
         }
         if let Some(&(hit, _)) = self.buttons.iter().find(|(_, rect)| rect.contains(point)) {
             return hit;
         }
-        // A fanned stack covers the end of its tab, close button included.
-        let row = self.tabs.first().is_some_and(|(_, rect)| y >= rect.y && y < rect.bottom());
-        for (index, end, icons) in self.stacks.iter().filter(|_| row) {
-            if let Some(pane) = icon_at(icons, x).filter(|_| x < *end) {
-                return Hit::Icon(*index, pane);
-            }
+        if y >= self.bar {
+            return if self.terminal.contains(point) { Hit::Terminal } else { Hit::None };
         }
         match self.tabs.iter().find(|(_, rect)| rect.contains(point)) {
             Some(&(index, rect)) if self.close(rect).contains(point) => Hit::Close(index),
@@ -356,6 +375,13 @@ impl Layout {
         self.tabs.iter().find(|(i, _)| *i == index).map(|(_, rect)| *rect)
     }
 
+    /// Where the icon of the pane `pane` of the tab at `index` is once its deck is fanned out.
+    #[allow(dead_code)] // The anchor of the hover card, which comes next.
+    pub fn icon(&self, index: usize, pane: usize) -> Option<Rect> {
+        let (.., icons) = self.stacks.iter().find(|(i, ..)| *i == index)?;
+        icons.iter().find(|(p, _)| *p == pane).map(|(_, rect)| *rect)
+    }
+
     fn close(&self, tab: Rect) -> Rect {
         let size = self.px(26.);
         Rect::new(tab.right() - size, tab.y, size, tab.h)
@@ -366,10 +392,27 @@ impl Layout {
         Rect::new(tab.x + self.px(9.), (tab.y + (tab.h - size) / 2.).round(), size, size)
     }
 
-    /// Where the title of a tab with `panes` panes begins, after its badge or stack of icons.
+    /// Where the title of a tab with `panes` panes begins, after its badge or deck of icons.
     fn title(&self, tab: Rect, panes: usize) -> f32 {
-        let behind = (panes.clamp(1, STACK) - 1) as f32;
-        (self.badge(tab).right() + behind * 6. * self.scale).round() + self.px(8.)
+        let front = self.badge(tab);
+        if panes > DECK_MAX {
+            return chip(front, self.chip_size(panes), self.scale).right() + self.px(6.);
+        }
+        let behind = (panes.max(1) - 1) as f32;
+        (front.right() + behind * 6. * self.scale).round() + self.px(8.)
+    }
+
+    /// How many icons a fanned row that begins at `front` holds within the window.
+    fn row(&self, front: Rect) -> usize {
+        let room = self.width - self.px(MARGIN) - front.x;
+        ((room / (PITCH * self.scale)) as usize).clamp(1, ROW_MAX)
+    }
+
+    /// Size of the capsule counting the panes of a deck of `panes` left out of its cards.
+    fn chip_size(&self, panes: usize) -> (f32, f32) {
+        let height = self.px(16.).max(self.line + self.px(2.)).round();
+        let text = self.font.width(&count_label(panes), false);
+        ((text + self.px(10.)).max(height).round(), height)
     }
 
     /// Where the gap before the tab at `index` is, or after the last tab shown.
@@ -386,51 +429,114 @@ impl Layout {
     }
 }
 
-/// Where to draw the icons of a tab's `count` panes, from the back of the stack to its front.
+/// A tab's icons, from the back of the deck to its front, and the count of the panes left out.
+struct Deck {
+    icons: Icons,
+    /// The capsule counting the panes behind the cards shown at rest, and how many there are.
+    chip: Option<(Rect, usize)>,
+}
+
+impl Deck {
+    /// Where the deck ends, at its last icon or its count.
+    fn end(&self) -> f32 {
+        let chip = self.chip.map_or(f32::MIN, |(chip, _)| chip.right());
+        extent(&self.icons).1.max(chip)
+    }
+}
+
+/// How many of a tab's `count` panes its deck shows as cards at rest.
+fn shown(count: usize) -> usize {
+    if count > DECK_MAX { DECK_SHOWN } else { count }
+}
+
+/// The count of the panes of a deck of `count` that are not shown as cards.
+fn count_label(count: usize) -> String {
+    format!("+{}", count.saturating_sub(DECK_SHOWN))
+}
+
+/// Where to draw the icons of a tab's `count` panes, from the back of the deck to its front.
 ///
-/// The focused pane's icon fills the badge `front`, and up to three others peek out behind it to
-/// the right, each smaller than the one before, like cards. `motion(pane)` says how far the stack
-/// is fanned out and how far that pane's icon is lifted from it, each from 0 to 1: fanned out, the
-/// icons grow and spread apart, and a lifted one grows more.
-fn stack(
+/// The focused pane's icon fills the badge `front`. Behind it, to the right, the others peek out
+/// like cards, each smaller than the one before: all of them up to `DECK_MAX`, or else
+/// `DECK_SHOWN` and a capsule of `chip_size` counting the rest, so the deck never grows long.
+///
+/// `motion(pane)` says how far the deck is fanned out and how far that pane's icon is lifted
+/// from it, each from 0 to 1: fanned out, the icons grow and spread apart into rows of `row`, and a
+/// lifted one grows more. The panes left out of the deck come out from behind its last card.
+fn deck(
     front: Rect,
     count: usize,
     focus: usize,
     scale: f32,
+    row: usize,
+    chip_size: (f32, f32),
     motion: impl Fn(usize) -> (f32, f32),
-) -> Icons {
+) -> Deck {
+    let shown = shown(count);
     let behind = (0..count).filter(|&pane| pane != focus);
     let (left, middle) = (front.x, front.center().1);
     let mut icons: Vec<_> = iter::once(focus)
         .chain(behind)
-        .take(STACK)
         .enumerate()
-        .map(|(depth, pane)| {
+        .filter_map(|(order, pane)| {
             let (fan, lift) = motion(pane);
+            if order >= shown && fan <= 0. {
+                return None;
+            }
+            let depth = order.min(shown - 1);
+            let (column, line) = ((order % row) as f32, (order / row) as f32);
             let base = front.w + 4. * fan * scale;
             let shrunk = base * (0.9 + 0.1 * fan).powi(depth as i32);
             let size = (shrunk + 4. * lift * scale).round();
-            let right = left + base + depth as f32 * (6. + 20. * fan) * scale;
-            let (x, y) = (right - shrunk / 2., middle - 2. * lift * scale);
-            (pane, Rect::new((x - size / 2.).round(), (y - size / 2.).round(), size, size))
+            let spread = 6. * (1. - fan) * depth as f32 + PITCH * fan * column;
+            let right = left + base + spread * scale;
+            let (x, y) =
+                (right - shrunk / 2., middle + (ROW_PITCH * fan * line - 2. * lift) * scale);
+            Some((pane, Rect::new((x - size / 2.).round(), (y - size / 2.).round(), size, size)))
         })
         .collect();
     icons.reverse();
-    icons
+    let chip = (count > shown).then(|| (chip(front, chip_size, scale), count - shown));
+    Deck { icons, chip }
 }
 
-/// The pane whose icon in `icons`, drawn back to front, spans `x`: the frontmost, or else the
-/// nearest while `x` is within the stack.
-fn icon_at(icons: &[(usize, Rect)], x: f32) -> Option<usize> {
+/// Where the capsule counting the panes left out of a deck with the badge `front` is: tucked
+/// behind its last card like one more, centered on the badge, showing `size` beside the card.
+fn chip(front: Rect, (width, height): (f32, f32), scale: f32) -> Rect {
+    let (edge, tuck) = (front.right() + 6. * (DECK_SHOWN - 1) as f32 * scale, 4. * scale);
+    let y = front.center().1 - height / 2.;
+    Rect::new((edge - tuck).round(), y.round(), width + tuck.round(), height)
+}
+
+/// How opaque the icon `order`th from the front of a deck of `count` is, fanned out by `fan`: the
+/// cards fade with their depth, and the panes left out of them show only as the deck fans out.
+fn opacity(order: usize, count: usize, fan: f32) -> f32 {
+    let rest = if order < shown(count) { DEPTH_FADE[order] } else { 0. };
+    rest + (1. - rest) * fan.clamp(0., 1.)
+}
+
+/// The left and right edges of `icons`.
+fn extent(icons: &[(usize, Rect)]) -> (f32, f32) {
     let left = icons.iter().map(|(_, rect)| rect.x).fold(f32::MAX, f32::min);
     let right = icons.iter().map(|(_, rect)| rect.right()).fold(f32::MIN, f32::max);
+    (left, right)
+}
+
+/// The pane whose icon in `icons`, drawn back to front, is at `(x, y)`: in the row nearest `y`,
+/// the frontmost spanning `x`, or else the nearest while `x` is within the icons.
+fn icon_at(icons: &[(usize, Rect)], (x, y): (f32, f32)) -> Option<usize> {
+    let (left, right) = extent(icons);
     if x < left || x >= right {
         return None;
     }
-    let distance = |rect: &Rect| (rect.x - x).max(x - rect.right()).max(0.);
+    let distance = |from: f32, to: f32, at: f32| (from - at).max(at - to).max(0.);
+    let across = |rect: &Rect| distance(rect.y, rect.bottom(), y);
+    let along = |rect: &Rect| distance(rect.x, rect.right(), x);
     let front_first = icons.iter().rev();
-    let nearest = front_first.min_by(|a, b| distance(&a.1).total_cmp(&distance(&b.1)));
-    nearest.map(|(pane, _)| *pane)
+    let (_, nearest) = front_first.clone().min_by(|a, b| across(&a.1).total_cmp(&across(&b.1)))?;
+    let row = front_first
+        .filter(|(_, rect)| (rect.center().1 - nearest.center().1).abs() < nearest.h / 2.);
+    row.min_by(|a, b| along(&a.1).total_cmp(&along(&b.1))).map(|(pane, _)| *pane)
 }
 
 /// How the bar's tabs and icons move, by the panes they show.
@@ -454,7 +560,8 @@ impl Effects {
     fn update(&mut self, tabs: &[Tab], hover: Hit, held: Option<(usize, f32)>, now: Instant) {
         self.panes.retain(|id, _| tabs.iter().any(|tab| tab.position(*id).is_some()));
         for (index, tab) in tabs.iter().enumerate() {
-            let fanned = matches!(hover, Hit::Icon(i, _) if i == index);
+            // A lone pane's icon is its tab's badge, which does not fan out.
+            let fanned = tab.panes.len() > 1 && matches!(hover, Hit::Icon(i, _) if i == index);
             for (position, pane) in tab.panes.iter().enumerate() {
                 let held = held.filter(|&(tab, _)| tab == index).map(|(_, slot)| slot);
                 let slot = held.unwrap_or(index as f32);
@@ -463,7 +570,7 @@ impl Effects {
                     fan: Tween::new(0.),
                     lift: Tween::new(0.),
                 });
-                let lifted = hover == Hit::Icon(index, position);
+                let lifted = fanned && hover == Hit::Icon(index, position);
                 match held {
                     Some(_) => motion.slot = Tween::new(slot),
                     None => motion.slot.to(slot, now, 200, Curve::SNAP),
@@ -516,7 +623,9 @@ impl Tabs {
     pub fn damage(&self, mut damage: Vec<DamageRect>, _size: &SizeInfo) -> Vec<DamageRect> {
         let (width, height) = (self.window.width as i32, self.window.height as i32);
         let panes = self.tabs.get(self.active).map_or(1, |tab| tab.panes.len());
-        if panes > 1 || self.animating(Instant::now()) {
+        // A fanned deck may reach over the terminal.
+        let fanned = matches!(self.hover, Hit::Icon(..));
+        if panes > 1 || fanned || self.animating(Instant::now()) {
             return vec![DamageRect::new(0, 0, width, height)];
         }
         if self.height > 0 {
@@ -655,51 +764,80 @@ impl Tabs {
                 _ if active && pane == tab.focus => window.title(),
                 pane => &pane.title,
             };
-            let colors = |pane| (surface, palette.accent(title(pane)), palette.foreground);
+            // Colors of a pane's badge, `alpha` of the way out of the tab.
+            let colors = |pane, alpha| {
+                let accent = palette.accent(title(pane));
+                (surface, mix(surface, accent, alpha), mix(surface, palette.foreground, alpha))
+            };
             let front = layout.badge(rect);
+            let count = tab.panes.len();
             // The title fades out under a stack fanned over it.
             let mut fade = 0.;
-            if tab.panes.len() == 1 {
+            if count == 1 {
                 let pane = tab.pane();
-                badge(layer, &layout, front, pane.icon.as_ref(), &pane.badge, font, colors(0));
+                badge(layer, &layout, front, pane.icon.as_ref(), &pane.badge, font, colors(0, 1.));
             } else {
                 let motion = |pane: usize| {
                     let (_, fan, lift) = self.bar_effects.get(tab.panes[pane].id, now);
                     (fan, lift)
                 };
-                let icons = stack(front, tab.panes.len(), tab.focus, layout.scale, motion);
-                let fan = motion(tab.focus).0;
+                let (row, chip_size) = (layout.row(front), layout.chip_size(count));
+                let deck = deck(front, count, tab.focus, layout.scale, row, chip_size, motion);
+                let fan = motion(tab.focus).0.clamp(0., 1.);
                 let fanned_out = fan > 0.001;
-                fade = fan.clamp(0., 1.);
+                fade = fan;
                 let into = if fanned_out { &mut fanned } else { &mut *layer };
                 if fanned_out {
-                    let left = icons.iter().map(|(_, icon)| icon.x).fold(f32::MAX, f32::min);
-                    let right = icons.iter().map(|(_, icon)| icon.right()).fold(f32::MIN, f32::max);
+                    // A plate under the icons, which grows down to hold their rows; once past the
+                    // bar it floats over the terminal like a popover.
+                    let (left, right) = extent(&deck.icons);
+                    let below = (count.div_ceil(row) - 1) as f32 * ROW_PITCH * layout.scale * fan;
                     let (x, y) = (left - px(3.), rect.y + px(2.));
-                    let plate = Rect::new(x, y, right - left + px(6.), rect.h - px(4.));
-                    into.rounded_alpha(plate, layout.radius(TAB_RADIUS - 2.), surface, fan.min(1.));
+                    let plate = Rect::new(x, y, right - left + px(6.), rect.h - px(4.) + below);
+                    let radius = layout.radius(TAB_RADIUS - 2.);
+                    let float = fan * ((plate.bottom() - bar) / px(4.)).clamp(0., 1.);
+                    if float > 0. {
+                        let shadow = Rect::new(plate.x, plate.y + px(2.), plate.w, plate.h);
+                        into.rounded_alpha(shadow, radius + layout.radius(2.), BLACK, 0.3 * float);
+                        into.rounded_alpha(plate, radius, palette.popup_outline, float);
+                        into.rounded_alpha(plate.inset(line), radius - line, surface, fan);
+                    } else {
+                        into.rounded_alpha(plate, radius, surface, fan);
+                    }
                 }
-                for (depth, &(pane, icon)) in icons.iter().rev().enumerate().rev() {
+                // The count of the panes behind the cards, which come out from under them.
+                if let Some((chip, _)) = deck.chip.filter(|_| fan < 1.) {
+                    let fill = mix(surface, palette.foreground, 0.12);
+                    into.rounded_alpha(chip, layout.curve(chip.h / 2.), fill, 1. - fan);
+                    let tuck = px(4.) + line;
+                    let label = Rect::new(chip.x + tuck, chip.y, chip.w - tuck, chip.h);
+                    let color = if lit(index) { palette.foreground } else { palette.muted };
+                    let color = mix(fill, color, 1. - fan);
+                    into.label(label, &count_label(count), font, color, false);
+                }
+                let icons = &deck.icons;
+                for (order, &(pane, icon)) in icons.iter().rev().enumerate().rev() {
                     if source == Some(Source::Pane(index, pane)) {
                         continue;
                     }
+                    let (fan, lift) = motion(pane);
+                    let alpha = opacity(order, count, fan);
                     // Icons are cards, each cut out of the ones behind it.
-                    if depth + 1 < icons.len() {
+                    if order + 1 < icons.len() || deck.chip.is_some() {
                         let cut = icon.inset(-px(1.));
-                        into.rounded(cut, layout.curve(cut.w / 4.), surface);
+                        let backed = if order < shown(count) { 1. } else { fan.min(1.) };
+                        into.rounded_alpha(cut, layout.curve(cut.w / 4.), surface, backed);
                     }
                     let Pane { icon: image, badge: text, .. } = &tab.panes[pane];
-                    let image = image.as_ref();
-                    let icon = match image {
-                        Some(_) => {
-                            let card =
-                                mix(surface, palette.foreground, 0.16 + 0.1 * motion(pane).1);
-                            into.rounded(icon, layout.curve(icon.w / 4.), card);
-                            icon.inset((icon.w / 9.).round())
+                    match image {
+                        Some(image) => {
+                            let card = mix(surface, palette.foreground, 0.16 + 0.1 * lift);
+                            into.rounded_alpha(icon, layout.curve(icon.w / 4.), card, alpha);
+                            let inner = icon.inset((icon.w / 9.).round());
+                            into.image_alpha(inner, image, palette.foreground, alpha);
                         },
-                        None => icon,
-                    };
-                    badge(into, &layout, icon, image, text, font, colors(pane));
+                        None => badge(into, &layout, icon, None, text, font, colors(pane, alpha)),
+                    }
                 }
             }
 
@@ -713,7 +851,7 @@ impl Tabs {
                 layer.icon(close.center(), px(4.), icon, &lines, palette.muted);
             }
 
-            let left = layout.title(rect, tab.panes.len());
+            let left = layout.title(rect, count);
             let right = if lit(index) { close.x + px(2.) } else { rect.right() - px(10.) };
             let title = font.fit(title(tab.focus), (right - left).max(0.), active);
             let color = if lit(index) { palette.foreground } else { palette.muted };
@@ -902,9 +1040,29 @@ mod tests {
     use super::*;
 
     const FRONT: Rect = Rect { x: 100., y: 15., w: 18., h: 18. };
+    const MIDDLE: f32 = 24.;
 
     fn at_rest(_: usize) -> (f32, f32) {
         (0., 0.)
+    }
+
+    fn fanned(_: usize) -> (f32, f32) {
+        (1., 0.)
+    }
+
+    /// The size of the count of a deck, in a font of 7 pixels a character and a line of 17.
+    fn chip_size(count: usize) -> (f32, f32) {
+        (count_label(count).len() as f32 * 7. + 10., 19.)
+    }
+
+    fn stack(
+        front: Rect,
+        count: usize,
+        focus: usize,
+        scale: f32,
+        motion: impl Fn(usize) -> (f32, f32),
+    ) -> Icons {
+        deck(front, count, focus, scale, ROW_MAX, chip_size(count), motion).icons
     }
 
     #[test]
@@ -929,10 +1087,59 @@ mod tests {
     }
 
     #[test]
-    fn stack_shows_at_most_four_icons() {
-        let icons = stack(FRONT, 7, 6, 1., at_rest);
-        assert_eq!(icons.len(), STACK);
-        assert_eq!(icons.last().unwrap().0, 6);
+    fn deck_of_four_shows_every_card() {
+        let deck = deck(FRONT, 4, 3, 1., ROW_MAX, chip_size(4), at_rest);
+        assert_eq!(deck.icons.len(), 4);
+        assert_eq!(deck.icons.last().unwrap().0, 3);
+        assert_eq!(deck.chip, None);
+    }
+
+    #[test]
+    fn larger_decks_show_three_cards_and_count_the_others() {
+        for count in [5, 9, 40] {
+            let deck = deck(FRONT, count, 4, 1., ROW_MAX, chip_size(count), at_rest);
+            let order: Vec<_> = deck.icons.iter().map(|&(pane, _)| pane).collect();
+            assert_eq!(order, [1, 0, 4]);
+            let (chip, hidden) = deck.chip.unwrap();
+            assert_eq!(hidden, count - 3);
+            // The count overlaps the last card and is centered on the badge.
+            let last = deck.icons[0].1;
+            assert!(chip.x < last.right() && chip.right() > last.right(), "{chip:?} {last:?}");
+            assert!((chip.center().1 - FRONT.center().1).abs() <= 0.5);
+            // However many panes, the deck leaves the title its room.
+            assert!(deck.end() <= FRONT.x + 64., "{count}: {}", deck.end());
+        }
+    }
+
+    #[test]
+    fn count_never_stands_for_a_single_pane() {
+        for count in 1..=100 {
+            let deck = deck(FRONT, count, 0, 1., ROW_MAX, chip_size(count), at_rest);
+            if let Some((_, hidden)) = deck.chip {
+                assert!(hidden >= 2, "{count}");
+            }
+            assert_eq!(deck.icons.len() + deck.chip.map_or(0, |(_, hidden)| hidden), count);
+        }
+    }
+
+    #[test]
+    fn cards_fade_with_depth_until_fanned_out() {
+        let rest: Vec<_> = (0..4).map(|order| opacity(order, 4, 0.)).collect();
+        assert_eq!(rest, DEPTH_FADE);
+        assert_eq!(opacity(3, 6, 0.), 0.);
+        assert!((0..12).all(|order| opacity(order, 12, 1.) == 1.));
+        assert_eq!(opacity(5, 12, 0.5), 0.5);
+    }
+
+    #[test]
+    fn panes_left_out_come_from_behind_the_last_card() {
+        let rest = deck(FRONT, 6, 0, 1., ROW_MAX, chip_size(6), at_rest).icons;
+        let opening = deck(FRONT, 6, 0, 1., ROW_MAX, chip_size(6), |_| (0.01, 0.)).icons;
+        assert_eq!(opening.len(), 6);
+        let last = rest[0].1;
+        for &(_, icon) in &opening[..3] {
+            assert!((icon.center().0 - last.center().0).abs() <= 1., "{icon:?} {last:?}");
+        }
     }
 
     #[test]
@@ -948,6 +1155,29 @@ mod tests {
     }
 
     #[test]
+    fn fanned_rows_wrap_into_a_shelf() {
+        for (count, row) in [(6, 8), (12, 8), (40, 8), (12, 3), (5, 1)] {
+            let icons = deck(FRONT, count, 0, 1., row, chip_size(count), fanned).icons;
+            assert_eq!(icons.len(), count);
+            let mut rows: Vec<Vec<Rect>> = Vec::new();
+            // From the front, in reading order.
+            for &(_, icon) in icons.iter().rev() {
+                match rows.last_mut().filter(|line| line[0].y == icon.y) {
+                    Some(line) => line.push(icon),
+                    None => rows.push(vec![icon]),
+                }
+            }
+            assert_eq!(rows.len(), count.div_ceil(row), "{count} {row}");
+            for (index, line) in rows.iter().enumerate() {
+                assert!(line.len() <= row);
+                assert_eq!(line[0].x, FRONT.x);
+                assert_eq!(line[0].y - rows[0][0].y, index as f32 * ROW_PITCH);
+                assert!(line.windows(2).all(|pair| pair[1].x - pair[0].x == PITCH));
+            }
+        }
+    }
+
+    #[test]
     fn stack_scales() {
         let front = Rect::new(100., 30., 36., 36.);
         let icons = stack(front, 2, 0, 2., at_rest);
@@ -958,40 +1188,68 @@ mod tests {
     #[test]
     fn icons_are_hit_front_first() {
         let icons = stack(FRONT, 3, 0, 1., at_rest);
-        assert_eq!(icon_at(&icons, 99.), None);
-        assert_eq!(icon_at(&icons, 100.), Some(0));
-        assert_eq!(icon_at(&icons, 117.), Some(0));
-        assert_eq!(icon_at(&icons, 120.), Some(1));
-        assert_eq!(icon_at(&icons, 128.), Some(2));
-        assert_eq!(icon_at(&icons, 130.), None);
+        let at = |x: f32| icon_at(&icons, (x, MIDDLE));
+        assert_eq!(at(99.), None);
+        assert_eq!(at(100.), Some(0));
+        assert_eq!(at(117.), Some(0));
+        assert_eq!(at(120.), Some(1));
+        assert_eq!(at(128.), Some(2));
+        assert_eq!(at(130.), None);
     }
 
     #[test]
     fn icon_entered_at_rest_stays_under_a_still_pointer() {
-        for scale in [1f32, 1.25, 2.] {
-            let front = Rect::new(100., 15., (18. * scale).round(), 18.);
-            let rest = stack(front, 4, 1, scale, at_rest);
-            let fanned = stack(front, 4, 1, scale, |_| (1., 0.));
-            let left = rest.last().unwrap().1.x;
-            let end = rest.iter().map(|(_, rect)| rect.right()).fold(f32::MIN, f32::max);
-            for x in (left as i32..end as i32).map(|x| x as f32 + 0.5) {
-                let pane = icon_at(&fanned, x).unwrap();
-                // Lifting the icon picked keeps it the one under the pointer.
-                let lifted = stack(front, 4, 1, scale, |p| (1., f32::from(p == pane)));
-                assert_eq!(icon_at(&lifted, x), Some(pane), "{scale} {x}");
+        for count in [4, 6, 12] {
+            for scale in [1f32, 1.25, 2.] {
+                let front = Rect::new(100., 15., (18. * scale).round(), 18.);
+                let middle = front.center().1;
+                let size = (chip_size(count).0 * scale, chip_size(count).1 * scale);
+                let rest = deck(front, count, 1, scale, ROW_MAX, size, at_rest);
+                let fanned = stack(front, count, 1, scale, fanned);
+                let left = rest.icons.last().unwrap().1.x;
+                for x in (left as i32..rest.end() as i32).map(|x| x as f32 + 0.5) {
+                    let pane = icon_at(&fanned, (x, middle)).unwrap();
+                    // Lifting the icon picked keeps it the one under the pointer.
+                    let lifted = stack(front, count, 1, scale, |p| (1., f32::from(p == pane)));
+                    assert_eq!(icon_at(&lifted, (x, middle)), Some(pane), "{count} {scale} {x}");
+                }
             }
         }
     }
 
     #[test]
     fn fanned_icons_are_hit_without_gaps() {
-        let icons = stack(FRONT, 3, 0, 1., |_| (1., 0.));
+        let icons = stack(FRONT, 3, 0, 1., fanned);
+        let at = |x: f32| icon_at(&icons, (x, MIDDLE));
         let (back, middle, front) = (icons[0].1, icons[1].1, icons[2].1);
-        assert_eq!(icon_at(&icons, front.x), Some(0));
+        assert_eq!(at(front.x), Some(0));
         // Between two icons the nearer one is hit.
-        assert_eq!(icon_at(&icons, front.right() + 1.), Some(0));
-        assert_eq!(icon_at(&icons, middle.x - 1.), Some(1));
-        assert_eq!(icon_at(&icons, back.right() - 1.), Some(2));
-        assert_eq!(icon_at(&icons, back.right()), None);
+        assert_eq!(at(front.right() + 1.), Some(0));
+        assert_eq!(at(middle.x - 1.), Some(1));
+        assert_eq!(at(back.right() - 1.), Some(2));
+        assert_eq!(at(back.right()), None);
+    }
+
+    #[test]
+    fn shelf_icons_are_hit_without_gaps() {
+        let icons =
+            deck(FRONT, 12, 0, 1., ROW_MAX, chip_size(12), |pane| (1., f32::from(pane == 9))).icons;
+        // Each icon is hit at its center, the lifted one too.
+        for &(pane, icon) in &icons {
+            assert_eq!(icon_at(&icons, icon.center()), Some(pane));
+        }
+        // Every point of the shelf picks an icon of the row nearest it, short rows included.
+        let (left, right) = extent(&icons);
+        let bottom = icons.iter().map(|(_, icon)| icon.bottom()).fold(f32::MIN, f32::max);
+        for y in (9..bottom as i32 + 4).map(|y| y as f32 + 0.5) {
+            for x in (left as i32..right as i32).map(|x| x as f32 + 0.5) {
+                let pane = icon_at(&icons, (x, y)).unwrap();
+                let row = if y < MIDDLE + ROW_PITCH / 2. { 0 } else { 1 };
+                // The lifted icon reaches a little further into the gap between the rows.
+                if (y - MIDDLE - ROW_PITCH / 2.).abs() > 3. {
+                    assert_eq!(pane / ROW_MAX, row, "{x} {y}");
+                }
+            }
+        }
     }
 }
