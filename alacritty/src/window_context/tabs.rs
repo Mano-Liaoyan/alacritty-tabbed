@@ -1415,7 +1415,7 @@ pub fn split(
         split::MIN_COLUMNS * size.cell_width() + 2. * size.padding_x(),
         split::MIN_LINES * size.cell_height() + 2. * size.padding_y(),
     );
-    if !split::fits(tabs.focused_rect(), axis, min) {
+    if !split::fits(tabs.focused_rect(), axis, side, &Split::Pane(()), min) {
         return false;
     }
 

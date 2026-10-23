@@ -166,10 +166,22 @@ pub fn drop_zone(pane: Rect, (x, y): (f32, f32)) -> (Axis, Side) {
     if dx.abs() >= dy.abs() { (Axis::Row, side(dx)) } else { (Axis::Column, side(dy)) }
 }
 
-/// Whether `pane` can be split along `axis` with both halves at least `min` pixels in size.
-pub fn fits(pane: Rect, axis: Axis, min: (f32, f32)) -> bool {
+/// Whether `new` can go on `side` of `pane` along `axis` with every pane at least `min` pixels
+/// in size, those of `new` included.
+pub fn fits<P: Copy + PartialEq>(
+    pane: Rect,
+    axis: Axis,
+    side: Side,
+    new: &Split<P>,
+    min: (f32, f32),
+) -> bool {
     let (a, b) = halves(pane, axis, 0.5);
-    [a, b].iter().all(|half| half.w >= min.0 && half.h >= min.1)
+    let (old, area) = match side {
+        Side::Before => (b, a),
+        Side::After => (a, b),
+    };
+    let rects = new.rects(area).into_iter().map(|(_, rect)| rect);
+    [old].into_iter().chain(rects).all(|rect| rect.w >= min.0 && rect.h >= min.1)
 }
 
 #[cfg(test)]
@@ -298,9 +310,22 @@ mod tests {
     #[test]
     fn fits_refuses_small_halves() {
         let pane = Rect::new(0., 0., 400., 200.);
-        assert!(fits(pane, Axis::Row, (200., 200.)));
-        assert!(!fits(pane, Axis::Row, (201., 10.)));
-        assert!(fits(pane, Axis::Column, (400., 100.)));
-        assert!(!fits(pane, Axis::Column, (10., 101.)));
+        let new = Split::Pane(9);
+        assert!(fits(pane, Axis::Row, Side::After, &new, (200., 200.)));
+        assert!(!fits(pane, Axis::Row, Side::After, &new, (201., 10.)));
+        assert!(fits(pane, Axis::Column, Side::Before, &new, (400., 100.)));
+        assert!(!fits(pane, Axis::Column, Side::Before, &new, (10., 101.)));
+    }
+
+    #[test]
+    fn fits_refuses_small_panes_of_a_group() {
+        let pane = Rect::new(0., 0., 400., 200.);
+        let group = pair(Axis::Row, Split::Pane(8), Split::Pane(9));
+        // Each half has room for one pane, but not for the group's two side by side.
+        assert!(!fits(pane, Axis::Row, Side::After, &group, (150., 50.)));
+        assert!(fits(pane, Axis::Row, Side::After, &group, (100., 50.)));
+        // Docked above, its panes share the half's whole width.
+        assert!(fits(pane, Axis::Column, Side::Before, &group, (150., 50.)));
+        assert!(!fits(pane, Axis::Column, Side::Before, &group, (150., 101.)));
     }
 }
