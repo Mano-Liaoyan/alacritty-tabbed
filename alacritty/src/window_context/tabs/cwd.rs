@@ -392,6 +392,12 @@ pub fn mark(options: &mut alacritty_terminal::tty::Options) -> String {
     marker::mark(&mut options.env)
 }
 
+/// The marker [`mark`] gave the pane started with `options`.
+#[cfg(windows)]
+pub fn marked(options: &alacritty_terminal::tty::Options) -> Option<String> {
+    options.env.get(marker::VARIABLE).cloned()
+}
+
 /// Tie the `marker` of a pane to the process id of its shell.
 #[cfg(windows)]
 pub fn register(pid: u32, marker: String) {

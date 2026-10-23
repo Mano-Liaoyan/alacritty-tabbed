@@ -23,6 +23,7 @@ mod divider;
 mod dnd;
 mod fonts;
 mod fullscreen;
+pub mod hooks;
 mod icons;
 mod job;
 mod paint;
@@ -96,8 +97,6 @@ use app_settings::AppSettings;
 use bar::{BAR, Hit, INSET, Layout, MARGIN};
 use dnd::{Drag, Source, Target};
 use paint::Image;
-#[cfg(windows)]
-pub use cwd::{mark as mark_pane, register as register_pane};
 pub use fullscreen::FullscreenState;
 pub use paint::Rect;
 use panes::Control;
