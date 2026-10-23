@@ -154,8 +154,8 @@ enum Target {
     Opacity,
     /// Slider of the space between panes.
     Gap,
-    /// Scrollbar of the card, by its thumb or its track.
-    Scrollbar,
+    /// Scrollbar of the card or of a list, by its thumb or its track.
+    Scrollbar(Bar),
     /// Well of the focused pane's highlight, which opens the color picker.
     Well,
     Picker(Part),
@@ -608,6 +608,66 @@ fn scrolled_to(track: Rect, height: f32, top: f32, scroll_max: f32) -> f32 {
     ((top - track.y) / room).clamp(0., 1.) * scroll_max
 }
 
+/// What a scrollbar scrolls.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Bar {
+    /// The card's fields, by pixels.
+    Card,
+    /// The font list, by rows.
+    Fonts,
+    /// The logo picker, by rows of cells.
+    Logos,
+}
+
+/// A scrollbar: its track and thumb, the band along it that takes the pointer for it, and how
+/// far its view scrolls at most.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Scrollbar {
+    track: Rect,
+    thumb: Rect,
+    band: Rect,
+    max: f32,
+}
+
+impl Scrollbar {
+    /// The scrollbar along `track`, taking the pointer in a band `band` wide ending at its right
+    /// edge `right`, for a view `view` long scrolled by `scrolled` of at most `max`, with a thumb
+    /// at least `least` long; none when the view does not scroll.
+    fn new(
+        track: Rect,
+        right: f32,
+        band: f32,
+        view: f32,
+        scrolled: f32,
+        max: f32,
+        least: f32,
+    ) -> Option<Self> {
+        (max > 0.).then(|| Scrollbar {
+            track,
+            thumb: thumb(track, view, scrolled, max, least),
+            band: Rect { x: right - band, w: band, ..track },
+            max,
+        })
+    }
+
+    /// Pointer offset from the thumb's top to drag it by, for a press at `y`: where the thumb
+    /// was grabbed, or its middle for a press on the track, which brings the thumb there.
+    fn grab(&self, y: f32) -> f32 {
+        let on_thumb = (self.thumb.y..self.thumb.bottom()).contains(&y);
+        if on_thumb { y - self.thumb.y } else { self.thumb.h / 2. }
+    }
+
+    /// How far to scroll with the pointer at `y`, `grab` below the top of the dragged thumb.
+    fn scrolled(&self, y: f32, grab: f32) -> f32 {
+        scrolled_to(self.track, self.thumb.h, y - grab, self.max)
+    }
+
+    /// The first of the rows scrolled to with the pointer at `y`, for a list scrolled by rows.
+    fn first_row(&self, y: f32, grab: f32) -> usize {
+        self.scrolled(y, grab).round() as usize
+    }
+}
+
 /// A sidebar row being dragged to a new position.
 struct Drag {
     /// Pointer offset from the row's top edge.
@@ -652,9 +712,8 @@ struct Panel {
     /// How far the fields are scrolled, and can be.
     scrolled: f32,
     scroll_max: f32,
-    /// The scrollbar's track and thumb, and the band along the card's edge that takes the
-    /// pointer for it, where the card scrolls.
-    scrollbar: Option<(Rect, Rect, Rect)>,
+    /// The card's scrollbar, along its edge, where it scrolls.
+    scrollbar: Option<Scrollbar>,
     tile: Rect,
     /// Geometry of the application's page shown.
     settings: Option<RowsPanel>,
@@ -664,8 +723,12 @@ struct Panel {
     status: Rect,
     /// The font list, its rows' area and the height of a row.
     font_list: Option<(Rect, Rect, f32)>,
+    /// The font list's scrollbar, where it has more fonts than it shows.
+    font_bar: Option<Scrollbar>,
     /// The logo picker, its cells' area, the size of a cell and the cells in a row.
     logos: Option<(Rect, Rect, f32, usize)>,
+    /// The logo picker's scrollbar, where it has more rows than it shows.
+    logo_bar: Option<Scrollbar>,
     /// The color picker, dropped from its well.
     picker: Option<picker::Parts>,
 }
@@ -680,6 +743,17 @@ struct RowsPanel {
     rows: Vec<(Row, Rect, Rect)>,
     /// Text under the choices of restoring the session.
     note: Option<Rect>,
+}
+
+impl Panel {
+    /// The scrollbar of `bar`, while it shows.
+    fn bar(&self, bar: Bar) -> Option<Scrollbar> {
+        match bar {
+            Bar::Card => self.scrollbar,
+            Bar::Fonts => self.font_bar,
+            Bar::Logos => self.logo_bar,
+        }
+    }
 }
 
 impl RowsPanel {
@@ -1120,12 +1194,13 @@ impl Settings {
 
         // The font list drops from its field, or rises above it when there is more room there.
         let font = fields[self.font_field().unwrap_or(Field::Font).index()];
-        let font_list = self.font_list().map(|_| {
+        let candidates = self.font_list().map(|_| self.candidates().len());
+        let font_list = candidates.map(|candidates| {
             let row = px(28.).max(ch + px(8.));
             let below = viewport.bottom() - font.bottom() - px(16.);
             let above = font.y - viewport.y - px(16.);
             let space = (below.max(above) / row).max(1.) as usize;
-            let rows = self.candidates().len().clamp(1, FONT_ROWS.min(space));
+            let rows = candidates.clamp(1, FONT_ROWS.min(space));
             let list_height = rows as f32 * row + px(12.);
             let top = if below >= list_height || below >= above {
                 font.bottom() + px(4.)
@@ -1135,6 +1210,16 @@ impl Settings {
             let list = Rect::new(font.x, top, font.w, list_height);
             (list, list.inset(px(6.)), row)
         });
+
+        let font_bar = self.font_list().zip(font_list).zip(candidates).and_then(
+            |((list, (rect, rows, row)), candidates)| {
+                let shown = (rows.h / row) as usize;
+                let max = candidates.saturating_sub(shown);
+                let track = Rect::new(rect.right() - px(5.), rows.y, px(3.), rows.h);
+                let (first, shown) = (list.first.min(max) as f32, shown as f32);
+                Scrollbar::new(track, rect.right(), px(12.), shown, first, max as f32, px(16.))
+            },
+        );
 
         // The logo picker drops from the profile's tile; the tab bar logo's opens beside its well,
         // left of the rows' controls, so it covers neither. Both are kept inside the dialog.
@@ -1162,6 +1247,15 @@ impl Settings {
                 Rect::new(left + px(6.), top + header, columns as f32 * cell, rows as f32 * cell);
             (picker, cells, cell, columns)
         });
+        let logo_bar = self.logos.as_ref().zip(logos).and_then(
+            |(picker, (rect, cells, cell, columns))| {
+                let rows = ((cells.h / cell).round() as usize).max(1);
+                let max = picker.kind.count().div_ceil(columns).saturating_sub(rows);
+                let track = Rect::new(rect.right() - px(5.), cells.y, px(3.), cells.h);
+                let (first, rows) = (picker.first.min(max) as f32, rows as f32);
+                Scrollbar::new(track, rect.right(), px(12.), rows, first, max as f32, px(16.))
+            },
+        );
 
         // The color picker drops from its well, or rises above it when there is no room below,
         // ending where the hex field does, kept inside the scrolling fields.
@@ -1178,12 +1272,10 @@ impl Settings {
         });
 
         // The fields scroll inside the card, above its buttons, with a scrollbar at its edge.
-        let scrollbar = (scroll_max > 0.).then(|| {
-            let track =
-                Rect::new(card.right() - px(7.), viewport.y + px(8.), px(3.), viewport.h - px(16.));
-            let band = Rect { x: card.right() - px(16.), w: px(16.), ..track };
-            (track, thumb(track, viewport.h, scrolled, scroll_max, px(16.)), band)
-        });
+        let track =
+            Rect::new(card.right() - px(7.), viewport.y + px(8.), px(3.), viewport.h - px(16.));
+        let scrollbar =
+            Scrollbar::new(track, card.right(), px(16.), viewport.h, scrolled, scroll_max, px(16.));
 
         Panel {
             dialog,
@@ -1205,7 +1297,9 @@ impl Settings {
             buttons,
             status,
             font_list,
+            font_bar,
             logos,
+            logo_bar,
             picker,
         }
     }
@@ -1216,6 +1310,9 @@ impl Settings {
         }
         if let (Some(picker), Some((rect, cells, cell, columns))) = (&self.logos, panel.logos) {
             if rect.contains(point) {
+                if panel.logo_bar.is_some_and(|bar| bar.band.contains(point)) {
+                    return Some(Target::Scrollbar(Bar::Logos));
+                }
                 let column = ((point.x as f32 - cells.x) / cell) as usize;
                 let row = picker.first + ((point.y as f32 - cells.y) / cell) as usize;
                 let index = row * columns + column;
@@ -1225,13 +1322,16 @@ impl Settings {
         }
         if let (Some(list), Some((rect, rows, row))) = (self.font_list(), panel.font_list) {
             if rect.contains(point) {
+                if panel.font_bar.is_some_and(|bar| bar.band.contains(point)) {
+                    return Some(Target::Scrollbar(Bar::Fonts));
+                }
                 let index = list.first + ((point.y as f32 - rows.y) / row).max(0.) as usize;
                 return (rows.contains(point) && index < self.candidates().len())
                     .then_some(Target::Font(index));
             }
         }
-        if panel.scrollbar.is_some_and(|(.., band)| band.contains(point)) {
-            return Some(Target::Scrollbar);
+        if panel.scrollbar.is_some_and(|bar| bar.band.contains(point)) {
+            return Some(Target::Scrollbar(Bar::Card));
         }
         // What scrolls with the fields can only be reached where they show.
         let shown = |target: Target| !target.scrolls() || panel.viewport.contains(point);
@@ -1463,16 +1563,26 @@ impl Settings {
     }
 
     /// Set the value of the slider being dragged to where the pointer is along it, or scroll
-    /// the card to where its scrollbar's thumb is dragged.
+    /// the card or the list to where its scrollbar's thumb is dragged.
     fn slide(&mut self, panel: &Panel, layout: &Layout) {
         let (x, y) = (self.pointer.x as f32, self.pointer.y as f32);
         let row = match self.sliding {
             Some(Target::Opacity) => Row::Opacity,
             Some(Target::Gap) => Row::Gap,
-            Some(Target::Scrollbar) => {
-                if let Some((track, thumb, _)) = panel.scrollbar {
-                    let top = y - self.thumb_grab;
-                    self.card_scroll = scrolled_to(track, thumb.h, top, panel.scroll_max);
+            Some(Target::Scrollbar(bar)) => {
+                let (Some(scrollbar), grab) = (panel.bar(bar), self.thumb_grab) else { return };
+                match bar {
+                    Bar::Card => self.card_scroll = scrollbar.scrolled(y, grab),
+                    Bar::Fonts => {
+                        if let Some(list) = &mut self.font_list {
+                            list.first = scrollbar.first_row(y, grab);
+                        }
+                    },
+                    Bar::Logos => {
+                        if let Some(picker) = &mut self.logos {
+                            picker.first = scrollbar.first_row(y, grab);
+                        }
+                    },
                 }
                 return;
             },
@@ -1587,7 +1697,11 @@ impl Settings {
             }
         }
         let target = self.target(&panel, point);
-        if !matches!(target, Some(Target::Logo(_) | Target::Tile | Target::Brand)) {
+        let logos = matches!(
+            target,
+            Some(Target::Logo(_) | Target::Scrollbar(Bar::Logos) | Target::Tile | Target::Brand)
+        );
+        if !logos {
             self.logos = None;
         }
         // A click elsewhere closes the color picker, but for typing its color.
@@ -1643,11 +1757,9 @@ impl Settings {
             },
             // The thumb is dragged from where it was pressed; a press on the track moves the
             // thumb's middle there first.
-            Target::Scrollbar => {
-                let Some((_, thumb, _)) = panel.scrollbar else { return false };
-                let y = point.y as f32;
-                let on_thumb = (thumb.y..thumb.bottom()).contains(&y);
-                self.thumb_grab = if on_thumb { y - thumb.y } else { thumb.h / 2. };
+            Target::Scrollbar(bar) => {
+                let Some(scrollbar) = panel.bar(bar) else { return false };
+                self.thumb_grab = scrollbar.grab(point.y as f32);
                 self.sliding = Some(target);
                 self.slide(&panel, layout);
             },
@@ -2645,12 +2757,8 @@ impl Settings {
 
         // The fields scroll inside the card, above its buttons; the thumb lights up under the
         // pointer and while it is dragged.
-        if let Some((_, thumb, _)) = panel.scrollbar {
-            let lit =
-                self.hover == Some(Target::Scrollbar) || self.sliding == Some(Target::Scrollbar);
-            let color =
-                if lit { mix(palette.muted, palette.foreground, 0.5) } else { palette.muted };
-            content.rounded(thumb, layout.radius(1.5), color);
+        if let Some(bar) = panel.scrollbar {
+            content.rounded(bar.thumb, layout.radius(1.5), self.thumb_color(Bar::Card, palette));
         }
         let viewport = panel.viewport;
         content.clip(
@@ -2703,11 +2811,8 @@ impl Settings {
                 }
             }
 
-            if candidates.len() > shown {
-                let track = Rect::new(rect.right() - px(5.), rows.y, px(3.), rows.h);
-                let h = (track.h * shown as f32 / candidates.len() as f32).max(px(16.));
-                let y = track.y + (track.h - h) * first as f32 / (candidates.len() - shown) as f32;
-                popup.rounded(Rect::new(track.x, y, track.w, h), layout.radius(1.5), palette.muted);
+            if let Some(bar) = panel.font_bar {
+                popup.rounded(bar.thumb, layout.radius(1.5), self.thumb_color(Bar::Fonts, palette));
             }
             if candidates.is_empty() {
                 let message = if self.listing.is_some() {
@@ -2777,11 +2882,8 @@ impl Settings {
                     },
                 }
             }
-            if total > rows {
-                let track = Rect::new(rect.right() - px(5.), cells.y, px(3.), cells.h);
-                let h = (track.h * rows as f32 / total as f32).max(px(16.));
-                let y = track.y + (track.h - h) * first as f32 / (total - rows) as f32;
-                popup.rounded(Rect::new(track.x, y, track.w, h), layout.radius(1.5), palette.muted);
+            if let Some(bar) = panel.logo_bar {
+                popup.rounded(bar.thumb, layout.radius(1.5), self.thumb_color(Bar::Logos, palette));
             }
         }
         if let (Some(picker), Some(parts)) = (&self.picker, panel.picker) {
@@ -2793,6 +2895,13 @@ impl Settings {
         }
         popup.clip(panel.dialog, ch);
         vec![layer, content, popup]
+    }
+
+    /// Color of the thumb of `bar`'s scrollbar, lit under the pointer and while it is dragged.
+    fn thumb_color(&self, bar: Bar, palette: &Palette) -> Rgb {
+        let target = Some(Target::Scrollbar(bar));
+        let lit = self.hover == target || self.sliding == target;
+        if lit { mix(palette.muted, palette.foreground, 0.5) } else { palette.muted }
     }
 
     /// What an empty field stands for.
@@ -3012,9 +3121,10 @@ mod tests {
         let config = UiConfig::default();
         let mut settings = Settings::new(&config, Page::Appearance, || ());
         let panel = settings.panel(&layout);
-        let (track, thumb, band) = panel.scrollbar.expect("the page scrolls in a short window");
-        let x = band.center().0;
-        assert_eq!(settings.target(&panel, at(x, thumb.center().1)), Some(Target::Scrollbar));
+        let bar = panel.scrollbar.expect("the page scrolls in a short window");
+        let (track, thumb, x) = (bar.track, bar.thumb, bar.band.center().0);
+        let target = settings.target(&panel, at(x, thumb.center().1));
+        assert_eq!(target, Some(Target::Scrollbar(Bar::Card)));
 
         // The thumb keeps where it was grabbed, even dragged far off the scrollbar.
         settings.press(&layout, at(x, thumb.y + 2.), MouseButton::Left, &config, || ());
@@ -3031,6 +3141,86 @@ mod tests {
         settings.press(&layout, at(x, track.y + 1.), MouseButton::Left, &config, || ());
         settings.release();
         assert_eq!(settings.card_scroll, 0.);
+    }
+
+    #[test]
+    fn scrollbars_take_the_pointer_by_thumb_or_track() {
+        let track = Rect::new(0., 100., 3., 400.);
+        assert_eq!(Scrollbar::new(track, 10., 12., 50., 0., 0., 16.), None);
+        let bar = Scrollbar::new(track, 10., 12., 300., 150., 300., 16.).unwrap();
+        assert_eq!((bar.band.x, bar.band.w, bar.band.y, bar.band.h), (-2., 12., 100., 400.));
+        assert_eq!((bar.thumb.y, bar.thumb.h), (200., 200.));
+        // On the thumb, it keeps where it was grabbed; on the track, the middle comes there.
+        assert_eq!(bar.grab(210.), 10.);
+        assert_eq!(bar.grab(450.), 100.);
+        assert_eq!(bar.scrolled(210., bar.grab(210.)), 150.);
+        assert_eq!(bar.scrolled(150., bar.grab(150.)), 0.);
+        // Lists scroll by whole rows, and no further than their ends.
+        let rows = Scrollbar::new(track, 10., 12., 8., 0., 92., 16.).unwrap();
+        assert_eq!(rows.first_row(-1000., 0.), 0);
+        assert_eq!(rows.first_row(1000., 0.), 92);
+        let halfway = track.y + (track.h - rows.thumb.h) / 2.;
+        assert_eq!(rows.first_row(halfway, 0.), 46);
+    }
+
+    #[test]
+    fn font_list_scrollbar_follows_a_drag_until_released() {
+        let Some(layout) = layout(1200, 1000) else { return };
+        let config = UiConfig::default();
+        let mut settings = Settings::new(&config, Page::Appearance, || ());
+        settings.fonts =
+            (0..200).map(|i| Family { name: format!("Font {i:03}"), mono: false }).collect();
+        settings.focus(Field::UiFont);
+        settings.font_list.as_mut().unwrap().first = 0;
+        let panel = settings.panel(&layout);
+        let bar = panel.font_bar.expect("200 fonts do not fit the list");
+        let (x, max) = (bar.band.center().0, bar.max as usize);
+        let target = settings.target(&panel, at(x, bar.thumb.center().1));
+        assert_eq!(target, Some(Target::Scrollbar(Bar::Fonts)));
+        let first = |settings: &Settings| settings.font_list().unwrap().first;
+
+        // The drag goes on past the list and the dialog, and keeps the list open.
+        settings.press(&layout, at(x, bar.thumb.y + 2.), MouseButton::Left, &config, || ());
+        assert_eq!(first(&settings), 0);
+        settings.moved(&layout, at(x - 800., 10_000.));
+        assert_eq!(first(&settings), max);
+        settings.moved(&layout, at(x + 800., -10_000.));
+        assert_eq!(first(&settings), 0);
+        settings.release();
+        settings.moved(&layout, at(x, bar.track.bottom()));
+        assert_eq!(first(&settings), 0);
+        assert_eq!(settings.focus, Some(Field::UiFont));
+
+        // A press on the track brings the thumb's middle there.
+        settings.press(&layout, at(x, bar.track.bottom() - 1.), MouseButton::Left, &config, || ());
+        settings.release();
+        assert_eq!(first(&settings), max);
+    }
+
+    #[test]
+    fn logo_picker_scrollbar_follows_a_drag_until_released() {
+        let Some(layout) = layout(1200, 400) else { return };
+        let config = UiConfig::default();
+        let mut settings = Settings::new(&config, Page::Appearance, || ());
+        settings.open_logos(Logos::Brand, &layout);
+        settings.logos.as_mut().unwrap().first = 0;
+        let panel = settings.panel(&layout);
+        let bar = panel.logo_bar.expect("the logos do not fit a short window");
+        let (x, max) = (bar.band.center().0, bar.max as usize);
+        let target = settings.target(&panel, at(x, bar.thumb.center().1));
+        assert_eq!(target, Some(Target::Scrollbar(Bar::Logos)));
+        let first = |settings: &Settings| settings.logos.as_ref().unwrap().first;
+
+        settings.press(&layout, at(x, bar.thumb.y + 2.), MouseButton::Left, &config, || ());
+        settings.moved(&layout, at(-500., 10_000.));
+        assert_eq!(first(&settings), max);
+        settings.release();
+        settings.moved(&layout, at(x, bar.track.y));
+        assert_eq!(first(&settings), max);
+
+        settings.press(&layout, at(x, bar.track.y + 1.), MouseButton::Left, &config, || ());
+        settings.release();
+        assert_eq!(first(&settings), 0);
     }
 
     #[test]
