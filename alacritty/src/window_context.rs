@@ -322,7 +322,7 @@ impl WindowContext {
         self.display.window.set_option_as_alt(self.config.window.option_as_alt());
 
         // Change opacity and blur state.
-        self.display.window.set_transparent(!opaque);
+        self.display.window.set_transparent(!opaque || self.display.tabs.transparent());
         self.display.window.set_blur(self.config.window.blur);
 
         // Update hint keys.

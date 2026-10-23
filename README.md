@@ -30,8 +30,12 @@ icon theme's logo on Linux, preferring SVG; the application's icon on macOS.
 About 40 common shells, tools, languages and WSL distributions have bundled logos
 where the system has none, and other programs get a terminal. A profile can set its own SVG or PNG, or an emoji.
 
-**Settings panel.** The gear opens the profile settings: name, icon, command
-line, starting directory, font, environment variables, configuration overrides,
+**Settings panel.** Like Windows Terminal's, the settings list the
+application's pages above the profiles. The gear opens **Appearance**: the
+corners, the interface font and its size, and the background opacity, saved to
+`alacritty.toml` (changing only those keys, and keeping its comments) and
+applied to every window. "Edit profiles…" in the ⌄ menu opens the profiles:
+name, icon, command line, starting directory, font, environment variables, configuration overrides,
 the default profile, and whether a profile shows in the menu. The font field
 lists the system's monospaced fonts as you type; "Show all fonts" lists every
 font. Clicking the profile's icon picks one of the bundled logos, and Browse
@@ -47,13 +51,29 @@ interface font of their own, apart from the terminal's font: the system's
 interface font on macOS (San Francisco, else Helvetica Neue) and Windows
 (Segoe UI), and on Linux the first installed of Inter, Adwaita Sans, Noto Sans
 and other common interface fonts. Emphasized text uses the family's SemiBold or Medium face when it has
-one. Choose another family or size in `alacritty.toml`; changes apply live:
+one. Choose another family or size under Appearance in the settings, or in
+`alacritty.toml`; changes apply live:
 
 ```toml
 [window.ui_font]
 family = "Inter"  # Empty picks the system's interface font.
 size = 10         # Points; the default is 10, or 13 on macOS.
 ```
+
+**Corners.** The window, the terminal's panel, the tab track, the tabs, the
+buttons and the settings are all rounded, with radii that nest: each surface
+inside another is rounded by the outer radius less the space between them, so
+their curves run parallel. Or make every corner square, under Appearance in the
+settings or in `alacritty.toml`; changes apply live:
+
+```toml
+[window]
+corners = "square"  # "round" (default) or "square".
+```
+
+On Linux, round window corners are cut out of the window, which needs a
+compositor; without one, choose square corners. Windows rounds the window
+itself, and macOS always does.
 
 ## Disable
 

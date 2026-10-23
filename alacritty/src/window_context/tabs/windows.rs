@@ -28,8 +28,8 @@ use windows_sys::Win32::UI::Shell::{
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     DestroyIcon, GetIconInfo, HICON, ICONINFO, IMAGE_ICON, LR_LOADFROMFILE, LoadImageW,
 };
-use winit::platform::windows::{CornerPreference, WindowAttributesExtWindows};
-use winit::window::WindowAttributes;
+use winit::platform::windows::{CornerPreference, WindowAttributesExtWindows, WindowExtWindows};
+use winit::window::{Window, WindowAttributes};
 
 use super::paint::Image;
 use super::profiles::Profile;
@@ -40,6 +40,12 @@ pub fn attributes(attributes: WindowAttributes) -> WindowAttributes {
         .with_decorations(false)
         .with_undecorated_shadow(true)
         .with_corner_preference(CornerPreference::Round)
+}
+
+/// Have the system round the window's corners, or keep them square.
+pub fn round(window: &Window, round: bool) {
+    let corners = if round { CornerPreference::Round } else { CornerPreference::DoNotRound };
+    window.set_corner_preference(corners);
 }
 
 pub fn hostname() -> String {

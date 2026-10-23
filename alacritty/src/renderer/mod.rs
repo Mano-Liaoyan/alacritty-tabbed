@@ -258,6 +258,25 @@ impl Renderer {
 
     /// Draw all rectangles simultaneously to prevent excessive program swaps.
     pub fn draw_rects(&mut self, size_info: &SizeInfo, metrics: &Metrics, rects: Vec<RenderRect>) {
+        let blend = [gl::SRC_ALPHA, gl::ONE_MINUS_SRC_ALPHA, gl::SRC_ALPHA, gl::ONE];
+        self.draw_rects_blended(size_info, metrics, rects, blend);
+    }
+
+    /// Multiply what was drawn under the rectangles, alpha included, by their alpha, which makes
+    /// the window transparent where it is zero.
+    pub fn mask_rects(&mut self, size_info: &SizeInfo, metrics: &Metrics, rects: Vec<RenderRect>) {
+        let blend = [gl::ZERO, gl::SRC_ALPHA, gl::ZERO, gl::SRC_ALPHA];
+        self.draw_rects_blended(size_info, metrics, rects, blend);
+    }
+
+    /// Draw rectangles with the factors of `glBlendFuncSeparate`.
+    fn draw_rects_blended(
+        &mut self,
+        size_info: &SizeInfo,
+        metrics: &Metrics,
+        rects: Vec<RenderRect>,
+        [src_rgb, dst_rgb, src_alpha, dst_alpha]: [u32; 4],
+    ) {
         if rects.is_empty() {
             return;
         }
@@ -266,7 +285,7 @@ impl Renderer {
         unsafe {
             // Remove padding from viewport.
             gl::Viewport(0, 0, size_info.width() as i32, size_info.height() as i32);
-            gl::BlendFuncSeparate(gl::SRC_ALPHA, gl::ONE_MINUS_SRC_ALPHA, gl::SRC_ALPHA, gl::ONE);
+            gl::BlendFuncSeparate(src_rgb, dst_rgb, src_alpha, dst_alpha);
         }
 
         self.rect_renderer.draw(size_info, metrics, rects);

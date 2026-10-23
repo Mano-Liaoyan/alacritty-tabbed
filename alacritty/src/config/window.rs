@@ -33,6 +33,9 @@ pub struct WindowConfig {
     /// Font of the tab bar, its menus and the settings, apart from the terminal's.
     pub ui_font: UiFont,
 
+    /// Corners of the window, the terminal's panel, the tabs and the controls, all alike.
+    pub corners: Corners,
+
     /// XEmbed parent.
     #[config(skip)]
     #[serde(skip_serializing)]
@@ -88,6 +91,7 @@ impl Default for WindowConfig {
             startup_mode: Default::default(),
             tabs: true,
             ui_font: Default::default(),
+            corners: Default::default(),
             dynamic_padding: Default::default(),
             resize_increments: Default::default(),
             decorations_theme_variant: Default::default(),
@@ -194,6 +198,13 @@ impl Default for Identity {
     fn default() -> Self {
         Self { title: DEFAULT_NAME.into(), class: Default::default() }
     }
+}
+
+#[derive(ConfigDeserialize, Serialize, Default, Debug, Copy, Clone, PartialEq, Eq)]
+pub enum Corners {
+    #[default]
+    Round,
+    Square,
 }
 
 #[derive(ConfigDeserialize, Serialize, Default, Debug, Copy, Clone, PartialEq, Eq)]
