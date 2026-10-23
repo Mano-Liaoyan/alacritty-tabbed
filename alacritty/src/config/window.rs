@@ -36,6 +36,12 @@ pub struct WindowConfig {
     /// Corners of the window, the terminal's panel, the tabs and the controls, all alike.
     pub corners: Corners,
 
+    /// Hold the terminal in a panel set in from the window's edges, instead of filling the window.
+    pub panel: bool,
+
+    /// Set the tabs on a track, instead of on the bar itself.
+    pub tab_track: bool,
+
     /// XEmbed parent.
     #[config(skip)]
     #[serde(skip_serializing)]
@@ -92,6 +98,8 @@ impl Default for WindowConfig {
             tabs: true,
             ui_font: Default::default(),
             corners: Default::default(),
+            panel: true,
+            tab_track: true,
             dynamic_padding: Default::default(),
             resize_increments: Default::default(),
             decorations_theme_variant: Default::default(),

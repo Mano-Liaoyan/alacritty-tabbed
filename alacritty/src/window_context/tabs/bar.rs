@@ -96,6 +96,8 @@ pub struct Layout {
     /// Whether corners are round.
     round: bool,
     border: f32,
+    /// Whether the terminal is held in a panel, with a margin around it.
+    panel: bool,
     pub height: f32,
     /// Distance between the left edges of neighbouring tabs.
     step: f32,
@@ -191,12 +193,13 @@ impl Layout {
 
         let brand = label.then(|| Rect::new(mark.right() + px(11.), 0., label_width, bar));
 
-        let card = if fullscreen {
-            Rect::new(0., bar, width, height - bar)
-        } else {
+        let panel = tabs.panel && !fullscreen;
+        let card = if panel {
             Rect::new(margin, bar, width - 2. * margin, height - bar - margin)
+        } else {
+            Rect::new(0., bar, width, height - bar)
         };
-        let terminal = if fullscreen { card } else { card.inset(px(INSET)) };
+        let terminal = if panel { card.inset(px(INSET)) } else { card };
 
         // The menu drops from the new-tab button over the terminal.
         let new = buttons.iter().find(|(hit, _)| *hit == Hit::New).map_or(track, |(_, rect)| *rect);
@@ -219,6 +222,7 @@ impl Layout {
             first,
             round: tabs.corners.unwrap_or_default() == Corners::Round,
             border,
+            panel,
             height,
             step,
             brand,
@@ -266,10 +270,10 @@ impl Layout {
         // Below the bar the whole margin around the panel resizes, and each corner reaches along
         // both edges, so diagonal resizing is as easy to grab as the edges.
         let border = self.border;
-        let edge = if border > 0. && y >= self.bar { border.max(self.px(MARGIN)) } else { border };
+        let margin = if self.panel { border.max(self.px(MARGIN)) } else { border };
+        let edge = if border > 0. && y >= self.bar { margin } else { border };
         let (left, right) = (x < edge, x >= self.width - edge);
-        let (top, bottom) =
-            (y < border, y >= self.height - border.max(self.px(MARGIN)) && border > 0.);
+        let (top, bottom) = (y < border, y >= self.height - margin && border > 0.);
         let corner = if border > 0. { self.px(24.) } else { 0. };
         let (near_left, near_right) = (x < corner, x >= self.width - corner);
         let (near_top, near_bottom) = (y < corner, y >= self.height - corner);
@@ -397,7 +401,7 @@ impl Tabs {
         // Chrome around the panel that holds the terminal.
         let card = layout.card;
         base.rect(Rect::new(0., 0., width, bar), palette.chrome);
-        if self.frame != Frame::Fullscreen {
+        if layout.panel {
             let chrome = palette.chrome;
             base.rect(Rect::new(0., bar, card.x, card.h + px(MARGIN)), chrome);
             base.rect(Rect::new(card.right(), bar, card.x, card.h + px(MARGIN)), chrome);
@@ -427,10 +431,11 @@ impl Tabs {
             }
         }
 
-        // Tabs on a track, the active one raised from it.
+        // Tabs on a track, or on the bar itself, the active one raised from it.
         let radius = layout.radius(TRACK_RADIUS);
-        let track = palette.track;
-        if !layout.tabs.is_empty() {
+        let on_track = config.window.tab_track;
+        let track = if on_track { palette.track } else { palette.chrome };
+        if on_track && !layout.tabs.is_empty() {
             base.outlined(layout.track, radius, track, palette.track_outline, line);
         }
         let lit = |index: usize| {
