@@ -2,7 +2,8 @@
 //!
 //! On the bar, dropping onto the middle of a tab groups with it, and dropping onto its edges puts
 //! the dragged tab, or a pane let out of its group, between tabs. Below the bar, dropping onto a
-//! pane docks beside it, on the side nearest the pointer.
+//! pane docks beside it, on the side nearest the pointer. Dropping outside the window tears it
+//! off into a window of its own.
 
 use std::mem;
 use std::rc::Rc;
@@ -18,14 +19,14 @@ use crate::window_context::WindowContext;
 use super::bar::{Hit, Layout};
 use super::paint::Rect;
 use super::split::{self, Axis, Side, Split};
-use super::{merge, min_pane, move_pane, redraw, reorder, select};
+use super::{merge, min_pane, move_pane, redraw, reorder, select, tear};
 
 /// What is being dragged.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Source {
     /// A tab, with all its panes.
     Tab(usize),
-    /// The pane at index `.1` of the tab at `.0`, by its icon in the bar.
+    /// The pane at index `.1` of the tab at `.0`, by its icon in the bar or the pane itself.
     Pane(usize, usize),
 }
 
@@ -41,14 +42,13 @@ pub enum Target {
     /// Make the pane a tab of its own, at this index.
     Detach(usize),
     /// Out of the window, into a window of its own.
-    #[allow(dead_code, reason = "tabs are torn off next")]
     Window,
 }
 
-/// A drag that started on the bar.
+/// A drag of a tab or a pane, from the bar or from a pane.
 pub struct Drag {
     pub source: Source,
-    /// Pointer offset from the dragged tab's left edge.
+    /// Pointer offset from the dragged tab's left edge, where the bar holds it.
     pub grab: f64,
     pub start: PhysicalPosition<f64>,
     /// Whether the pointer moved far enough to drag rather than click.
@@ -58,14 +58,19 @@ pub struct Drag {
     pub target: Option<Target>,
 }
 
-/// Where things can be dropped: the bar's tabs and the shown tab's panes.
+/// Where things can be dropped: the bar's tabs, the shown tab's panes and outside the window.
 struct Scene {
     /// Bottom of the bar.
     bar: f32,
+    /// The window below the bar, which a tab's panes share.
+    area: Rect,
     /// The tabs shown in the bar, by index, in order.
     tabs: Vec<(usize, Rect)>,
+    /// The layout of every tab, by index.
+    groups: Vec<Split<WindowId>>,
     /// The tab whose panes are shown.
     shown: usize,
+    /// The shown panes a dock may cut.
     panes: Vec<(usize, Rect)>,
     /// The panes a dock would add, as they are laid out.
     docked: Option<Split<WindowId>>,
@@ -73,6 +78,8 @@ struct Scene {
     min: (f32, f32),
     /// Pixels between neighbouring panes.
     spacing: f32,
+    /// Whether what is dragged may leave for a window of its own.
+    tear: bool,
 }
 
 impl Scene {
@@ -83,6 +90,11 @@ impl Scene {
             Source::Tab(tab) => (tab, None),
             Source::Pane(tab, pane) => (tab, Some(pane)),
         };
+
+        let area = self.area;
+        if x < area.x || y < 0. || x >= area.right() || y >= area.bottom() {
+            return self.tear.then_some(Target::Window);
+        }
 
         if y >= self.bar {
             let &(index, rect) = self.panes.iter().find(|(_, rect)| rect.contains(pointer))?;
@@ -104,7 +116,7 @@ impl Scene {
         let slot = match self.tabs.iter().find(|(_, rect)| x >= rect.x && x < rect.right()) {
             Some(&(index, rect)) => match (x - rect.x) / rect.w {
                 part if (0.25..0.75).contains(&part) => {
-                    return (index != from).then_some(Target::Merge(index));
+                    return (index != from && self.joins(index)).then_some(Target::Merge(index));
                 },
                 part if part < 0.25 => index,
                 _ => index + 1,
@@ -121,6 +133,14 @@ impl Scene {
             },
         }
     }
+
+    /// Whether what is dragged can group with the tab `into`, each pane keeping the smallest size
+    /// once it is placed beside them all, as grouping places it.
+    fn joins(&self, into: usize) -> bool {
+        let (Some(group), Some(new)) = (self.groups.get(into), &self.docked) else { return false };
+        let joined = group.clone().join(new.clone(), split::auto_axis(self.area), Side::After);
+        joined.fits_in(self.area, self.min, self.spacing)
+    }
 }
 
 /// Begin dragging `source`, once the pointer moves; `previous` was active until it was pressed.
@@ -130,9 +150,13 @@ pub fn start(ctx: &mut WindowContext, layout: &Layout, source: Source, previous:
     // The icon of a tab's only pane stands for the tab.
     let alone = tabs.tabs.get(tab).is_none_or(|tab| tab.panes.len() < 2);
     let source = if alone { Source::Tab(tab) } else { source };
-    let left = layout.tab(tab).map_or(0., |rect| f64::from(rect.x));
     let start = tabs.pointer;
-    let grab = start.x - left;
+    // A tab dragged from its pane is held by its middle.
+    let grab = match layout.tab(tab) {
+        Some(rect) if start.y < f64::from(layout.bar) => start.x - f64::from(rect.x),
+        Some(rect) => f64::from(rect.w / 2.),
+        None => 0.,
+    };
     tabs.drag = Some(Drag { source, grab, start, moving: false, previous, target: None });
 }
 
@@ -181,14 +205,19 @@ fn scene(ctx: &WindowContext, layout: &Layout, source: Source) -> Scene {
         },
     };
     let shown = (layout.first..).map_while(|index| Some((index, layout.tab(index)?)));
+    // A zoomed tab shows one pane over the places of the others, so nothing docks into it.
+    let zoomed = tabs.tabs.get(tabs.active).is_some_and(|tab| tab.zoom);
     Scene {
         bar: layout.bar,
+        area: tabs.area(),
         tabs: shown.collect(),
+        groups: tabs.tabs.iter().map(|tab| tab.layout.clone()).collect(),
         shown: tabs.active,
-        panes: tabs.pane_rects(),
+        panes: if zoomed { Vec::new() } else { tabs.pane_rects() },
         docked,
         min: min_pane(&ctx.display.size_info),
         spacing: tabs.spacing(),
+        tear: tear::can_tear(tabs, source),
     }
 }
 
@@ -199,8 +228,13 @@ pub fn release(ctx: &mut WindowContext, config: &Rc<UiConfig>) {
         ctx.display.window.set_mouse_cursor(CursorIcon::Default);
         ctx.display.damage_tracker.frame().mark_fully_damaged();
     }
+    // Torn off, it lands where the pointer was released, in a window of its own.
+    let pointer = ctx.display.tabs.pointer;
+    let torn = drag.target == Some(Target::Window)
+        && tear::tear_off(ctx, drag.source, Some(pointer), config);
     let tabs = &mut ctx.display.tabs;
     match (drag.source, drag.target) {
+        _ if torn => (),
         (Source::Tab(from), Some(Target::Reorder(to))) if tabs.active == from => {
             reorder(&mut tabs.tabs, &mut tabs.active, to)
         },
@@ -215,7 +249,9 @@ pub fn release(ctx: &mut WindowContext, config: &Rc<UiConfig>) {
         (Source::Tab(from), Some(target @ Target::Dock { .. })) => {
             move_pane(ctx, (from, 0), target, config)
         },
-        (Source::Pane(tab, pane), Some(target)) => move_pane(ctx, (tab, pane), target, config),
+        (Source::Pane(tab, pane), Some(target)) if target != Target::Window => {
+            move_pane(ctx, (tab, pane), target, config)
+        },
         // Dropped nowhere, the pressed tab stays selected, as by a click.
         (Source::Tab(from), _) if tabs.active != from && drag.moving => select(ctx, from, config),
         _ => (),
@@ -245,17 +281,25 @@ pub fn key(ctx: &mut WindowContext, key: &KeyEvent, config: &Rc<UiConfig>) -> bo
 mod tests {
     use super::*;
 
-    /// Three tabs of 100 px on a 40 px bar from x = 100, showing tab 1's two panes side by side.
+    fn pane(id: u64) -> Split<WindowId> {
+        Split::Pane(WindowId::from(id))
+    }
+
+    /// Three tabs of 100 px on a 40 px bar from x = 100 in an 800 × 340 px window, showing tab
+    /// 1's two panes side by side.
     fn scene() -> Scene {
         let tab = |index: usize| (index, Rect::new(100. + 100. * index as f32, 5., 100., 30.));
         Scene {
             bar: 40.,
+            area: Rect::new(0., 40., 800., 300.),
             tabs: (0..3).map(tab).collect(),
+            groups: vec![pane(1), pane(2).join(pane(3), Axis::Row, Side::After), pane(4)],
             shown: 1,
             panes: vec![(0, Rect::new(0., 40., 400., 300.)), (1, Rect::new(400., 40., 400., 300.))],
-            docked: Some(Split::Pane(WindowId::from(9))),
+            docked: Some(pane(9)),
             min: (100., 50.),
             spacing: 0.,
+            tear: false,
         }
     }
 
@@ -317,7 +361,6 @@ mod tests {
             dock(0, Axis::Column, Side::Before)
         );
         // A group docks only where each of its panes keeps the smallest size.
-        let pane = |id: u64| Split::Pane(WindowId::from(id));
         let group = pane(8).join(pane(9), Axis::Row, Side::After);
         let grouped = Scene { docked: Some(group), ..small };
         assert_eq!(grouped.target(Source::Tab(0), at(200., 60.)), None);
@@ -326,5 +369,67 @@ mod tests {
             roomy.target(Source::Tab(0), at(200., 60.)),
             dock(0, Axis::Column, Side::Before)
         );
+    }
+
+    #[test]
+    fn merging_keeps_the_smallest_size() {
+        let merge = |scene: &Scene, source, x| scene.target(source, at(x, 20.));
+        // A pane joins tab 1's two panes as a third, a quarter of the width beside the others.
+        let roomy = scene();
+        assert_eq!(merge(&roomy, Source::Pane(0, 0), 250.), Some(Target::Merge(1)));
+        let small = Scene { min: (250., 50.), ..scene() };
+        assert_eq!(merge(&small, Source::Pane(0, 0), 250.), None);
+        // Beside a lone pane, each still has half.
+        assert_eq!(merge(&small, Source::Pane(1, 0), 150.), Some(Target::Merge(0)));
+        // A tab brings all its panes along.
+        let group = pane(8).join(pane(9), Axis::Row, Side::After);
+        let grouped = Scene { docked: Some(group), ..small };
+        assert_eq!(merge(&grouped, Source::Tab(2), 150.), None);
+        let grouped = Scene { min: (200., 50.), ..grouped };
+        assert_eq!(merge(&grouped, Source::Tab(2), 150.), Some(Target::Merge(0)));
+        assert_eq!(merge(&grouped, Source::Tab(0), 250.), Some(Target::Merge(1)));
+        // The space between panes counts too.
+        let spaced = Scene { spacing: 10., ..grouped };
+        assert_eq!(merge(&spaced, Source::Tab(2), 150.), None);
+        // Reordering never shrinks anything.
+        assert_eq!(merge(&spaced, Source::Tab(2), 105.), Some(Target::Reorder(0)));
+    }
+
+    #[test]
+    fn leaving_the_window() {
+        let torn = Scene { tear: true, ..scene() };
+        let outside = [at(-1., 20.), at(300., -1.), at(800., 190.), at(300., 340.)];
+        for pointer in outside {
+            assert_eq!(torn.target(Source::Tab(0), pointer), Some(Target::Window));
+            assert_eq!(torn.target(Source::Pane(1, 0), pointer), Some(Target::Window));
+            // Nothing drops outside when it would empty the window.
+            assert_eq!(scene().target(Source::Tab(0), pointer), None);
+        }
+        // Inside, the window's edges are the bar's and the panes' as ever.
+        assert_eq!(torn.target(Source::Tab(0), at(0., 20.)), None);
+        assert_eq!(torn.target(Source::Tab(2), at(0., 20.)), Some(Target::Reorder(0)));
+        assert_eq!(
+            torn.target(Source::Pane(1, 0), at(799., 339.)),
+            Some(Target::Dock { pane: 1, axis: Axis::Row, side: Side::After })
+        );
+    }
+
+    #[test]
+    fn dragging_a_pane_from_itself() {
+        // A pane pressed in the shown tab docks beside its neighbour, never beside itself.
+        let scene = scene();
+        let drop = |pane, x, y| scene.target(Source::Pane(1, pane), at(x, y));
+        assert_eq!(drop(1, 600., 190.), None);
+        assert_eq!(
+            drop(1, 200., 330.),
+            Some(Target::Dock { pane: 0, axis: Axis::Column, side: Side::After })
+        );
+        assert_eq!(
+            drop(0, 790., 190.),
+            Some(Target::Dock { pane: 1, axis: Axis::Row, side: Side::After })
+        );
+        // Or leaves for the bar.
+        assert_eq!(drop(0, 150., 20.), Some(Target::Merge(0)));
+        assert_eq!(drop(0, 390., 20.), Some(Target::Detach(3)));
     }
 }
