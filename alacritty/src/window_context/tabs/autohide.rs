@@ -50,7 +50,7 @@ pub fn moved(tabs: &mut Tabs, point: PhysicalPosition<f64>, hold: bool, _now: In
     let (scale, y) = (tabs.scale as f32, point.y as f32);
     let edge = (6. * scale).round().max(tabs.margin());
     let band = ((BAR + BAND) * scale).round();
-    let revealed = hold || y < edge || tabs.autohide.revealed && y < band;
+    let revealed = hold || y < edge || tabs.autohide.live() && y < band;
     reveal(tabs, revealed)
 }
 

@@ -122,7 +122,7 @@ const ZOOM_WHEEL: ModifiersState = ModifiersState::CONTROL;
 #[cfg(target_os = "macos")]
 const ZOOM_WHEEL: ModifiersState = ModifiersState::SUPER;
 
-/// Pixels a touchpad scrolls for each step of a text zoom.
+/// Logical pixels a touchpad scrolls for each step of a text zoom.
 const ZOOM_PIXELS: f64 = 24.;
 /// Smallest and largest text of a zoomed pane, relative to its configured size, and smallest in
 /// points.
@@ -926,7 +926,14 @@ pub fn window_event(
         WindowEvent::Resized(_) => {
             return Some(WindowEvent::Resized(PhysicalSize::new(pane.w as u32, pane.h as u32)));
         },
-        WindowEvent::ModifiersChanged(modifiers) => tabs.modifiers = modifiers.state(),
+        // Holding the modifiers that drag a pane shows what they would drag.
+        WindowEvent::ModifiersChanged(modifiers) => {
+            let held = tabs.pane_drag();
+            tabs.modifiers = modifiers.state();
+            if tabs.pane_drag() != held {
+                redraw(ctx);
+            }
+        },
         WindowEvent::Ime(ime) if tabs.rename.is_some() => {
             rename::ime(ctx, ime);
             return None;
@@ -1198,7 +1205,7 @@ pub fn window_event(
                 && layout.hit(tabs.pointer) == Hit::Terminal
                 && tabs.pane_at(tabs.pointer) == Some(tabs.live().1) =>
         {
-            let steps = wheel_steps(delta, &mut tabs.zoom_wheel);
+            let steps = wheel_steps(delta, tabs.scale, &mut tabs.zoom_wheel);
             if steps != 0 {
                 zoom_live(ctx, FontChange::By(steps));
             }
@@ -1957,11 +1964,12 @@ fn zoomed_px(current: f32, steps: i32, configured: f32, min: f32) -> f32 {
 }
 
 /// Whole steps of a text zoom that the wheel moved by `delta`, keeping what is short of a step in
-/// `rest`: a line a step, or [`ZOOM_PIXELS`] of a touchpad. Turning the wheel back starts afresh.
-fn wheel_steps(delta: MouseScrollDelta, rest: &mut f64) -> i32 {
+/// `rest`: a line a step, or [`ZOOM_PIXELS`] logical pixels of a touchpad at `scale`. Turning the
+/// wheel back starts afresh.
+fn wheel_steps(delta: MouseScrollDelta, scale: f64, rest: &mut f64) -> i32 {
     let steps = match delta {
         MouseScrollDelta::LineDelta(_, lines) => f64::from(lines),
-        MouseScrollDelta::PixelDelta(delta) => delta.y / ZOOM_PIXELS,
+        MouseScrollDelta::PixelDelta(delta) => delta.y / (ZOOM_PIXELS * scale),
     };
     if steps * *rest < 0. {
         *rest = 0.;
@@ -2414,17 +2422,20 @@ mod tests {
         let mut rest = 0.;
         let lines = |y| MouseScrollDelta::LineDelta(0., y);
         let pixels = |y| MouseScrollDelta::PixelDelta(PhysicalPosition::new(0., y));
-        assert_eq!(wheel_steps(lines(1.), &mut rest), 1);
-        assert_eq!(wheel_steps(lines(-2.), &mut rest), -2);
+        assert_eq!(wheel_steps(lines(1.), 1., &mut rest), 1);
+        assert_eq!(wheel_steps(lines(-2.), 1., &mut rest), -2);
         // A touchpad steps every 24 pixels, keeping the rest.
-        assert_eq!(wheel_steps(pixels(20.), &mut rest), 0);
-        assert_eq!(wheel_steps(pixels(20.), &mut rest), 1);
-        assert_eq!(wheel_steps(pixels(5.), &mut rest), 0);
+        assert_eq!(wheel_steps(pixels(20.), 1., &mut rest), 0);
+        assert_eq!(wheel_steps(pixels(20.), 1., &mut rest), 1);
+        assert_eq!(wheel_steps(pixels(5.), 1., &mut rest), 0);
         // Turning back starts afresh.
-        assert_eq!(wheel_steps(pixels(-20.), &mut rest), 0);
-        assert_eq!(wheel_steps(pixels(-5.), &mut rest), -1);
-        assert_eq!(wheel_steps(lines(0.5), &mut rest), 0);
-        assert_eq!(wheel_steps(lines(0.5), &mut rest), 1);
+        assert_eq!(wheel_steps(pixels(-20.), 1., &mut rest), 0);
+        assert_eq!(wheel_steps(pixels(-5.), 1., &mut rest), -1);
+        assert_eq!(wheel_steps(lines(0.5), 1., &mut rest), 0);
+        assert_eq!(wheel_steps(lines(0.5), 1., &mut rest), 1);
+        // Logical pixels: twice as many on a screen of twice the scale.
+        assert_eq!(wheel_steps(pixels(30.), 2., &mut rest), 0);
+        assert_eq!(wheel_steps(pixels(20.), 2., &mut rest), 1);
     }
 
     #[test]

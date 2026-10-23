@@ -16,7 +16,7 @@ use winit::dpi::PhysicalPosition;
 use winit::window::WindowId;
 
 use super::anim::{Curve, Tween, scale};
-use super::bar::{Hit, Layout, MARGIN, PANEL_RADIUS};
+use super::bar::{BAR, Hit, Layout, MARGIN, PANEL_RADIUS};
 use super::dnd::{Source, Target};
 use super::paint::{Layer, Palette, Rect, mix};
 use super::split::{Axis, Side, Split};
@@ -221,7 +221,10 @@ pub fn control(tabs: &Tabs, point: PhysicalPosition<f64>, scale: f32) -> Option<
     let cards: Vec<_> = rects.into_iter().map(|(index, rect)| (index, tabs.card(rect))).collect();
     // The zone stops at the middle of the gap above, where a divider takes the pointer.
     let reach = (tabs.spacing() / 2. + tabs.margin()).max(0.);
-    let pane = grabbed(&cards, tabs.area().y, reach, point, scale)?;
+    // A bar shown over the panes keeps the pointer from the controls under it.
+    let overlay = !tabs.autohide.pinned && tabs.autohide.live();
+    let top = if overlay { (BAR * scale).round() } else { tabs.area().y };
+    let pane = grabbed(&cards, top, reach, point, scale)?;
     Some((pane, Control::Grip))
 }
 
