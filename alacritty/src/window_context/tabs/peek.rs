@@ -4,8 +4,10 @@
 //! Like macOS' tooltips, the first card waits for the pointer to rest on an icon; once one has
 //! shown, the cards of other icons show at once, until a moment after the last one hid.
 
+use std::mem;
 use std::time::{Duration, Instant};
 
+use winit::dpi::PhysicalPosition;
 use winit::window::WindowId;
 
 use crate::config::UiConfig;
@@ -44,18 +46,23 @@ pub struct State {
     shown: Tween<f32>,
     /// Until when another icon shows its card at once.
     warm_until: Option<Instant>,
+    /// Where the pointer was when a press or menu hid the card of the icon under it; no card
+    /// shows until the pointer moves on, though a click brings another icon under it.
+    dismissed: Option<PhysicalPosition<f64>>,
+    /// When the bar was last clicked, as last seen, to tell a click between two frames.
+    clicked: Option<Instant>,
     /// Where the preview of a pane not on screen is drawn, once the card is.
     thumbnail: Option<Thumbnail>,
 }
 
-/// The preview's place in its card.
+/// The preview's place in its card, and the scale of the pane in it.
 #[derive(Clone, Copy)]
 struct Thumbnail {
     rect: Rect,
+    scale: f32,
     radius: f32,
-    /// Width of its hairline, and how far the card shows.
+    /// Width of its hairline.
     line: f32,
-    shown: f32,
 }
 
 impl Default for State {
@@ -67,6 +74,8 @@ impl Default for State {
             open: false,
             shown: Tween::new(0.),
             warm_until: None,
+            dismissed: None,
+            clicked: None,
             thumbnail: None,
         }
     }
@@ -83,8 +92,20 @@ impl State {
         self.open || self.shown.get(now) > 0.
     }
 
-    /// Follow the pointer to the icon `hovered`, at `now`.
-    fn update(&mut self, hovered: Option<(usize, usize)>, now: Instant) {
+    /// Follow the pointer at `pointer` to the icon `hover`, at `now`; none shows while the
+    /// pointer is `busy` with a drag, a press or a menu, nor after that until it moves, as after
+    /// a click on an icon.
+    fn update(
+        &mut self,
+        hover: Option<(usize, usize)>,
+        pointer: PhysicalPosition<f64>,
+        busy: bool,
+        now: Instant,
+    ) {
+        if busy || self.dismissed != Some(pointer) {
+            self.dismissed = hover.filter(|_| busy).map(|_| pointer);
+        }
+        let hovered = hover.filter(|_| self.dismissed.is_none());
         if hovered != self.hovered {
             let warm = self.open || self.warm_until.is_some_and(|until| now < until);
             self.hovered = hovered;
@@ -119,11 +140,10 @@ impl Tabs {
         }
         let session = self.peeked()?.session.as_ref()?;
         // The pane's card fills the thumbnail; its margin is left out.
-        let (margin, size) = (self.margin(), session.size);
-        let Rect { x, y, w, h } = thumbnail.rect;
-        let (sx, sy) = (w / (size.width() - 2. * margin), h / (size.height() - 2. * margin));
-        let frame =
-            Rect::new(x - margin * sx, y - margin * sy, size.width() * sx, size.height() * sy);
+        let (margin, size, scale) = (self.margin(), session.size, thumbnail.scale);
+        let Rect { x, y, .. } = thumbnail.rect;
+        let (width, height) = (size.width() * scale, size.height() * scale);
+        let frame = Rect::new(x - margin * scale, y - margin * scale, width, height);
         Some(PaneDraw {
             terminal: session.terminal.clone(),
             config: session.config.clone(),
@@ -133,14 +153,11 @@ impl Tabs {
         })
     }
 
-    /// Draw over the thumbnail, once its terminal is drawn: its corners and hairline, and the card
-    /// it fades in from.
+    /// Draw over the thumbnail, once its terminal is drawn: its corners and hairline.
     pub fn draw_over(&self, renderer: &mut Renderer, size: &SizeInfo, config: &UiConfig) {
         let (Some(thumbnail), Some(font)) = (self.peeking.thumbnail, &self.font) else { return };
         let palette = Palette::new(&config.colors);
-        let Thumbnail { rect, radius, line, shown } = thumbnail;
-        let mut veil = Layer::default();
-        veil.rounded_alpha(rect, radius, palette.popup, 1. - shown);
+        let Thumbnail { rect, radius, line, .. } = thumbnail;
         let mut edges = Layer::default();
         edges.corners(rect, radius, palette.popup, palette.card_outline, line);
         let r = radius.round();
@@ -152,11 +169,10 @@ impl Tabs {
         ] {
             edges.rect(edge, palette.card_outline);
         }
-        edges.fade(shown, palette.popup);
 
         let (width, height) = (self.window.width as f32, self.window.height as f32);
         let window = SizeInfo::new(width, height, 1., 1., 0., 0., false);
-        Layer::draw(vec![veil, edges], renderer, font, &window);
+        Layer::draw(vec![edges], renderer, font, &window);
         renderer.resize(size);
     }
 
@@ -187,7 +203,14 @@ pub fn draw(
         || tabs.context.is_some()
         || tabs.settings.is_some()
         || tabs.rename.is_some();
-    tabs.peeking.update(wanted(tabs.hover, busy), now);
+    let hover = match tabs.hover {
+        Hit::Icon(tab, pane) => Some((tab, pane)),
+        _ => None,
+    };
+    // A click may come and go between two frames.
+    let clicked = tabs.last_click.map(|(_, at)| at);
+    let click = mem::replace(&mut tabs.peeking.clicked, clicked) != clicked;
+    tabs.peeking.update(hover, tabs.pointer, busy || click, now);
     tabs.peeking.thumbnail = None;
 
     let shown = tabs.peeking.shown.get(now);
@@ -218,9 +241,11 @@ pub fn draw(
     let (thumbnail, size) = if preview {
         let session = pane.session.as_ref()?;
         let content = |length: f32| length - 2. * tabs.margin();
-        let pane = (content(session.size.width()), content(session.size.height()));
+        let (w, h) = (content(session.size.width()), content(session.size.height()));
         let room = window.bottom() - anchor.bottom() - gap - 3. * pad - header;
-        let thumbnail = fit(pane, (px(THUMBNAIL.0), px(THUMBNAIL.1).min(room)));
+        let max = (px(THUMBNAIL.0), px(THUMBNAIL.1).min(room));
+        let scale = fit((w, h), max, session.size.cell_height());
+        let thumbnail = ((w * scale).round(), (h * scale).round(), scale);
         let size = (thumbnail.0.max(text) + 2. * pad, header + thumbnail.1 + 3. * pad);
         (Some(thumbnail), size)
     } else {
@@ -249,13 +274,17 @@ pub fn draw(
 
     let fitted = |text: &str, room: f32| font.fit(text, room.max(0.), false);
     match thumbnail {
-        Some((w, h)) => {
+        Some((w, h, scale)) => {
             let (x, y) = (card.x + pad, card.y + pad);
             let badge = Rect::new(x, y + ((header - icon) / 2.).round(), icon, icon);
             let accent = palette.accent(title);
             let colors = (palette.popup, ink(accent), ink(palette.foreground));
-            let (image, initials) = (pane.icon.as_ref(), &pane.badge);
-            bar::badge(&mut layer, layout, place(badge), image, initials, font, colors);
+            match &pane.icon {
+                Some(image) => layer.image_alpha(place(badge), image, palette.foreground, shown),
+                None => {
+                    bar::badge(&mut layer, layout, place(badge), None, &pane.badge, font, colors)
+                },
+            }
             let text_y = y + (header - line) / 2.;
             let left = badge.right() + px(6.);
             let room = card.right() - pad - left;
@@ -268,10 +297,23 @@ pub fn draw(
                 let text = fitted(profile, card.right() - pad - after);
                 layer.text(x, y, text, ink(palette.muted), false);
             }
+            // The terminal cannot fade, so the preview shows only in the card at rest; the empty
+            // well around it carries the card in and out.
             let x = card.x + ((card.w - w) / 2.).round();
-            let rect = place(Rect::new(x, card.y + 2. * pad + header, w, h));
-            let (radius, line) = (layout.radius(TRACK_RADIUS - PAD), stroke);
-            tabs.peeking.thumbnail = Some(Thumbnail { rect, radius, line, shown });
+            let rect = Rect::new(x, card.y + 2. * pad + header, w, h);
+            let radius = layout.radius(TRACK_RADIUS - PAD);
+            let well = place(rect);
+            layer.rounded_alpha(well, radius, palette.card_outline, shown);
+            layer.rounded_alpha(
+                well.inset(stroke),
+                (radius - stroke).max(0.),
+                palette.terminal,
+                shown,
+            );
+            if tabs.peeking.open && shown >= 1. {
+                let thumbnail = Thumbnail { rect, scale, radius, line: stroke };
+                tabs.peeking.thumbnail = Some(thumbnail);
+            }
         },
         None => {
             let (x, y) = at(card.x + px(10.), card.y + pad);
@@ -290,22 +332,16 @@ pub fn shows(tabs: &Tabs, id: WindowId) -> bool {
     tabs.peeking.thumbnail.is_some() && tabs.peeked().is_some_and(|pane| pane.id == id)
 }
 
-/// The icon whose card is wanted, with the pointer at `hover`: none while the pointer is `busy`
-/// with a drag, a press or a menu.
-fn wanted(hover: Hit, busy: bool) -> Option<(usize, usize)> {
-    match hover {
-        Hit::Icon(tab, pane) if !busy => Some((tab, pane)),
-        _ => None,
-    }
-}
-
-/// Size of the preview of a pane `pane` large, within `max`: its own shape, at most half its size.
-fn fit((width, height): (f32, f32), (max_width, max_height): (f32, f32)) -> (f32, f32) {
+/// Scale of the preview of a pane `pane` large, with cells `cell` pixels tall, within `max`: its
+/// own shape, at most half its size, each line of cells a whole number of pixels tall so the
+/// lines are drawn alike, unless they would be too thin to read either way.
+fn fit((width, height): (f32, f32), (max_width, max_height): (f32, f32), cell: f32) -> f32 {
     if width <= 0. || height <= 0. {
-        return (0., 0.);
+        return 0.;
     }
     let scale = (max_width / width).min(max_height / height).clamp(0., THUMBNAIL_SCALE);
-    ((width * scale).round(), (height * scale).round())
+    let line = cell * scale;
+    if line >= 2. { line.floor() / cell } else { scale }
 }
 
 /// Where a card of `size` goes below `anchor`, which reaches from the icon down to whatever the
@@ -320,6 +356,8 @@ mod tests {
     use super::*;
 
     const WINDOW: Rect = Rect { x: 8., y: 0., w: 984., h: 692. };
+
+    const HERE: PhysicalPosition<f64> = PhysicalPosition::new(300., 20.);
 
     fn at(start: Instant, ms: u64) -> Instant {
         start + Duration::from_millis(ms)
@@ -348,32 +386,51 @@ mod tests {
         assert_eq!(card(anchor, (200., 40.), WINDOW, 6.).y, anchor.bottom() + 6.);
     }
 
+    /// Size of the preview of a pane `pane` large, with cells 17 pixels tall.
+    fn thumbnail(pane: (f32, f32), max: (f32, f32)) -> (f32, f32) {
+        let scale = fit(pane, max, 17.);
+        ((pane.0 * scale).round(), (pane.1 * scale).round())
+    }
+
     #[test]
     fn thumbnail_keeps_the_pane_shape_at_most_half_its_size() {
         let max = (320., 200.);
-        let (w, h) = fit((1000., 600.), max);
+        let (w, h) = thumbnail((1000., 600.), max);
         assert!(w <= 320. && h <= 200.);
         assert!((w / h - 1000. / 600.).abs() < 0.02, "{w} {h}");
-        // Tall and wide panes fill the height or width.
-        assert_eq!(fit((400., 1600.), max), (50., 200.));
-        assert_eq!(fit((3200., 400.), max), (320., 40.));
+        // Tall and wide panes fill the height or width, as far as whole lines allow.
+        let (w, h) = thumbnail((400., 1600.), max);
+        assert!(h <= 200. && h > 175. && (w / h - 0.25).abs() < 0.01, "{w} {h}");
+        let (w, h) = thumbnail((3200., 340.), max);
+        assert!(w <= 320. && w > 300., "{w} {h}");
         // Small panes show at half their size, never larger.
-        assert_eq!(fit((300., 100.), max), (150., 50.));
-        assert_eq!(fit((2., 2.), max), (1., 1.));
-        assert_eq!(fit((0., 300.), max), (0., 0.));
+        assert_eq!(fit((300., 100.), max, 18.), 0.5);
+        assert_eq!(thumbnail((0., 300.), max), (0., 0.));
         // Little room below the card shrinks it.
-        assert_eq!(fit((1000., 600.), (320., 60.)), (100., 60.));
+        assert!(thumbnail((1000., 600.), (320., 60.)).1 <= 60.);
+    }
+
+    #[test]
+    fn thumbnail_lines_are_whole_pixels_tall() {
+        for (pane, cell) in [((990., 600.), 17.), ((480., 580.), 20.), ((1800., 1000.), 35.)] {
+            let scale = fit(pane, (320., 200.), cell);
+            let line = cell * scale;
+            assert!(line >= 1. && (line - line.round()).abs() < 1e-4, "{pane:?} {cell} {line}");
+        }
+        // Too small to read, it keeps its scale.
+        assert_eq!(fit((4000., 4000.), (100., 100.), 20.), 0.025);
+        assert_eq!(fit((3200., 340.), (320., 200.), 17.), 0.1);
     }
 
     #[test]
     fn first_card_waits_for_the_pointer_to_rest() {
         let start = Instant::now();
         let mut state = State::default();
-        state.update(Some((1, 0)), start);
+        state.update(Some((1, 0)), HERE, false, start);
         assert!(!state.visible(start) && state.running(start));
-        state.update(Some((1, 0)), at(start, 299));
+        state.update(Some((1, 0)), HERE, false, at(start, 299));
         assert!(!state.open);
-        state.update(Some((1, 0)), at(start, 300));
+        state.update(Some((1, 0)), HERE, false, at(start, 300));
         assert!(state.open && state.target == Some((1, 0)));
         // It pops in, then rests.
         assert!(state.running(at(start, 350)));
@@ -385,17 +442,17 @@ mod tests {
     fn moving_on_restarts_the_wait() {
         let start = Instant::now();
         let mut state = State::default();
-        state.update(Some((1, 0)), start);
-        state.update(Some((1, 1)), at(start, 200));
-        state.update(Some((1, 1)), at(start, 400));
+        state.update(Some((1, 0)), HERE, false, start);
+        state.update(Some((1, 1)), HERE, false, at(start, 200));
+        state.update(Some((1, 1)), HERE, false, at(start, 400));
         assert!(!state.open);
-        state.update(Some((1, 1)), at(start, 500));
+        state.update(Some((1, 1)), HERE, false, at(start, 500));
         assert_eq!(state.target, Some((1, 1)));
         // Leaving before the card shows shows none.
         let mut state = State::default();
-        state.update(Some((2, 0)), start);
-        state.update(None, at(start, 200));
-        state.update(None, at(start, 2000));
+        state.update(Some((2, 0)), HERE, false, start);
+        state.update(None, HERE, false, at(start, 200));
+        state.update(None, HERE, false, at(start, 2000));
         assert!(!state.visible(at(start, 2000)) && !state.running(at(start, 2000)));
         assert_eq!(state.target, None);
     }
@@ -404,36 +461,42 @@ mod tests {
     fn once_warm_cards_swap_at_once() {
         let start = Instant::now();
         let mut state = State::default();
-        state.update(Some((0, 0)), start);
-        state.update(Some((0, 0)), at(start, 300));
+        state.update(Some((0, 0)), HERE, false, start);
+        state.update(Some((0, 0)), HERE, false, at(start, 300));
         // To another icon, the card shows at once.
-        state.update(Some((0, 1)), at(start, 400));
+        state.update(Some((0, 1)), HERE, false, at(start, 400));
         assert_eq!((state.target, state.shown.get(at(start, 400))), (Some((0, 1)), 1.));
         // Hidden, it fades.
-        state.update(None, at(start, 500));
+        state.update(None, HERE, false, at(start, 500));
         assert!(!state.open && state.running(at(start, 520)));
         assert!(state.shown.get(at(start, 560)) < 1.);
         assert!(!state.visible(at(start, 800)));
         // Shortly after, the next card shows at once too.
-        state.update(Some((2, 0)), at(start, 1000));
+        state.update(Some((2, 0)), HERE, false, at(start, 1000));
         assert_eq!((state.target, state.shown.get(at(start, 1000))), (Some((2, 0)), 1.));
         // Long after, it waits again.
-        state.update(None, at(start, 1100));
-        state.update(Some((3, 0)), at(start, 3000));
+        state.update(None, HERE, false, at(start, 1100));
+        state.update(Some((3, 0)), HERE, false, at(start, 3000));
         assert!(!state.open);
     }
 
     #[test]
-    fn no_card_while_busy() {
-        assert_eq!(wanted(Hit::Icon(1, 2), false), Some((1, 2)));
-        assert_eq!(wanted(Hit::Icon(1, 2), true), None);
-        assert_eq!(wanted(Hit::Tab(1), false), None);
-        // A drag or menu hides a card that is up.
+    fn no_card_while_busy_nor_after_on_the_same_icon() {
+        // A drag, press or menu hides a card that is up.
         let start = Instant::now();
         let mut state = State::default();
-        state.update(Some((0, 0)), start);
-        state.update(Some((0, 0)), at(start, 300));
-        state.update(wanted(Hit::Icon(0, 0), true), at(start, 400));
+        state.update(Some((0, 0)), HERE, false, start);
+        state.update(Some((0, 0)), HERE, false, at(start, 300));
+        state.update(Some((0, 0)), HERE, true, at(start, 400));
         assert!(!state.open && !state.visible(at(start, 1000)));
+        // Once it is over, as after a click, no card shows until the pointer moves, though the
+        // click brought another icon under it.
+        state.update(Some((0, 1)), HERE, false, at(start, 1000));
+        state.update(Some((0, 1)), HERE, false, at(start, 2000));
+        assert!(!state.open && !state.running(at(start, 2000)));
+        let moved = PhysicalPosition::new(301., 20.);
+        state.update(Some((0, 1)), moved, false, at(start, 2100));
+        state.update(Some((0, 1)), moved, false, at(start, 2400));
+        assert_eq!((state.open, state.target), (true, Some((0, 1))));
     }
 }

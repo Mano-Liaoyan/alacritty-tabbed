@@ -384,10 +384,8 @@ impl Layout {
     /// What the card of the pane `pane` of the tab at `index` hangs from: its icon, fanned out,
     /// reaching down to the bottom of its tab, or of the shelf of icons it lies on.
     pub fn anchor(&self, index: usize, pane: usize) -> Option<Rect> {
-        let icon = self.icon(index, pane)?;
         let (_, area, _) = self.stacks.iter().find(|(i, ..)| *i == index)?;
-        let bottom = area.bottom().max(self.tab(index).map_or(0., |tab| tab.bottom()));
-        Some(Rect::new(icon.x, icon.y, icon.w, bottom - icon.y))
+        Some(hang(self.icon(index, pane)?, *area, self.tab(index)?))
     }
 
     fn close(&self, tab: Rect) -> Rect {
@@ -541,6 +539,13 @@ fn plate(
     let past = (flat.right() - tab.right()).max(flat.bottom() - bar);
     let float = fan * (past / px(4.)).clamp(0., 1.);
     (flat.inset(-(px(2.) * float).round()), float)
+}
+
+/// What the card of `icon` hangs from: the icon, reaching down to the bottom of its `tab`, or of
+/// the `area` of icons it lies on where that reaches further, below a shelf.
+fn hang(icon: Rect, area: Rect, tab: Rect) -> Rect {
+    let bottom = area.bottom().max(tab.bottom());
+    Rect::new(icon.x, icon.y, icon.w, bottom - icon.y)
 }
 
 /// The left and right edges of `icons`.
@@ -1307,6 +1312,26 @@ mod tests {
                 // The lifted icon reaches a little further into the gap between the rows.
                 if (y - MIDDLE - PITCH / 2.).abs() > 3. {
                     assert_eq!(pane / ROW_MAX, row, "{x} {y}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn cards_hang_below_the_tab_or_its_shelf() {
+        for scale in [1., 2.] {
+            let tab = Rect::new(91. * scale, 9. * scale, 150. * scale, 30. * scale);
+            let front = Rect::new(100. * scale, 15. * scale, 18. * scale, 18. * scale);
+            let size = (chip_size(12).0 * scale, chip_size(12).1 * scale);
+            for (count, rows) in [(1, 1), (4, 1), (12, 2)] {
+                let icons = deck(front, count, 0, scale, ROW_MAX, size, fanned).icons;
+                let (area, _) = plate(tab, &icons, rows, 1., 48. * scale, scale);
+                for &(pane, icon) in &icons {
+                    let anchor = hang(icon, area, tab);
+                    assert_eq!((anchor.x, anchor.y, anchor.w), (icon.x, icon.y, icon.w));
+                    // A shelf of two rows reaches below its tab; one row lies within it.
+                    let bottom = if rows > 1 { area.bottom() } else { tab.bottom() };
+                    assert_eq!(anchor.bottom(), bottom, "{scale} {count} {pane}");
                 }
             }
         }
