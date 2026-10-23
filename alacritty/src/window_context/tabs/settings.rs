@@ -279,7 +279,7 @@ impl Row {
 
     fn description(self) -> &'static str {
         match self {
-            Row::Restore => "Reopen windows and tabs when Alacritty starts",
+            Row::Restore => "Reopen windows and tabs at start",
             Row::Pin => "Off: it slides in at the top edge",
             Row::WheelZoom => "Of the focused pane; not saved",
             Row::Corners => "Window, panels, tabs and buttons",
@@ -920,7 +920,7 @@ impl Settings {
         // Widths of the segmented controls' segments.
         let words = font.width("Rounded", false).max(font.width("Square", false));
         let corner_widths = [px(42.) + words; 2];
-        let restore_widths = RESTORE.map(|(_, name)| font.width(name, false).ceil() + px(28.));
+        let restore_widths = RESTORE.map(|(_, name)| font.width(name, false).ceil() + px(22.));
         // The note under the choices of restoring the session is as high as its longest text.
         let note_width = width - px(32.);
         let note_room = note_width - ch - px(4.);
@@ -1118,23 +1118,27 @@ impl Settings {
             (list, list.inset(px(6.)), row)
         });
 
-        // The logo picker drops from the tile or the logo's well, ending where it does, kept
-        // inside the dialog.
+        // The logo picker drops from the profile's tile; the tab bar logo's opens beside its well,
+        // left of the rows' controls, so it covers neither. Both are kept inside the dialog.
         let logos = self.logos.as_ref().map(|picker| {
-            let from = match (picker.kind, &settings) {
-                (Logos::Brand, Some(page)) => page.control(Row::LogoIcon),
-                _ => tile,
+            let (from, room_x) = match (picker.kind, &settings) {
+                (Logos::Brand, Some(page)) => {
+                    let well = page.control(Row::LogoIcon);
+                    let switches = page.control(Row::Logo).x.min(well.x);
+                    (Rect { y: well.y - px(6.), h: 0., ..well }, switches - px(8.) - x0)
+                },
+                _ => (tile, width),
             };
             let cell = px(48.);
             let count = picker.kind.count();
-            let columns = ((width - px(12.)) / cell).clamp(1., 12.) as usize;
+            let columns = ((room_x - px(12.)) / cell).clamp(1., 12.) as usize;
             let header = ch + px(18.);
             let room = dialog.bottom() - px(8.) - (y + title) - header - px(12.);
             let rows = count.div_ceil(columns).min((room / cell).max(1.) as usize);
             let size = (columns as f32 * cell + px(12.), header + rows as f32 * cell + px(12.));
             let top =
                 (from.bottom() + px(6.)).min(dialog.bottom() - px(8.) - size.1).max(y + title);
-            let left = (from.right() - size.0).max(x0);
+            let left = x0;
             let picker = Rect::new(left, top, size.0, size.1);
             let cells =
                 Rect::new(left + px(6.), top + header, columns as f32 * cell, rows as f32 * cell);
@@ -2063,8 +2067,9 @@ impl Settings {
             },
             ..self.edited.clone()
         };
-        edited.brand.title = self.text(Field::BrandTitle).trim().into();
-        edited.brand.subtitle = self.text(Field::BrandSubtitle).trim().into();
+        // The logo's text is kept as typed, so an unedited save leaves it as it was.
+        edited.brand.title = self.text(Field::BrandTitle).into();
+        edited.brand.subtitle = self.text(Field::BrandSubtitle).into();
         Ok(edited)
     }
 
@@ -2754,7 +2759,8 @@ impl Settings {
             },
             Field::UiFont => Some("System".into()),
             Field::PaneHighlight => Some("Auto".into()),
-            Field::BrandTitle | Field::BrandSubtitle => Some("Hidden".into()),
+            Field::BrandTitle => Some("No title".into()),
+            Field::BrandSubtitle => Some("No subtitle".into()),
             _ => None,
         }
     }
@@ -2980,7 +2986,7 @@ mod tests {
         settings.logos = Some(LogoPicker { kind: Logos::Brand, highlighted: 0, first: 0 });
         settings.pick_logo(2);
         assert!(settings.logos.is_none());
-        *settings.text_mut(Field::BrandTitle) = "Work ".into();
+        *settings.text_mut(Field::BrandTitle) = "Work".into();
         settings.text_mut(Field::BrandSubtitle).clear();
         // Going back to General keeps what was edited.
         settings.show(Page::General);
@@ -3004,5 +3010,12 @@ mod tests {
         // Saving again writes nothing.
         settings.save(&config);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+
+        // Nor does saving a logo title with spaces around it, unedited.
+        let spaced = "[window.brand]\ntitle = \" Work \"\n";
+        std::fs::write(&path, spaced).unwrap();
+        config.window.brand.title = " Work ".into();
+        Settings::new(&config, Page::Appearance, || ()).save(&config);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), spaced);
     }
 }
