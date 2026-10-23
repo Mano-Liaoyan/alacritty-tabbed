@@ -18,7 +18,7 @@ use crate::window_context::WindowContext;
 use super::bar::{Hit, Layout};
 use super::paint::Rect;
 use super::split::{self, Axis, Side, Split};
-use super::{merge, move_pane, redraw, reorder, select};
+use super::{merge, min_pane, move_pane, redraw, reorder, select};
 
 /// What is being dragged.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -40,6 +40,9 @@ pub enum Target {
     Dock { pane: usize, axis: Axis, side: Side },
     /// Make the pane a tab of its own, at this index.
     Detach(usize),
+    /// Out of the window, into a window of its own.
+    #[allow(dead_code, reason = "tabs are torn off next")]
+    Window,
 }
 
 /// A drag that started on the bar.
@@ -68,6 +71,8 @@ struct Scene {
     docked: Option<Split<WindowId>>,
     /// Smallest size a pane may be split to.
     min: (f32, f32),
+    /// Pixels between neighbouring panes.
+    spacing: f32,
 }
 
 impl Scene {
@@ -85,7 +90,7 @@ impl Scene {
             let fits = self
                 .docked
                 .as_ref()
-                .is_some_and(|new| split::fits(rect, axis, side, new, self.min));
+                .is_some_and(|new| split::fits(rect, axis, side, new, self.min, self.spacing));
             return match pane {
                 None if self.shown == from => None,
                 Some(pane) if (self.shown, index) == (from, pane) => None,
@@ -176,17 +181,14 @@ fn scene(ctx: &WindowContext, layout: &Layout, source: Source) -> Scene {
         },
     };
     let shown = (layout.first..).map_while(|index| Some((index, layout.tab(index)?)));
-    let size = &ctx.display.size_info;
     Scene {
         bar: layout.bar,
         tabs: shown.collect(),
         shown: tabs.active,
         panes: tabs.pane_rects(),
         docked,
-        min: (
-            split::MIN_COLUMNS * size.cell_width() + 2. * size.padding_x(),
-            split::MIN_LINES * size.cell_height() + 2. * size.padding_y(),
-        ),
+        min: min_pane(&ctx.display.size_info),
+        spacing: tabs.spacing(),
     }
 }
 
@@ -253,6 +255,7 @@ mod tests {
             panes: vec![(0, Rect::new(0., 40., 400., 300.)), (1, Rect::new(400., 40., 400., 300.))],
             docked: Some(Split::Pane(WindowId::from(9))),
             min: (100., 50.),
+            spacing: 0.,
         }
     }
 

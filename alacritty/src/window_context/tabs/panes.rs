@@ -8,6 +8,7 @@
 use std::cell::Cell;
 use std::time::Instant;
 
+use winit::dpi::PhysicalPosition;
 use winit::window::WindowId;
 
 use super::Tabs;
@@ -53,12 +54,13 @@ struct Motion {
 impl Effects {
     /// Follow the panes of the active tab to their new places `rects`, at `now`.
     ///
-    /// Panes that were shown slide to their place, new ones pop in beside them; everything
-    /// jumps into place when the window changes size or another tab's panes are shown.
-    pub fn place(&mut self, rects: &[(WindowId, Rect)], now: Instant) {
+    /// Panes that were shown slide to their place, new ones pop in beside them, when they
+    /// `animate`; everything jumps into place when the window changes size or another tab's
+    /// panes are shown.
+    pub fn place(&mut self, rects: &[(WindowId, Rect)], now: Instant, animate: bool) {
         let area = rects.iter().map(|&(_, rect)| rect).reduce(union);
         let shown = rects.iter().any(|&(id, _)| self.motion(id).is_some());
-        let animate = shown && area == self.area;
+        let animate = animate && shown && area == self.area;
         self.area = area;
 
         let mut old = std::mem::take(&mut self.panes);
@@ -142,6 +144,12 @@ impl Effects {
         self.drop.set(drop);
         drop.map(|(rect, alpha)| (rect.get(now), alpha.get(now))).filter(|&(_, alpha)| alpha > 0.)
     }
+}
+
+/// The pane of the active tab whose drag handle is at `point`.
+pub fn handle_at(tabs: &Tabs, layout: &Layout, point: PhysicalPosition<f64>) -> Option<usize> {
+    let _ = (tabs, layout, point);
+    None
 }
 
 /// Draw the panel of each pane of the active tab, with the chrome around it, the focused pane's
@@ -325,12 +333,12 @@ mod tests {
     fn split_slides_and_pops_in() {
         let now = Instant::now();
         let mut effects = Effects::default();
-        effects.place(&[(id(1), WHOLE)], now);
+        effects.place(&[(id(1), WHOLE)], now, true);
         // The first placement is not animated.
         assert_eq!(effects.frame(id(1), WHOLE, now), WHOLE);
         assert!(!effects.running(now));
 
-        effects.place(&[(id(1), LEFT), (id(2), RIGHT)], now);
+        effects.place(&[(id(1), LEFT), (id(2), RIGHT)], now, true);
         assert_eq!(effects.running(now), scale() > 0.);
         if scale() > 0. {
             assert_eq!(effects.frame(id(1), LEFT, now), WHOLE);
@@ -348,8 +356,8 @@ mod tests {
     fn closing_slides_the_neighbour_over() {
         let now = Instant::now();
         let mut effects = Effects::default();
-        effects.place(&[(id(1), LEFT), (id(2), RIGHT)], now);
-        effects.place(&[(id(2), WHOLE)], now);
+        effects.place(&[(id(1), LEFT), (id(2), RIGHT)], now, true);
+        effects.place(&[(id(2), WHOLE)], now, true);
         assert_eq!(effects.frame(id(2), WHOLE, now), if scale() > 0. { RIGHT } else { WHOLE });
         assert_eq!(effects.frame(id(1), LEFT, now), LEFT, "closed panes are forgotten");
     }
@@ -358,13 +366,13 @@ mod tests {
     fn other_tabs_and_resizes_jump_into_place() {
         let now = Instant::now();
         let mut effects = Effects::default();
-        effects.place(&[(id(1), LEFT), (id(2), RIGHT)], now);
+        effects.place(&[(id(1), LEFT), (id(2), RIGHT)], now, true);
         // Another tab's panes.
-        effects.place(&[(id(3), LEFT), (id(4), RIGHT)], now);
+        effects.place(&[(id(3), LEFT), (id(4), RIGHT)], now, true);
         assert!(!effects.running(now));
         // The window grows.
         let wider = Rect { w: 500., ..RIGHT };
-        effects.place(&[(id(3), LEFT), (id(4), wider)], now);
+        effects.place(&[(id(3), LEFT), (id(4), wider)], now, true);
         assert_eq!(effects.frame(id(4), wider, now), wider);
         assert!(!effects.running(now));
     }

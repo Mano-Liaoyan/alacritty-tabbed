@@ -16,14 +16,18 @@ mod anim;
 mod app_settings;
 mod bar;
 mod context;
+mod divider;
 mod dnd;
 mod fonts;
 mod icons;
 mod paint;
 mod panes;
+mod peek;
 mod profiles;
+mod rename;
 mod settings;
 mod split;
+mod tear;
 mod text;
 
 #[cfg(target_os = "macos")]
@@ -85,11 +89,19 @@ use paint::Image;
 pub use paint::Rect;
 use profiles::{Profile, Profiles};
 use settings::{Page, Settings};
-use split::{Axis, Side, Split};
+use split::{Axis, Divider, Side, Split};
+#[allow(unused_imports, reason = "torn tabs get windows next")]
+pub use tear::{Live, Torn, adopt, take as take_torn};
 use text::UiFont;
 
 /// Ids for the terminals of new tabs, far from the platform's window ids.
 static NEXT_ID: AtomicU64 = AtomicU64::new(1 << 62);
+
+/// Modifiers that drag a pane from anywhere in it, exactly; Control alone selects a block.
+#[cfg(not(target_os = "macos"))]
+const PANE_DRAG: ModifiersState = ModifiersState::CONTROL.union(ModifiersState::ALT);
+#[cfg(target_os = "macos")]
+const PANE_DRAG: ModifiersState = ModifiersState::SUPER.union(ModifiersState::ALT);
 
 /// How the window is shown, which decides its resize border and the terminal's panel.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -129,7 +141,8 @@ pub struct Tabs {
     pointer: PhysicalPosition<f64>,
     hover: Hit,
     press: Press,
-    last_click: Option<Instant>,
+    /// What the left button last pressed on the bar, and when, to tell double clicks.
+    last_click: Option<(Hit, Instant)>,
     /// Wheel movement in the settings short of a whole step, in lines.
     wheel: f64,
     /// Where the bar was pressed to move the window, once the pointer moves.
@@ -141,6 +154,17 @@ pub struct Tabs {
     settings: Option<Settings>,
     pane_effects: panes::Effects,
     bar_effects: bar::Effects,
+    /// Space between the cards of a tab's panes, in logical pixels.
+    gap: f32,
+    /// The pane whose drag handle is under the pointer.
+    handle: Option<usize>,
+    divider: divider::State,
+    /// The tab whose name is being edited.
+    rename: Option<rename::Edit>,
+    /// The hovered icon's card.
+    peeking: peek::State,
+    /// A tab taken out of the window, waiting for a window of its own.
+    torn: Option<Torn>,
     /// Close the window instead of a tab once the active terminal exits.
     closing: bool,
     /// Font of the bar, menus and settings, and what it was last loaded for.
@@ -164,6 +188,11 @@ struct Tab<S = Session> {
     panes: Vec<Pane<S>>,
     /// Index of the pane that has the focus, which the tab shows in the bar.
     focus: usize,
+    /// Whether only the focused pane is shown, over the whole area.
+    zoom: bool,
+    /// Name given to the tab, shown instead of its focused pane's title.
+    #[allow(dead_code, reason = "the bar shows it next")]
+    name: Option<String>,
 }
 
 /// A terminal in a tab.
@@ -190,6 +219,9 @@ pub struct PaneDraw {
     pub size: SizeInfo,
     /// Where to draw it in the window, in pixels from the top left.
     pub frame: Rect,
+    /// The pane's card, which nothing of it is drawn outside of.
+    #[allow(dead_code, reason = "panes are clipped to it next")]
+    pub clip: Rect,
 }
 
 /// Where the mouse button that is down was pressed.
@@ -199,6 +231,8 @@ enum Press {
     None,
     Bar,
     Terminal,
+    /// On a divider between panes, which it drags.
+    Divider,
     /// Over something that used the press, such as a pane it focused, so the terminal gets
     /// neither it nor its release.
     Swallowed,
@@ -228,6 +262,8 @@ struct Session {
     config: Rc<UiConfig>,
     /// Size of the pane's terminal.
     size: SizeInfo,
+    /// Whether another window took over the terminal, which then keeps running.
+    adopted: bool,
 }
 
 /// Something to do with the tabs, from the bar or the keyboard.
@@ -240,6 +276,7 @@ enum Command {
     Last,
     Close,
     Fullscreen,
+    Zoom,
     #[cfg(windows)]
     Wsl,
 }
@@ -291,17 +328,60 @@ impl Tabs {
         Rect::new(0., top, width, height - top)
     }
 
-    /// Where each pane of the active tab is placed, by its index.
+    /// Pixels between the places of neighbouring panes, beyond the margins of their cards; it
+    /// may be negative, where the margins overlap, though never so much that the cards do.
+    fn spacing(&self) -> f32 {
+        if !self.panel || self.frame == Frame::Fullscreen {
+            return 0.;
+        }
+        ((self.gap - 2. * MARGIN) * self.scale as f32).round().max(-2. * self.margin())
+    }
+
+    /// Whether the modifiers that drag a pane are held, where there is anything to drag it to.
+    fn pane_drag(&self) -> bool {
+        self.modifiers == PANE_DRAG && self.count() > 1
+    }
+
+    /// The card a pane placed at `rect` is drawn in, inside its margin.
+    pub fn card(&self, rect: Rect) -> Rect {
+        rect.inset(self.margin())
+    }
+
+    /// Margin around each pane's card, in pixels.
+    fn margin(&self) -> f32 {
+        let panel = self.panel && self.frame != Frame::Fullscreen;
+        if panel { (MARGIN * self.scale as f32).round() } else { 0. }
+    }
+
+    /// Where each shown pane of the active tab is placed, by its index: only the focused one
+    /// while the tab is zoomed.
     pub fn pane_rects(&self) -> Vec<(usize, Rect)> {
+        match self.tabs.get(self.active) {
+            Some(tab) if tab.zoom => vec![(tab.focus, self.area())],
+            _ => self.placed(),
+        }
+    }
+
+    /// Where each pane of the active tab is placed by its layout, by its index, zoomed or not:
+    /// where a split or dock would cut it.
+    fn placed(&self) -> Vec<(usize, Rect)> {
         let Some(tab) = self.tabs.get(self.active) else { return Vec::new() };
-        let rects = tab.layout.rects(self.area()).into_iter();
+        let rects = tab.layout.rects(self.area(), self.spacing()).into_iter();
         rects.enumerate().map(|(index, (_, rect))| (index, rect)).collect()
+    }
+
+    /// The dividers between the active tab's panes; none while it is zoomed.
+    #[allow(dead_code, reason = "dividers are dragged next")]
+    pub fn dividers(&self) -> Vec<Divider> {
+        match self.tabs.get(self.active) {
+            Some(tab) if !tab.zoom => tab.layout.dividers(self.area(), self.spacing()),
+            _ => Vec::new(),
+        }
     }
 
     /// The pane of the active tab at `point`.
     fn pane_at(&self, point: PhysicalPosition<f64>) -> Option<usize> {
-        let rects = self.pane_rects();
-        rects.into_iter().find(|(_, rect)| rect.contains(point)).map(|(index, _)| index)
+        nearest(&self.pane_rects(), point, self.margin())
     }
 
     /// Where the live terminal's pane is placed.
@@ -321,18 +401,28 @@ impl Tabs {
         id.map_or(rect, |id| self.pane_effects.frame(id, rect, now))
     }
 
-    /// The panes of the active tab other than the live one, and where to draw them at `now`.
+    /// The card of the live terminal at `now`, which nothing of it is drawn outside of.
+    #[allow(dead_code, reason = "panes are clipped to it next")]
+    pub fn focused_clip(&self, now: Instant) -> Rect {
+        self.card(self.focused_frame(now))
+    }
+
+    /// The shown panes of the active tab other than the live one, and where to draw them at
+    /// `now`.
     pub fn background_panes(&self, now: Instant) -> Vec<PaneDraw> {
         let Some(tab) = self.tabs.get(self.active) else { return Vec::new() };
-        let rects = tab.layout.rects(self.area()).into_iter().zip(&tab.panes);
-        rects
-            .filter_map(|((id, rect), pane)| {
+        self.pane_rects()
+            .into_iter()
+            .filter_map(|(index, rect)| {
+                let pane = &tab.panes[index];
                 let session = pane.session.as_ref()?;
+                let frame = self.pane_effects.frame(pane.id, rect, now);
                 Some(PaneDraw {
                     terminal: session.terminal.clone(),
                     config: session.config.clone(),
                     size: session.size,
-                    frame: self.pane_effects.frame(id, rect, now),
+                    frame,
+                    clip: self.card(frame),
                 })
             })
             .collect()
@@ -343,6 +433,8 @@ impl Tabs {
         self.pane_effects.running(now)
             || self.bar_effects.running(now)
             || self.context.as_ref().is_some_and(|menu| menu.running(now))
+            || self.divider.running(now)
+            || self.peeking.running(now)
     }
 
     /// Every terminal kept aside.
@@ -354,7 +446,7 @@ impl Tabs {
 
 impl<S> Tab<S> {
     fn new(pane: Pane<S>) -> Self {
-        Self { layout: Split::Pane(pane.id), panes: vec![pane], focus: 0 }
+        Self { layout: Split::Pane(pane.id), panes: vec![pane], focus: 0, zoom: false, name: None }
     }
 
     /// The focused pane.
@@ -368,7 +460,10 @@ impl<S> Tab<S> {
     }
 
     /// Put `pane` beside the pane `target`, returning its index.
+    ///
+    /// Changing the panes, here and in `join` and `remove`, shows them all again.
     fn insert(&mut self, target: WindowId, pane: Pane<S>, axis: Axis, side: Side) -> usize {
+        self.zoom = false;
         let id = pane.id;
         let placed = self.layout.insert(target, Split::Pane(id), axis, side);
         debug_assert!(placed, "panes go beside a pane of their tab");
@@ -380,6 +475,7 @@ impl<S> Tab<S> {
     /// Put all the panes of `other` beside the pane `beside`, or else beside all of this tab's,
     /// keeping this tab's focus.
     fn join(&mut self, other: Tab<S>, beside: Option<WindowId>, axis: Axis, side: Side) {
+        self.zoom = false;
         match beside {
             Some(target) => {
                 let placed = self.layout.insert(target, other.layout, axis, side);
@@ -403,6 +499,7 @@ impl<S> Tab<S> {
     /// Take out the pane at `index`, of two or more; its neighbour takes its space, and the focus
     /// if it had it.
     fn remove(&mut self, index: usize) -> Pane<S> {
+        self.zoom = false;
         let id = self.panes[index].id;
         let focus = if index == self.focus { self.neighbour(index) } else { Some(self.focus) };
         let focus = focus.map(|focus| self.panes[focus].id);
@@ -452,6 +549,29 @@ fn relive<S>(tabs: &mut [Tab<S>], active: &mut usize, (tab, pane): (usize, usize
     tabs[tab].focus = pane;
 }
 
+/// The pane of `rects`, places by pane index, at `point`: of places that overlap there, the one
+/// whose card, `margin` inside it, is nearest.
+fn nearest(rects: &[(usize, Rect)], point: PhysicalPosition<f64>, margin: f32) -> Option<usize> {
+    let (x, y) = (point.x as f32, point.y as f32);
+    let distance = |rect: &Rect| {
+        let card = rect.inset(margin);
+        let dx = (card.x - x).max(x - card.right()).max(0.);
+        let dy = (card.y - y).max(y - card.bottom()).max(0.);
+        dx.hypot(dy)
+    };
+    let rects = rects.iter().filter(|(_, rect)| rect.contains(point));
+    let nearest = rects.min_by(|(_, a), (_, b)| distance(a).total_cmp(&distance(b)));
+    nearest.map(|&(index, _)| index)
+}
+
+/// The name a tab is given for `name`: trimmed, and none when that leaves nothing.
+#[allow(dead_code, reason = "tabs are renamed next")]
+fn tidy(name: Option<String>) -> Option<String> {
+    let name = name?;
+    let name = name.trim();
+    (!name.is_empty()).then(|| name.to_owned())
+}
+
 /// Move the live pane to `target`, where it stays live; `Dock` refers to the panes of the tab
 /// `shown`. Returns whether it moved.
 fn place<S>(
@@ -473,6 +593,7 @@ fn place<S>(
             }
         },
         Target::Merge(tab) if tab == from || tab >= tabs.len() => return false,
+        Target::Window => return false,
         _ => (),
     }
 
@@ -494,6 +615,7 @@ fn place<S>(
             tabs.insert(tab, Tab::new(moved));
             (tab, 0)
         },
+        Target::Window => unreachable!("refused above"),
     };
     *active = tab;
     tabs[tab].focus = index;
@@ -588,6 +710,7 @@ impl Session {
             shell_pid,
             config,
             size,
+            adopted: false,
         }))
     }
 
@@ -609,6 +732,23 @@ impl Session {
         self.config = ctx.config.clone();
         self.size = ctx.display.size_info;
     }
+
+    /// Hand the terminal to another window, which keeps it running.
+    fn into_live(mut self) -> Live {
+        self.adopted = true;
+        Live {
+            terminal: self.terminal.clone(),
+            notifier: Notifier(self.notifier.0.clone()),
+            search_state: mem::take(&mut self.search_state),
+            inline_search_state: mem::take(&mut self.inline_search_state),
+            window_config: mem::take(&mut self.window_config),
+            preserve_title: self.preserve_title,
+            #[cfg(not(windows))]
+            master_fd: self.master_fd,
+            #[cfg(not(windows))]
+            shell_pid: self.shell_pid,
+        }
+    }
 }
 
 /// The configuration of a pane: the window's with the pane's `overrides`, padded by `inset`
@@ -626,7 +766,9 @@ fn pad(config: Rc<UiConfig>, inset: u8) -> Rc<UiConfig> {
 
 impl Drop for Session {
     fn drop(&mut self) {
-        let _ = self.notifier.0.send(Msg::Shutdown);
+        if !self.adopted {
+            let _ = self.notifier.0.send(Msg::Shutdown);
+        }
     }
 }
 
@@ -675,7 +817,10 @@ pub fn window_event(
     }
     let layout = Layout::new(&ctx.display.tabs);
     let tabs = &mut ctx.display.tabs;
-    let modal = tabs.settings.is_some() || tabs.menu.is_some() || tabs.context.is_some();
+    let modal = tabs.settings.is_some()
+        || tabs.menu.is_some()
+        || tabs.context.is_some()
+        || tabs.rename.is_some();
     // The live terminal's pane, which pointer positions are given relative to.
     let pane = tabs.focused_rect();
     let (left, top) = (f64::from(pane.x), f64::from(pane.y));
@@ -686,6 +831,10 @@ pub fn window_event(
         },
         WindowEvent::ModifiersChanged(modifiers) => tabs.modifiers = modifiers.state(),
         WindowEvent::CloseRequested => tabs.closing = true,
+        WindowEvent::Ime(ime) if tabs.rename.is_some() => {
+            rename::ime(ctx, ime);
+            return None;
+        },
         WindowEvent::Ime(ime) if tabs.settings.is_some() => {
             let settings = tabs.settings.as_mut()?;
             match ime {
@@ -699,6 +848,10 @@ pub fn window_event(
         WindowEvent::KeyboardInput { event: ref key, is_synthetic: false, .. }
             if key.state == ElementState::Pressed =>
         {
+            if tabs.rename.is_some() {
+                rename::key(ctx, key, clipboard);
+                return None;
+            }
             if let Some(settings) = &mut tabs.settings {
                 let paste = || clipboard.load(ClipboardType::Clipboard);
                 let close = settings.key(key, tabs.modifiers, paste, config, &layout);
@@ -709,7 +862,10 @@ pub fn window_event(
                 redraw(ctx);
                 return None;
             }
-            if context::key(ctx, key, config, proxy) || dnd::key(ctx, key, config) {
+            if divider::key(ctx, key)
+                || context::key(ctx, key, config, proxy)
+                || dnd::key(ctx, key, config)
+            {
                 return None;
             }
             if ctx.display.tabs.menu.is_some() {
@@ -739,11 +895,34 @@ pub fn window_event(
                 dnd::moved(ctx, &layout, config);
                 return None;
             }
+            // Panes take the pointer only where nothing above them, nor a selection, has it.
+            let free = tabs.press != Press::Terminal && tabs.menu.is_none();
+            let over_panes = free && layout.hit(position) == Hit::Terminal;
+            if (tabs.press == Press::Divider || over_panes) && divider::moved(ctx, position) {
+                return Some(WindowEvent::CursorLeft { device_id });
+            }
+            let tabs = &mut ctx.display.tabs;
             let moved = |g: &PhysicalPosition<f64>| (g.x - position.x).hypot(g.y - position.y) > 4.;
             if tabs.grab.take_if(|grab| moved(grab)).is_some() {
                 let _ = ctx.display.window.winit().drag_window();
                 return None;
             }
+
+            // A pane is grabbed by its handle, or anywhere with the modifiers that drag it.
+            let handle = panes::handle_at(tabs, &layout, position).filter(|_| free);
+            if tabs.handle != handle {
+                tabs.handle = handle;
+                redraw(ctx);
+            }
+            let tabs = &ctx.display.tabs;
+            let over_pane = over_panes && tabs.pane_at(position).is_some();
+            if handle.is_some() || over_pane && tabs.pane_drag() {
+                hover(ctx, Hit::None);
+                ctx.display.window.set_mouse_cursor(CursorIcon::Grab);
+                return Some(WindowEvent::CursorLeft { device_id });
+            }
+
+            let tabs = &ctx.display.tabs;
             let mut hit = layout.hit(position);
             if hit == Hit::Terminal && tabs.pane_at(position) != Some(tabs.live().1) {
                 // Other panes only take the focus.
@@ -762,11 +941,19 @@ pub fn window_event(
             ctx.display.window.set_mouse_cursor(cursor);
             return Some(WindowEvent::CursorLeft { device_id });
         },
-        WindowEvent::CursorLeft { .. } => hover(ctx, Hit::None),
+        WindowEvent::CursorLeft { .. } => {
+            tabs.handle = None;
+            hover(ctx, Hit::None);
+        },
         // The release that would end a drag may never come once the window loses focus.
         WindowEvent::Focused(false) => {
             context::unfocused(ctx);
             dnd::cancel(ctx, config);
+            divider::release(ctx);
+            if ctx.display.tabs.press == Press::Divider {
+                ctx.display.tabs.press = Press::None;
+            }
+            rename::commit(ctx);
         },
         // Only the left button, which drags, drops.
         WindowEvent::MouseInput { state: ElementState::Released, button, .. }
@@ -784,8 +971,16 @@ pub fn window_event(
             match mem::take(&mut tabs.press) {
                 Press::Bar => {
                     tabs.grab = None;
+                    // A press that dragged starts no double click.
+                    if tabs.drag.as_ref().is_some_and(|drag| drag.moving) {
+                        tabs.last_click = None;
+                    }
                     dnd::release(ctx, config);
                     hover(ctx, layout.hit(ctx.display.tabs.pointer));
+                    return None;
+                },
+                Press::Divider => {
+                    divider::release(ctx);
                     return None;
                 },
                 Press::Swallowed => return None,
@@ -797,6 +992,10 @@ pub fn window_event(
             return None;
         },
         WindowEvent::MouseInput { button, .. } => {
+            if rename::press(ctx) {
+                return None;
+            }
+            let tabs = &mut ctx.display.tabs;
             let pointer = tabs.pointer;
             let wake = waker(tabs.live_id(window_id), proxy);
             if let Some(settings) = &mut tabs.settings {
@@ -813,6 +1012,25 @@ pub fn window_event(
             }
             let tabs = &mut ctx.display.tabs;
             let terminal = tabs.menu.is_none() && layout.hit(pointer) == Hit::Terminal;
+            if terminal && divider::press(ctx, button) {
+                return None;
+            }
+            let tabs = &mut ctx.display.tabs;
+            let dragged = terminal && tabs.pane_drag();
+            let grabbed = tabs.handle.or_else(|| tabs.pane_at(pointer).filter(|_| dragged));
+            if let (Some(pane), MouseButton::Left) = (grabbed, button) {
+                // Like its icon in the bar, a pane is focused as it is pressed to drag it.
+                tabs.press = Press::Bar;
+                let active = tabs.active;
+                focus_pane(ctx, active, pane, config);
+                dnd::start(ctx, &layout, Source::Pane(active, pane), active);
+                return None;
+            }
+            // The space between panes belongs to none of them.
+            if terminal && tabs.pane_at(pointer).is_none() {
+                tabs.press = Press::Swallowed;
+                return None;
+            }
             if terminal && over_other_pane {
                 tabs.press = Press::Swallowed;
                 let (active, pane) = (tabs.active, tabs.pane_at(pointer).unwrap_or_default());
@@ -902,7 +1120,9 @@ pub fn route<S: BuildHasher>(
         return Some(Event::new(event.into(), window));
     }
 
-    // Other panes only answer the terminal, keep their title and are redrawn when shown.
+    // Other panes only answer the terminal, keep their title and are redrawn when shown: beside
+    // the live one, which they are drawn with, unless a zoom hides them, or in a preview.
+    let shown = tab == tabs.active && !tabs.tabs[tab].zoom || peek::shows(tabs, id);
     let pane = &mut ctx.display.tabs.tabs[tab].panes[index];
     let session = pane.session.as_ref()?;
     let write = |text: String| session.notifier.notify(text.into_bytes());
@@ -914,8 +1134,7 @@ pub fn route<S: BuildHasher>(
         TerminalEvent::ResetTitle if !session.preserve_title && window_config.dynamic_title => {
             pane.title = pane.name.clone()
         },
-        // Panes beside the live one are drawn with it.
-        TerminalEvent::Wakeup if tab == ctx.display.tabs.active => (),
+        TerminalEvent::Wakeup if shown => (),
         TerminalEvent::PtyWrite(text) => write(text),
         TerminalEvent::TextAreaSizeRequest(format) => write(format(session.size.into())),
         TerminalEvent::ColorRequest(index, format) => {
@@ -983,6 +1202,7 @@ fn sync(ctx: &mut WindowContext, config: &Rc<UiConfig>, resize: bool) {
     let px = |value: f32| (value * ctx.display.window.scale_factor as f32).round() as u32;
     // Without its panel the terminal fills the window, its text still lined up with the logo.
     ctx.display.tabs.panel = config.window.panel;
+    ctx.display.tabs.gap = 2. * MARGIN;
     let (offset, inset) = match (shown, frame) {
         (false, _) => (0, 0),
         (_, Frame::Fullscreen) => (px(BAR), 0),
@@ -1036,13 +1256,15 @@ pub fn relayout(ctx: &mut WindowContext) {
     let (area, scale) = (tabs.area(), tabs.scale as f32);
     // A minimized window leaves no room for the panes.
     let active = tabs.active;
-    let Some(tab) = tabs.tabs.get_mut(active).filter(|_| area.w >= 1. && area.h >= 1.) else {
+    if tabs.tabs.get(active).is_none() || area.w < 1. || area.h < 1. {
         return;
-    };
+    }
 
-    let rects = tab.layout.rects(area);
-    for (&(_, rect), pane) in rects.iter().zip(&mut tab.panes) {
-        let Some(session) = &mut pane.session else { continue };
+    // Panes hidden by a zoom keep their size.
+    let rects = tabs.pane_rects();
+    let Some(tab) = tabs.tabs.get_mut(active) else { return };
+    for &(index, rect) in &rects {
+        let Some(session) = &mut tab.panes[index].session else { continue };
         let new = fit(rect, cells, &session.config, scale);
         let old = mem::replace(&mut session.size, new);
         if new.columns() != old.columns() || new.screen_lines() != old.screen_lines() {
@@ -1050,7 +1272,10 @@ pub fn relayout(ctx: &mut WindowContext) {
             session.notifier.on_resize(new.into());
         }
     }
-    tabs.pane_effects.place(&rects, Instant::now());
+    let placed: Vec<_> = rects.iter().map(|&(index, rect)| (tab.panes[index].id, rect)).collect();
+    // A dragged divider moves the panes with the pointer.
+    let animate = tabs.press != Press::Divider;
+    tabs.pane_effects.place(&placed, Instant::now(), animate);
 
     let rect = tabs.focused_rect();
     if (rect.w, rect.h) != (size.width(), size.height()) {
@@ -1149,9 +1374,10 @@ fn shortcut(ctx: &WindowContext, key: &KeyEvent) -> Option<Command> {
                 Action::SelectTab8 => Command::Select(7),
                 Action::SelectTab9 => Command::Select(8),
                 Action::SelectLastTab => Command::Last,
+                Action::TogglePaneZoom => Command::Zoom,
                 _ => continue,
             };
-            return Some(command);
+            return Some(command).filter(|&command| applies(ctx, command));
         }
     }
 
@@ -1162,9 +1388,10 @@ fn shortcut(ctx: &WindowContext, key: &KeyEvent) -> Option<Command> {
 
     let control = ModifiersState::CONTROL;
     let shifted = ModifiersState::CONTROL | ModifiersState::SHIFT;
-    Some(match (modifiers, logical_key.as_ref()) {
+    let command = match (modifiers, logical_key.as_ref()) {
         (m, Key::Character("t")) if m == shifted => Command::New,
         (m, Key::Character("w")) if m == shifted => Command::Close,
+        (m, Key::Character("z")) if m == shifted => Command::Zoom,
         #[cfg(windows)]
         (m, Key::Character("u")) if m == shifted => Command::Wsl,
         (m, Key::Named(NamedKey::Tab)) if m == control => Command::Next,
@@ -1175,7 +1402,16 @@ fn shortcut(ctx: &WindowContext, key: &KeyEvent) -> Option<Command> {
         },
         (m, Key::Named(NamedKey::F11)) if m.is_empty() => Command::Fullscreen,
         _ => return None,
-    })
+    };
+    Some(command).filter(|&command| applies(ctx, command))
+}
+
+/// Whether `command` does something, which only a zoom may not: the key then goes to the
+/// terminal.
+fn applies(ctx: &WindowContext, command: Command) -> bool {
+    let tabs = &ctx.display.tabs;
+    let panes = tabs.tabs.get(tabs.active).map_or(0, |tab| tab.panes.len());
+    !matches!(command, Command::Zoom) || panes > 1
 }
 
 fn run(
@@ -1197,6 +1433,7 @@ fn run(
         Command::Last => select(ctx, len - 1, config),
         Command::Close => close_pane(ctx, active, focus, config),
         Command::Fullscreen => ctx.display.window.toggle_fullscreen(),
+        Command::Zoom => toggle_zoom(ctx),
         #[cfg(windows)]
         Command::Wsl => open(ctx, config, proxy, Some(&Profile::new("WSL", "wsl.exe --cd ~"))),
     }
@@ -1221,8 +1458,10 @@ fn click(
         return;
     }
 
+    let double = button == MouseButton::Left && double_click(&mut ctx.display.tabs, hit);
     let window = ctx.display.window.winit();
     match (hit, button) {
+        (Hit::Tab(index), MouseButton::Left) if double => rename::start(ctx, index),
         (Hit::Tab(index), MouseButton::Left) => {
             let previous = ctx.display.tabs.active;
             select(ctx, index, config);
@@ -1236,6 +1475,9 @@ fn click(
         (Hit::Close(index), MouseButton::Left)
         | (Hit::Tab(index) | Hit::Icon(index, _) | Hit::Close(index), MouseButton::Middle) => {
             close(ctx, index, config)
+        },
+        (Hit::Tab(index) | Hit::Icon(index, _) | Hit::Close(index), MouseButton::Right) => {
+            context::open_tab(ctx, index, config, proxy)
         },
         (Hit::New, MouseButton::Left) => run(ctx, Command::New, config, proxy),
         (Hit::Menu, MouseButton::Left) => {
@@ -1256,20 +1498,24 @@ fn click(
         (Hit::Resize(direction), MouseButton::Left) => {
             let _ = window.drag_resize_window(direction);
         },
-        (Hit::Drag, MouseButton::Left) => {
-            // A second click soon after the first maximizes instead.
-            let now = Instant::now();
-            let last = ctx.display.tabs.last_click.replace(now);
-            if last.is_some_and(|last| now - last < Duration::from_millis(500)) {
-                ctx.display.tabs.last_click = None;
-                ctx.display.window.toggle_maximized();
-            } else {
-                ctx.display.tabs.grab = Some(pointer);
-            }
-        },
+        // A second click soon after the first maximizes instead.
+        (Hit::Drag, MouseButton::Left) if double => ctx.display.window.toggle_maximized(),
+        (Hit::Drag, MouseButton::Left) => ctx.display.tabs.grab = Some(pointer),
         (Hit::Drag, MouseButton::Right) => window.show_window_menu(pointer),
         _ => (),
     }
+}
+
+/// Whether a press of the left button on `hit` makes a double click with the press before it.
+fn double_click(tabs: &mut Tabs, hit: Hit) -> bool {
+    let now = Instant::now();
+    let last = tabs.last_click.replace((hit, now));
+    let double =
+        last.is_some_and(|(last, at)| last == hit && now - at < Duration::from_millis(500));
+    if double {
+        tabs.last_click = None;
+    }
+    double
 }
 
 fn menu_key(
@@ -1410,12 +1656,10 @@ pub fn split(
 ) -> bool {
     let tabs = &ctx.display.tabs;
     let Some(tab) = tabs.tabs.get(tabs.active) else { return false };
-    let size = &ctx.display.size_info;
-    let min = (
-        split::MIN_COLUMNS * size.cell_width() + 2. * size.padding_x(),
-        split::MIN_LINES * size.cell_height() + 2. * size.padding_y(),
-    );
-    if !split::fits(tabs.focused_rect(), axis, side, &Split::Pane(()), min) {
+    let min = min_pane(&ctx.display.size_info);
+    // A split unzooms the tab, so the pane is cut where its layout places it.
+    let rect = tabs.placed().get(tab.focus).map_or_else(|| tabs.area(), |&(_, rect)| rect);
+    if !split::fits(rect, axis, side, &Split::Pane(()), min, tabs.spacing()) {
         return false;
     }
 
@@ -1442,6 +1686,47 @@ pub fn split(
     let index = tab.insert(target, pane, axis, side);
     focus_pane(ctx, active, index, config);
     true
+}
+
+/// Smallest size of a pane, in pixels, for terminals of `size`'s cells and padding.
+pub fn min_pane(size: &SizeInfo) -> (f32, f32) {
+    (
+        split::MIN_COLUMNS * size.cell_width() + 2. * size.padding_x(),
+        split::MIN_LINES * size.cell_height() + 2. * size.padding_y(),
+    )
+}
+
+/// Give the pair of panes `index` of the active tab, in the order of its tree, `ratio` of their
+/// space, as far as every pane keeps its smallest size.
+#[allow(dead_code, reason = "dividers are dragged next")]
+pub fn set_ratio(ctx: &mut WindowContext, index: usize, ratio: f32) {
+    let min = min_pane(&ctx.display.size_info);
+    let tabs = &mut ctx.display.tabs;
+    let (area, spacing) = (tabs.area(), tabs.spacing());
+    let Some(tab) = tabs.tabs.get_mut(tabs.active) else { return };
+    let Some((lo, hi)) = tab.layout.ratio_range(index, area, min, spacing) else { return };
+    if tab.layout.set_ratio(index, ratio.clamp(lo, hi)) {
+        relayout(ctx);
+    }
+}
+
+/// Show only the focused pane of the active tab over its whole area, or all its panes again.
+pub fn toggle_zoom(ctx: &mut WindowContext) {
+    let tabs = &mut ctx.display.tabs;
+    let Some(tab) = tabs.tabs.get_mut(tabs.active).filter(|tab| tab.panes.len() > 1) else {
+        return;
+    };
+    tab.zoom = !tab.zoom;
+    ctx.display.damage_tracker.frame().mark_fully_damaged();
+    relayout(ctx);
+}
+
+/// Name the tab at `tab`, or give it back its focused pane's title with none.
+#[allow(dead_code, reason = "tabs are renamed next")]
+pub fn rename(ctx: &mut WindowContext, tab: usize, name: Option<String>) {
+    let Some(tab) = ctx.display.tabs.tabs.get_mut(tab) else { return };
+    tab.name = tidy(name);
+    redraw(ctx);
 }
 
 /// Make the tab at `index` the active one.
@@ -1751,5 +2036,76 @@ mod tests {
         assert!(group(&mut model.tabs, &mut model.active, 0, dock(0), area));
         assert_eq!((model.tabs.len(), model.ids(0), model.live), (1, vec![1, 7, 3, 6, 2, 5, 4], 6));
         model.check();
+    }
+
+    #[test]
+    fn changing_panes_unzooms() {
+        let mut model = Model::new(2);
+        model.split(3, Axis::Row, Side::After);
+        let zoom = |model: &mut Model| model.tabs[0].zoom = true;
+
+        zoom(&mut model);
+        model.split(4, Axis::Column, Side::After);
+        assert!(!model.tabs[0].zoom, "insert");
+
+        zoom(&mut model);
+        model.close((0, 0));
+        assert!(!model.tabs[0].zoom, "remove");
+
+        zoom(&mut model);
+        let area = Rect::new(0., 0., 800., 600.);
+        model.focus((1, 0));
+        assert!(group(&mut model.tabs, &mut model.active, 0, None, area));
+        assert!(!model.tabs[0].zoom, "join");
+
+        // Focusing another pane keeps the zoom, which then shows that pane.
+        zoom(&mut model);
+        model.focus((0, 0));
+        assert!(model.tabs[0].zoom);
+    }
+
+    #[test]
+    fn names_are_trimmed() {
+        assert_eq!(tidy(Some("  Build  ".into())), Some("Build".into()));
+        assert_eq!(tidy(Some(" \t ".into())), None);
+        assert_eq!(tidy(Some(String::new())), None);
+        assert_eq!(tidy(None), None);
+    }
+
+    #[test]
+    fn tearing_never_empties_the_window() {
+        use tear::tearable;
+        let mut model = Model::new(1);
+        // The only pane of the only tab.
+        assert!(!tearable(&model.tabs, Source::Tab(0)));
+        assert!(!tearable(&model.tabs, Source::Pane(0, 0)));
+        // A pane of a group, but not the group, which is the only tab.
+        model.split(2, Axis::Row, Side::After);
+        assert!(tearable(&model.tabs, Source::Pane(0, 1)));
+        assert!(!tearable(&model.tabs, Source::Pane(0, 2)));
+        assert!(!tearable(&model.tabs, Source::Tab(0)));
+        // With another tab, any tab, or a tab's only pane.
+        model.tabs.push(Tab::new(pane(3, Some(3))));
+        assert!(tearable(&model.tabs, Source::Tab(0)));
+        assert!(tearable(&model.tabs, Source::Tab(1)));
+        assert!(tearable(&model.tabs, Source::Pane(1, 0)));
+        assert!(!tearable(&model.tabs, Source::Tab(2)));
+    }
+
+    #[test]
+    fn pane_at_prefers_nearest_card() {
+        let at = |x: f64, y: f64| PhysicalPosition::new(x, y);
+        // Places overlapping by 12 px, their cards 2 px apart with a margin of 8.
+        let rects = [(0, Rect::new(0., 0., 106., 100.)), (1, Rect::new(94., 0., 106., 100.))];
+        assert_eq!(nearest(&rects, at(50., 50.), 8.), Some(0));
+        assert_eq!(nearest(&rects, at(97., 50.), 8.), Some(0));
+        assert_eq!(nearest(&rects, at(98.5, 50.), 8.), Some(0));
+        assert_eq!(nearest(&rects, at(101., 50.), 8.), Some(1));
+        assert_eq!(nearest(&rects, at(105., 50.), 8.), Some(1));
+        assert_eq!(nearest(&rects, at(250., 50.), 8.), None);
+        // Without overlap, the place at the point.
+        let rects = [(0, Rect::new(0., 0., 100., 100.)), (1, Rect::new(100., 0., 100., 100.))];
+        assert_eq!(nearest(&rects, at(99., 2.), 8.), Some(0));
+        assert_eq!(nearest(&rects, at(100., 2.), 8.), Some(1));
     }
 }

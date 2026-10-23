@@ -42,7 +42,7 @@ impl<P: Copy + PartialEq> Split<P> {
     /// The panes in the order of the tree: those of the first part, then of the second, so
     /// panes side by side or stacked come left to right or top to bottom.
     pub fn panes(&self) -> Vec<P> {
-        self.rects(Rect::default()).into_iter().map(|(pane, _)| pane).collect()
+        self.rects(Rect::default(), 0.).into_iter().map(|(pane, _)| pane).collect()
     }
 
     /// This and `new` side by side or stacked, sharing the space evenly.
@@ -81,11 +81,94 @@ impl<P: Copy + PartialEq> Split<P> {
         }
     }
 
-    /// Each pane's part of `area`, which they tile in whole pixels.
-    pub fn rects(&self, area: Rect) -> Vec<(P, Rect)> {
+    /// Each pane's part of `area`, which they tile in whole pixels, `spacing` apart.
+    ///
+    /// A negative `spacing` makes neighbours overlap by as much.
+    pub fn rects(&self, area: Rect, spacing: f32) -> Vec<(P, Rect)> {
         let mut rects = Vec::new();
-        self.tile(area, &mut rects);
+        self.tile(area, spacing, &mut rects);
         rects
+    }
+
+    /// The divider of each pair of parts laid out in `area`, in the order of the tree.
+    #[allow(dead_code, reason = "dividers are dragged next")]
+    pub fn dividers(&self, area: Rect, spacing: f32) -> Vec<Divider> {
+        let mut dividers = Vec::new();
+        self.walk(area, spacing, &mut |split, area| {
+            if let Split::Pair { axis, ratio, .. } = *split {
+                let (a, _) = halves(area, axis, ratio, spacing);
+                let at = match axis {
+                    Axis::Row => a.right() + spacing / 2.,
+                    Axis::Column => a.bottom() + spacing / 2.,
+                };
+                dividers.push(Divider { index: dividers.len(), axis, area, at });
+            }
+        });
+        dividers
+    }
+
+    /// Give the pair `index`, in the order of the tree, `ratio` of its space; false when there is
+    /// no such pair.
+    #[allow(dead_code, reason = "dividers are dragged next")]
+    pub fn set_ratio(&mut self, index: usize, ratio: f32) -> bool {
+        let mut index = index;
+        match self.pair_mut(&mut index) {
+            Some(Split::Pair { ratio: old, .. }) => {
+                *old = ratio;
+                true
+            },
+            _ => false,
+        }
+    }
+
+    /// Smallest size this can be laid out in, keeping its ratios, with every pane at least
+    /// `min`, `spacing` apart.
+    #[allow(dead_code, reason = "dividers are dragged next")]
+    pub fn min_size(&self, min: (f32, f32), spacing: f32) -> (f32, f32) {
+        match self {
+            Split::Pane(_) => min,
+            Split::Pair { axis, ratio, first, second } => {
+                let (a, b) = (first.min_size(min, spacing), second.min_size(min, spacing));
+                let len = |a: f32, b: f32| spacing + (a / ratio).max(b / (1. - ratio));
+                match axis {
+                    Axis::Row => (len(a.0, b.0), a.1.max(b.1)),
+                    Axis::Column => (a.0.max(b.0), len(a.1, b.1)),
+                }
+            },
+        }
+    }
+
+    /// The ratios the pair `index` may take in `area` with every pane at least `min`, from
+    /// lowest to highest; the middle when it cannot leave them that.
+    #[allow(dead_code, reason = "dividers are dragged next")]
+    pub fn ratio_range(
+        &self,
+        index: usize,
+        area: Rect,
+        min: (f32, f32),
+        spacing: f32,
+    ) -> Option<(f32, f32)> {
+        let mut range = None;
+        let mut count = 0;
+        self.walk(area, spacing, &mut |split, area| {
+            let Split::Pair { axis, first, second, .. } = split else { return };
+            if count == index {
+                let (a, b) = (first.min_size(min, spacing), second.min_size(min, spacing));
+                let (len, a, b) = match axis {
+                    Axis::Row => (area.w, a.0, b.0),
+                    Axis::Column => (area.h, a.1, b.1),
+                };
+                let (lo, hi) = (a / (len - spacing), 1. - b / (len - spacing));
+                range = Some(if lo <= hi { (lo, hi) } else { (0.5, 0.5) });
+            }
+            count += 1;
+        });
+        range
+    }
+
+    /// Whether every pane laid out in `area` is at least `min` in size.
+    pub fn fits_in(&self, area: Rect, min: (f32, f32), spacing: f32) -> bool {
+        self.rects(area, spacing).iter().all(|(_, rect)| rect.w >= min.0 && rect.h >= min.1)
     }
 
     /// The pane that takes the space of `pane` once it closes: the nearest one beside it.
@@ -120,33 +203,69 @@ impl<P: Copy + PartialEq> Split<P> {
         }
     }
 
-    fn tile(&self, area: Rect, rects: &mut Vec<(P, Rect)>) {
-        match self {
-            Split::Pane(pane) => rects.push((*pane, area)),
-            Split::Pair { axis, ratio, first, second } => {
-                let (a, b) = halves(area, *axis, *ratio);
-                first.tile(a, rects);
-                second.tile(b, rects);
-            },
+    /// The pair `index` counts down to, in the order of the tree.
+    #[allow(dead_code, reason = "dividers are dragged next")]
+    fn pair_mut(&mut self, index: &mut usize) -> Option<&mut Self> {
+        if let Split::Pane(_) = self {
+            return None;
+        }
+        if *index == 0 {
+            return Some(self);
+        }
+        *index -= 1;
+        let Split::Pair { first, second, .. } = self else { return None };
+        match first.pair_mut(index) {
+            Some(pair) => Some(pair),
+            None => second.pair_mut(index),
+        }
+    }
+
+    fn tile(&self, area: Rect, spacing: f32, rects: &mut Vec<(P, Rect)>) {
+        self.walk(area, spacing, &mut |split, area| {
+            if let Split::Pane(pane) = split {
+                rects.push((*pane, area));
+            }
+        });
+    }
+
+    /// Visit this and every part below it in the order of the tree, with where it is laid out.
+    fn walk(&self, area: Rect, spacing: f32, visit: &mut impl FnMut(&Self, Rect)) {
+        visit(self, area);
+        if let Split::Pair { axis, ratio, first, second } = self {
+            let (a, b) = halves(area, *axis, *ratio, spacing);
+            first.walk(a, spacing, visit);
+            second.walk(b, spacing, visit);
         }
     }
 }
 
-/// `area` cut in two along `axis`, the first part taking `ratio` of it.
-fn halves(area: Rect, axis: Axis, ratio: f32) -> (Rect, Rect) {
+/// Where the space between the two parts of a pair is.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Divider {
+    /// The pair's place in the order of the tree.
+    pub index: usize,
+    pub axis: Axis,
+    /// Where the pair is laid out.
+    pub area: Rect,
+    /// The middle of the space between its parts: an x for a row, a y for a column.
+    pub at: f32,
+}
+
+/// `area` cut in two `spacing` apart along `axis`, the first part taking `ratio` of the rest.
+fn halves(area: Rect, axis: Axis, ratio: f32, spacing: f32) -> (Rect, Rect) {
     match axis {
         Axis::Row => {
-            let w = (area.w * ratio).round();
+            let w = ((area.w - spacing) * ratio).round();
             (
                 Rect::new(area.x, area.y, w, area.h),
-                Rect::new(area.x + w, area.y, area.w - w, area.h),
+                Rect::new(area.x + w + spacing, area.y, area.w - w - spacing, area.h),
             )
         },
         Axis::Column => {
-            let h = (area.h * ratio).round();
+            let h = ((area.h - spacing) * ratio).round();
             (
                 Rect::new(area.x, area.y, area.w, h),
-                Rect::new(area.x, area.y + h, area.w, area.h - h),
+                Rect::new(area.x, area.y + h + spacing, area.w, area.h - h - spacing),
             )
         },
     }
@@ -167,21 +286,21 @@ pub fn drop_zone(pane: Rect, (x, y): (f32, f32)) -> (Axis, Side) {
 }
 
 /// Whether `new` can go on `side` of `pane` along `axis` with every pane at least `min` pixels
-/// in size, those of `new` included.
+/// in size, those of `new` included, `spacing` apart.
 pub fn fits<P: Copy + PartialEq>(
     pane: Rect,
     axis: Axis,
     side: Side,
     new: &Split<P>,
     min: (f32, f32),
+    spacing: f32,
 ) -> bool {
-    let (a, b) = halves(pane, axis, 0.5);
+    let (a, b) = halves(pane, axis, 0.5, spacing);
     let (old, area) = match side {
         Side::Before => (b, a),
         Side::After => (a, b),
     };
-    let rects = new.rects(area).into_iter().map(|(_, rect)| rect);
-    [old].into_iter().chain(rects).all(|rect| rect.w >= min.0 && rect.h >= min.1)
+    old.w >= min.0 && old.h >= min.1 && new.fits_in(area, min, spacing)
 }
 
 #[cfg(test)]
@@ -215,7 +334,7 @@ mod tests {
         let mut split = three();
         assert!(split.insert(3, Split::Pane(4), Axis::Row, Side::After));
         assert_eq!(split.panes(), [1, 2, 3, 4]);
-        let rects = split.rects(Rect::new(0., 0., 400., 200.));
+        let rects = split.rects(Rect::new(0., 0., 400., 200.), 0.);
         assert_eq!(rects[2], (3, Rect::new(200., 100., 100., 100.)));
         assert_eq!(rects[3], (4, Rect::new(300., 100., 100., 100.)));
         assert!(!split.insert(9, Split::Pane(5), Axis::Row, Side::After));
@@ -260,7 +379,7 @@ mod tests {
                 assert!(split.insert(target, Split::Pane(id), axis, side));
             }
             let area = Rect::new(3., 41., 1000. + next(400) as f32, 500. + next(300) as f32);
-            let rects = split.rects(area);
+            let rects = split.rects(area, 0.);
             assert_eq!(rects.len(), count as usize);
 
             let mut covered = 0.;
@@ -311,10 +430,10 @@ mod tests {
     fn fits_refuses_small_halves() {
         let pane = Rect::new(0., 0., 400., 200.);
         let new = Split::Pane(9);
-        assert!(fits(pane, Axis::Row, Side::After, &new, (200., 200.)));
-        assert!(!fits(pane, Axis::Row, Side::After, &new, (201., 10.)));
-        assert!(fits(pane, Axis::Column, Side::Before, &new, (400., 100.)));
-        assert!(!fits(pane, Axis::Column, Side::Before, &new, (10., 101.)));
+        assert!(fits(pane, Axis::Row, Side::After, &new, (200., 200.), 0.));
+        assert!(!fits(pane, Axis::Row, Side::After, &new, (201., 10.), 0.));
+        assert!(fits(pane, Axis::Column, Side::Before, &new, (400., 100.), 0.));
+        assert!(!fits(pane, Axis::Column, Side::Before, &new, (10., 101.), 0.));
     }
 
     #[test]
@@ -322,10 +441,125 @@ mod tests {
         let pane = Rect::new(0., 0., 400., 200.);
         let group = pair(Axis::Row, Split::Pane(8), Split::Pane(9));
         // Each half has room for one pane, but not for the group's two side by side.
-        assert!(!fits(pane, Axis::Row, Side::After, &group, (150., 50.)));
-        assert!(fits(pane, Axis::Row, Side::After, &group, (100., 50.)));
+        assert!(!fits(pane, Axis::Row, Side::After, &group, (150., 50.), 0.));
+        assert!(fits(pane, Axis::Row, Side::After, &group, (100., 50.), 0.));
         // Docked above, its panes share the half's whole width.
-        assert!(fits(pane, Axis::Column, Side::Before, &group, (150., 50.)));
-        assert!(!fits(pane, Axis::Column, Side::Before, &group, (150., 101.)));
+        assert!(fits(pane, Axis::Column, Side::Before, &group, (150., 50.), 0.));
+        assert!(!fits(pane, Axis::Column, Side::Before, &group, (150., 101.), 0.));
+    }
+
+    #[test]
+    fn fits_with_spacing() {
+        let pane = Rect::new(0., 0., 400., 200.);
+        let new = Split::Pane(9);
+        // 20 px between the halves leaves each 190.
+        assert!(fits(pane, Axis::Row, Side::After, &new, (190., 10.), 20.));
+        assert!(!fits(pane, Axis::Row, Side::After, &new, (191., 10.), 20.));
+        // Overlapping halves are larger.
+        assert!(fits(pane, Axis::Row, Side::After, &new, (205., 10.), -10.));
+    }
+
+    const AREA: Rect = Rect { x: 10., y: 40., w: 810., h: 600. };
+
+    #[test]
+    fn rects_keep_spacing_apart() {
+        let split = three();
+        // Without spacing they tile as before.
+        let rects = split.rects(AREA, 0.);
+        assert_eq!(rects[0].1, Rect::new(10., 40., 405., 600.));
+        assert_eq!(rects[1].1, Rect::new(415., 40., 405., 300.));
+
+        let rects = split.rects(AREA, 10.);
+        assert_eq!(rects[0].1, Rect::new(10., 40., 400., 600.));
+        assert_eq!(rects[1].1, Rect::new(420., 40., 400., 295.));
+        assert_eq!(rects[2].1, Rect::new(420., 345., 400., 295.));
+        // Halves and the space between them make the whole length.
+        assert_eq!(rects[0].1.w + 10. + rects[1].1.w, AREA.w);
+        assert_eq!(rects[1].1.h + 10. + rects[2].1.h, AREA.h);
+        assert!(rects[0].1.right() < rects[1].1.x);
+
+        // Negative spacing overlaps neighbours by as much.
+        let rects = split.rects(AREA, -16.);
+        assert_eq!(rects[0].1.right() - rects[1].1.x, 16.);
+        assert_eq!(rects[1].1.bottom() - rects[2].1.y, 16.);
+        assert_eq!(rects[2].1.right(), AREA.right());
+    }
+
+    #[test]
+    fn dividers_sit_in_the_middle_of_gaps() {
+        let split = three();
+        assert!(Split::Pane(1).dividers(AREA, 10.).is_empty());
+        let dividers = split.dividers(AREA, 10.);
+        assert_eq!(dividers.len(), 2);
+        assert_eq!(dividers[0], Divider { index: 0, axis: Axis::Row, area: AREA, at: 415. });
+        let right = Rect::new(420., 40., 400., 600.);
+        assert_eq!(dividers[1], Divider { index: 1, axis: Axis::Column, area: right, at: 340. });
+        // Without spacing, on the edge the parts share.
+        assert_eq!(split.dividers(AREA, 0.)[0].at, split.rects(AREA, 0.)[1].1.x);
+    }
+
+    #[test]
+    fn set_ratio_by_order_of_the_tree() {
+        let mut split = pair(Axis::Row, three(), Split::Pane(4));
+        assert!(split.set_ratio(2, 0.25));
+        assert!(split.set_ratio(0, 0.75));
+        assert!(!split.set_ratio(3, 0.5));
+        let rects = split.rects(Rect::new(0., 0., 800., 400.), 0.);
+        assert_eq!(rects[2].1, Rect::new(300., 100., 300., 300.));
+        assert_eq!(rects[3].1, Rect::new(600., 0., 200., 400.));
+        // Ratios survive removing a pane elsewhere.
+        let split = split.remove(4).unwrap();
+        assert_eq!(split.rects(Rect::new(0., 0., 800., 400.), 0.)[1].1.h, 100.);
+    }
+
+    #[test]
+    fn min_size_adds_up_parts() {
+        let min = (100., 50.);
+        assert_eq!(Split::Pane(1).min_size(min, 10.), min);
+        // 1 beside the column of 2 and 3.
+        assert_eq!(three().min_size(min, 10.), (210., 110.));
+        assert_eq!(three().min_size(min, -16.), (184., 84.));
+    }
+
+    #[test]
+    fn ratio_range_honours_nested_minimums() {
+        let min = (100., 50.);
+        let area = Rect::new(0., 0., 410., 200.);
+        // The first part needs 100 of 400, the second (a column) 100 too.
+        assert_eq!(three().ratio_range(0, area, min, 10.), Some((0.25, 0.75)));
+        // A row of two on the right needs 210 of the 400.
+        let split =
+            pair(Axis::Row, Split::Pane(1), pair(Axis::Row, Split::Pane(2), Split::Pane(3)));
+        let (lo, hi) = split.ratio_range(0, area, min, 10.).unwrap();
+        assert_eq!((lo, hi), (0.25, 1. - 210. / 400.));
+        let mut split = split;
+        for ratio in [lo, hi] {
+            split.set_ratio(0, ratio);
+            assert!(split.fits_in(area, min, 10.), "{ratio}");
+        }
+        // The nested pair, laid out in the second part, has no room left to move.
+        split.set_ratio(0, hi);
+        assert_eq!(split.ratio_range(1, area, min, 10.), Some((0.5, 0.5)));
+        assert_eq!(split.ratio_range(2, area, min, 10.), None);
+        // A pair keeps its ratio as its parent moves, so its parts need room in that ratio.
+        let mut split =
+            pair(Axis::Row, Split::Pane(1), pair(Axis::Row, Split::Pane(2), Split::Pane(3)));
+        split.set_ratio(1, 0.3);
+        let area = Rect::new(0., 0., 1010., 200.);
+        let (_, hi) = split.ratio_range(0, area, min, 10.).unwrap();
+        split.set_ratio(0, hi);
+        assert!(split.fits_in(area, min, 10.), "{:?}", split.rects(area, 10.));
+        // Too small for both: the middle.
+        let small = Rect::new(0., 0., 150., 200.);
+        assert_eq!(three().ratio_range(0, small, min, 10.), Some((0.5, 0.5)));
+    }
+
+    #[test]
+    fn fits_in_checks_every_pane() {
+        let min = (100., 50.);
+        assert!(three().fits_in(Rect::new(0., 0., 210., 110.), min, 10.));
+        assert!(!three().fits_in(Rect::new(0., 0., 209., 110.), min, 10.));
+        assert!(!three().fits_in(Rect::new(0., 0., 210., 109.), min, 10.));
+        assert!(three().fits_in(Rect::new(0., 0., 200., 100.), min, 0.));
     }
 }
