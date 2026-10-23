@@ -729,15 +729,13 @@ mod tests {
 
     use super::*;
     use crate::window_context::tabs::Frame;
-    use crate::window_context::tabs::anim::scale;
-
     fn id(id: u64) -> WindowId {
         WindowId::from(id)
     }
 
-    /// Instants `ms` milliseconds of animation, as slowed down, after `now`.
+    /// Instants `ms` milliseconds after `now`.
     fn after(now: Instant, ms: u64) -> Instant {
-        now + Duration::from_millis(ms).mul_f32(scale())
+        now + Duration::from_millis(ms)
     }
 
     const LEFT: Rect = Rect { x: 0., y: 40., w: 400., h: 600. };
@@ -761,13 +759,11 @@ mod tests {
         assert!(!effects.running(now));
 
         effects.place(&[(id(1), LEFT), (id(2), RIGHT)], now, true);
-        assert_eq!(effects.running(now), scale() > 0.);
-        if scale() > 0. {
-            assert_eq!(effects.frame(id(1), LEFT, now), WHOLE);
-            assert_eq!(effects.frame(id(2), RIGHT, now), popped(RIGHT));
-            let middle = effects.frame(id(1), LEFT, after(now, MOVE_MS / 2));
-            assert!(middle.w < WHOLE.w && middle.w > LEFT.w * 0.9, "{middle:?}");
-        }
+        assert!(effects.running(now));
+        assert_eq!(effects.frame(id(1), LEFT, now), WHOLE);
+        assert_eq!(effects.frame(id(2), RIGHT, now), popped(RIGHT));
+        let middle = effects.frame(id(1), LEFT, after(now, MOVE_MS / 2));
+        assert!(middle.w < WHOLE.w && middle.w > LEFT.w * 0.9, "{middle:?}");
         let end = after(now, MOVE_MS);
         assert_eq!(effects.frame(id(1), LEFT, end), LEFT);
         assert_eq!(effects.frame(id(2), RIGHT, end), RIGHT);
@@ -780,7 +776,7 @@ mod tests {
         let mut effects = Effects::default();
         effects.place(&[(id(1), LEFT), (id(2), RIGHT)], now, true);
         effects.place(&[(id(2), WHOLE)], now, true);
-        assert_eq!(effects.frame(id(2), WHOLE, now), if scale() > 0. { RIGHT } else { WHOLE });
+        assert_eq!(effects.frame(id(2), WHOLE, now), RIGHT);
         assert_eq!(effects.frame(id(1), LEFT, now), LEFT, "closed panes are forgotten");
     }
 
@@ -838,7 +834,7 @@ mod tests {
         assert_eq!(effects.preview(None, later), None);
         effects.preview(Some(RIGHT), later);
         let (rect, _) = effects.drop.get().unwrap();
-        assert_eq!(rect.get(later), if scale() > 0. { popped(RIGHT) } else { RIGHT });
+        assert_eq!(rect.get(later), popped(RIGHT));
     }
 
     #[test]
@@ -905,22 +901,19 @@ mod tests {
         effects.place(&[(id(1), LEFT), (id(2), RIGHT)], now, true);
         // Zooming the first pane: it grows over the second, which stays drawn until then.
         effects.place(&[(id(1), WHOLE)], now, true);
-        if scale() > 0. {
-            assert_eq!(effects.leaving(now), vec![(id(2), RIGHT)]);
-            assert!(effects.running(after(now, MOVE_MS) - Duration::from_millis(1)));
-            // Placing again before then keeps the moment it is covered.
-            let later = after(now, MOVE_MS / 2);
-            effects.place(&[(id(1), WHOLE)], later, true);
-            assert_eq!(effects.leaving(later), vec![(id(2), RIGHT)]);
-        }
+        assert_eq!(effects.leaving(now), vec![(id(2), RIGHT)]);
+        assert!(effects.running(after(now, MOVE_MS) - Duration::from_millis(1)));
+        // Placing again before then keeps the moment it is covered.
+        let later = after(now, MOVE_MS / 2);
+        effects.place(&[(id(1), WHOLE)], later, true);
+        assert_eq!(effects.leaving(later), vec![(id(2), RIGHT)]);
         let end = after(now, MOVE_MS);
         assert_eq!(effects.leaving(end), vec![]);
         assert!(!effects.running(end));
 
         // Unzooming: the second pane pops in again.
         effects.place(&[(id(1), LEFT), (id(2), RIGHT)], end, true);
-        let popping = if scale() > 0. { popped(RIGHT) } else { RIGHT };
-        assert_eq!(effects.frame(id(2), RIGHT, end), popping);
+        assert_eq!(effects.frame(id(2), RIGHT, end), popped(RIGHT));
         assert_eq!(effects.leaving(end), vec![]);
     }
 
@@ -1016,10 +1009,8 @@ mod tests {
         let lingering = shown + ms(LINGER_MS - 1);
         assert_eq!(reveal.level(false, lingering), 1.);
         assert!(reveal.running(lingering));
-        if scale() > 0. {
-            let fading = reveal.level(false, after(shown + ms(LINGER_MS), HIDE_MS / 2));
-            assert!(fading > 0. && fading < 1., "{fading}");
-        }
+        let fading = reveal.level(false, after(shown + ms(LINGER_MS), HIDE_MS / 2));
+        assert!(fading > 0. && fading < 1., "{fading}");
         let gone = after(shown + ms(LINGER_MS), HIDE_MS) + ms(1);
         assert_eq!(reveal.level(false, gone), 0.);
         assert!(!reveal.running(gone));

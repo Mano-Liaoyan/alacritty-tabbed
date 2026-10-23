@@ -125,8 +125,11 @@ impl<T: Lerp> Tween<T> {
 }
 
 /// How much slower animations run, from `ALACRITTY_ANIMATION_SCALE`: 1 by default, 0 to turn
-/// them off, higher to watch them in slow motion.
+/// them off, higher to watch them in slow motion. Tests always run at 1.
 pub fn scale() -> f32 {
+    if cfg!(test) {
+        return 1.;
+    }
     static SCALE: OnceLock<f32> = OnceLock::new();
     *SCALE.get_or_init(|| {
         let scale = env::var("ALACRITTY_ANIMATION_SCALE").ok().and_then(|s| s.parse().ok());
@@ -193,10 +196,9 @@ mod tests {
         assert_eq!(tween.get(now), 0.);
 
         tween.to(10., now, 100, Curve::EASE_OUT);
-        let duration = Duration::from_millis(100).mul_f32(scale());
-        // Animations are off with a scale of zero.
-        assert_eq!(tween.get(now), if scale() > 0. { 0. } else { 10. });
-        assert_eq!(tween.running(now), scale() > 0.);
+        let duration = Duration::from_millis(100);
+        assert_eq!(tween.get(now), 0.);
+        assert!(tween.running(now));
         assert!(!tween.running(now + duration));
         assert_eq!(tween.get(now + duration), 10.);
     }
@@ -206,7 +208,7 @@ mod tests {
         let now = Instant::now();
         let mut tween = Tween::new(Rect::new(0., 0., 100., 100.));
         tween.to(Rect::new(100., 0., 100., 100.), now, 200, Curve::SNAP);
-        let middle = now + Duration::from_millis(100).mul_f32(scale());
+        let middle = now + Duration::from_millis(100);
         let before = tween.get(middle);
         tween.to(Rect::new(0., 50., 100., 100.), middle, 200, Curve::SNAP);
         assert_eq!(tween.get(middle), before);
