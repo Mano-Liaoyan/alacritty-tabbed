@@ -167,6 +167,9 @@ pub enum FontChange {
 pub struct Tabs {
     /// Pixels above the terminal's area; zero without tabs, or with a bar that is not pinned.
     pub height: u32,
+    /// Present the whole window this frame and the next, since the terminal's damage alone does
+    /// not cover it; set while drawing into frames, reset once presented.
+    pub full_damage: bool,
     /// Whether the bar is shown, or slides in when it is not pinned.
     caption: bool,
     /// All tabs, or none while tabs are off.
