@@ -183,7 +183,6 @@ struct Pane<S = Session> {
 }
 
 /// A pane that is not live, to be drawn beside the live one.
-#[allow(dead_code)] // Until the panes are drawn.
 pub struct PaneDraw {
     pub terminal: Arc<FairMutex<Term<EventProxy>>>,
     /// The pane's configuration, with its profile's overrides and padding.
@@ -314,7 +313,6 @@ impl Tabs {
     }
 
     /// Where to draw the live terminal at `now`.
-    #[allow(dead_code)] // Until the panes are drawn.
     pub fn focused_frame(&self, now: Instant) -> Rect {
         let rect = self.focused_rect();
         let id = self.tabs.get(self.active).map(|tab| tab.pane().id);
@@ -322,7 +320,6 @@ impl Tabs {
     }
 
     /// The panes of the active tab other than the live one, and where to draw them at `now`.
-    #[allow(dead_code)] // Until the panes are drawn.
     pub fn background_panes(&self, now: Instant) -> Vec<PaneDraw> {
         let Some(tab) = self.tabs.get(self.active) else { return Vec::new() };
         let rects = tab.layout.rects(self.area()).into_iter().zip(&tab.panes);
