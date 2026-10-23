@@ -926,6 +926,9 @@ pub fn window_event(
     proxy: &EventLoopProxy<Event>,
     clipboard: &mut Clipboard,
 ) -> Option<WindowEvent> {
+    if let WindowEvent::RedrawRequested = event {
+        fullscreen::before_draw(ctx, config, proxy, clipboard);
+    }
     if let WindowEvent::Resized(size) = event {
         // Minimizing reports an empty size, which the terminal ignores too.
         if size.width == 0 || size.height == 0 {

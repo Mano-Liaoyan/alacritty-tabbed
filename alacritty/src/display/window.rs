@@ -123,7 +123,7 @@ pub struct Window {
     mouse_visible: bool,
     ime_inhibitor: ImeInhibitor,
     // tabbed: what the window was before fullscreen, to switch in one step on Windows.
-    fullscreen: crate::window_context::tabs::FullscreenState,
+    pub fullscreen: crate::window_context::tabs::FullscreenState,
 }
 
 impl Window {
