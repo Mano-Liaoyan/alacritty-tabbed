@@ -360,7 +360,7 @@ pub fn capture(ctx: &WindowContext, level: RestoreSession) -> Window {
     Window {
         size: (size.width, size.height),
         position: winit.outer_position().ok().map(|position| (position.x, position.y)),
-        maximized: winit.is_maximized(),
+        maximized: window.is_maximized(),
         fullscreen: winit.fullscreen().is_some(),
         active: tabs.active.min(saved_tabs.len() - 1),
         tabs: saved_tabs,
