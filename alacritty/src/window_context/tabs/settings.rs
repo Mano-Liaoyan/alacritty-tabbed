@@ -50,6 +50,15 @@ enum Field {
 /// Number of fields, of the profiles and of the application.
 const FIELD_COUNT: usize = 12;
 
+/// Height of the footer's buttons, in logical pixels.
+const FOOTER_BUTTON: f32 = 34.;
+
+/// Room between the scrolling content and the footer, in logical pixels.
+const FOOTER_GAP: f32 = 16.;
+
+/// Height over which the scrolling content fades out at the edges it is hidden past.
+const SCROLL_FADE: f32 = 16.;
+
 /// Fields of a profile.
 const FIELDS: [Field; 7] = [
     Field::Name,
@@ -617,6 +626,23 @@ fn scrolled_to(track: Rect, height: f32, top: f32, scroll_max: f32) -> f32 {
     ((top - track.y) / room).clamp(0., 1.) * scroll_max
 }
 
+/// Strips `step` high filling `band`, each with how opaque it covers what is under it: most at
+/// the viewport's edge, at its top or its bottom, easing out to nothing away from it.
+fn fade(band: Rect, top: bool, step: f32) -> Vec<(Rect, f32)> {
+    let step = step.max(1.);
+    let count = (band.h / step).ceil() as usize;
+    (0..count)
+        .map(|index| {
+            let from_edge = index as f32 * step;
+            let h = step.min(band.h - from_edge);
+            let y = if top { band.y + from_edge } else { band.bottom() - from_edge - h };
+            // Smoothly from nearly opaque at the edge to clear at the band's far end.
+            let t = 1. - (from_edge + h / 2.) / band.h;
+            (Rect { y, h, ..band }, 0.92 * t * t * (3. - 2. * t))
+        })
+        .collect()
+}
+
 /// What a scrollbar scrolls.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Bar {
@@ -718,6 +744,9 @@ struct Panel {
     card: Rect,
     /// Part of the card the profile's fields scroll in, above its buttons.
     viewport: Rect,
+    /// Bands at the top and the bottom of the viewport, across its content, where what is
+    /// scrolled past them fades out.
+    fades: [Rect; 2],
     /// How far the fields are scrolled, and can be.
     scrolled: f32,
     scroll_max: f32,
@@ -930,9 +959,14 @@ impl Settings {
         let new_width = px(48.) + font.width("New profile", false);
         let duplicate_width = px(48.) + font.width("Duplicate", false);
         let shrink = ((side - px(16.)) / (new_width + duplicate_width)).clamp(0., 1.);
+        let card =
+            Rect::new(sidebar.right() + px(8.), y + title, (w - side - px(24.)).max(0.), sidebar.h);
+        let pad = if card.w < px(440.) { px(16.) } else { px(28.) };
+        // New profile and Duplicate share the line of the card's footer buttons.
+        let footer_middle = card.bottom() - pad - (px(FOOTER_BUTTON) / 2.).round();
         let new_profile = Rect::new(
             x + px(14.),
-            sidebar.bottom() - px(42.),
+            footer_middle - px(18.),
             (new_width * shrink).round(),
             px(36.),
         );
@@ -957,9 +991,6 @@ impl Settings {
             top += px(38.);
         }
 
-        let card =
-            Rect::new(sidebar.right() + px(8.), y + title, (w - side - px(24.)).max(0.), sidebar.h);
-        let pad = if card.w < px(440.) { px(16.) } else { px(28.) };
         let (x0, x1) = (card.x + pad, (card.right() - pad).max(card.x + pad));
         let width = x1 - x0;
         let narrow = width < px(440.);
@@ -975,13 +1006,17 @@ impl Settings {
         // The status starts the row where no Delete link does.
         let before_status = if self.page == Page::Profile { delete + gap } else { 0. };
         let status_width = width - save - cancel - before_status - 2. * gap;
-        let footer = card.bottom() - px(58.);
+        // The footer's buttons are set in from the card's bottom as far as the content is from
+        // its sides, so they sit in its corner; the fields end a gap above the footer, the
+        // scrolling content fading out there, and never reach under its buttons.
+        let footer = card.bottom() - pad - px(FOOTER_BUTTON);
         let status = if status_width >= px(160.) {
-            Rect::new(x0 + before_status, footer, status_width, px(34.))
+            Rect::new(x0 + before_status, footer, status_width, px(FOOTER_BUTTON))
         } else {
             Rect::new(x0, footer - ch - px(10.), width, ch + px(6.))
         };
-        let viewport = Rect::new(card.x, card.y, card.w, (status.y.min(footer) - card.y).max(0.));
+        let viewport_bottom = status.y.min(footer) - px(FOOTER_GAP);
+        let viewport = Rect::new(card.x, card.y, card.w, (viewport_bottom - card.y).max(0.));
 
         let field =
             |x: f32, y: f32, right: f32, height: f32| Rect::new(x, y, (right - x).max(0.), height);
@@ -1193,15 +1228,16 @@ impl Settings {
                     ),
                     (Target::ToggleDefault, toggles[0]),
                     (Target::ToggleShown, toggles[1]),
-                    (Target::Delete, Rect::new(x0, footer, delete, px(34.))),
+                    (Target::Delete, Rect::new(x0, footer, delete, px(FOOTER_BUTTON))),
                 ]);
             },
         }
+        let button_h = px(FOOTER_BUTTON);
         buttons.extend([
             (Target::NewProfile, new_profile),
             (Target::Duplicate, duplicate),
-            (Target::Cancel, Rect::new(x1 - save - gap - cancel, footer, cancel, px(34.))),
-            (Target::Save, Rect::new(x1 - save, footer, save, px(34.))),
+            (Target::Cancel, Rect::new(x1 - save - gap - cancel, footer, cancel, button_h)),
+            (Target::Save, Rect::new(x1 - save, footer, save, button_h)),
         ]);
 
         // The font list drops from its field, or rises above it when there is more room there.
@@ -1283,6 +1319,13 @@ impl Settings {
             ColorPicker::layout((x, y), layout.scale)
         });
 
+        // The content fades out at the viewport's edges across its width, clear of the card's
+        // corners, its outline and its scrollbar.
+        let fade_height = px(SCROLL_FADE).min((viewport.h / 2.).floor());
+        let outline = px(1.).max(1.);
+        let across = Rect::new(x0 - px(2.), viewport.y + outline, width + px(4.), fade_height);
+        let fades = [across, Rect { y: viewport.bottom() - fade_height, ..across }];
+
         // The fields scroll inside the card, above its buttons, with a scrollbar at its edge.
         let track =
             Rect::new(card.right() - px(7.), viewport.y + px(8.), px(3.), viewport.h - px(16.));
@@ -1299,6 +1342,7 @@ impl Settings {
             duplicate,
             card,
             viewport,
+            fades,
             scrolled,
             scroll_max,
             scrollbar,
@@ -1511,7 +1555,8 @@ impl Settings {
         let top = label.y.min(rect.y).min(tile.y) - panel.viewport.y + panel.scrolled;
         let bottom = label.bottom().max(rect.bottom()).max(tile.bottom()) - panel.viewport.y
             + panel.scrolled;
-        let margin = layout.px(12.);
+        // A field revealed clears the fades at the viewport's edges.
+        let margin = layout.px(SCROLL_FADE + 8.);
         let scroll = panel.scrolled.max(bottom + margin - panel.viewport.h).min(top - margin);
         self.card_scroll = scroll.clamp(0., panel.scroll_max);
     }
@@ -2783,6 +2828,20 @@ impl Settings {
             ch,
         );
 
+        // Where content is scrolled past an edge of the viewport, it fades out into the card
+        // there, as in the settings of macOS, rather than being cut off flush. The fade spans
+        // the content's width only, clear of the card's corners and its scrollbar.
+        let mut edges = Layer::default();
+        let hidden = [panel.scrolled > 0., panel.scrolled < panel.scroll_max];
+        for (top, hidden) in [true, false].into_iter().zip(hidden) {
+            if hidden {
+                let edge = panel.fades[usize::from(!top)];
+                for (rect, alpha) in fade(edge, top, line) {
+                    edges.rounded_alpha(rect, 0., palette.terminal, alpha);
+                }
+            }
+        }
+
         if let Some((message, error)) = &self.status {
             let color =
                 if *error { mix(palette.caution, palette.foreground, 0.35) } else { palette.muted };
@@ -2906,7 +2965,7 @@ impl Settings {
             picker.draw(&mut popup, &parts, palette, layout, hovered);
         }
         popup.clip(panel.dialog, ch);
-        vec![layer, content, popup]
+        vec![layer, content, edges, popup]
     }
 
     /// Color of the thumb of `bar`'s scrollbar, lit under the pointer and while it is dragged.
@@ -3057,11 +3116,16 @@ mod tests {
 
     /// The layout of a window `width` by `height` pixels, unless the interface's font is missing.
     fn layout(width: u32, height: u32) -> Option<Layout> {
-        let font = UiFont::new(&Default::default(), 1.).ok()?;
+        scaled_layout(width, height, 1.)
+    }
+
+    /// The layout of a window `width` by `height` pixels at `scale`.
+    fn scaled_layout(width: u32, height: u32, scale: f64) -> Option<Layout> {
+        let font = UiFont::new(&Default::default(), scale).ok()?;
         let tabs = super::super::Tabs {
             font: Some(std::rc::Rc::new(font)),
             window: winit::dpi::PhysicalSize::new(width, height),
-            scale: 1.,
+            scale,
             ..Default::default()
         };
         Some(Layout::new(&tabs))
@@ -3233,6 +3297,99 @@ mod tests {
         settings.press(&layout, at(x, bar.track.y + 1.), MouseButton::Left, &config, || ());
         settings.release();
         assert_eq!(first(&settings), 0);
+    }
+
+    /// Every page in windows short, tall and narrow, at one and two times the scale.
+    fn every_page(mut check: impl FnMut(&Layout, &Settings, &Panel, &str)) {
+        for scale in [1., 2.] {
+            for (width, height) in [(1200, 1000), (1200, 500), (700, 420)] {
+                let size = |value: u32| (f64::from(value) * scale) as u32;
+                let Some(layout) = scaled_layout(size(width), size(height), scale) else { return };
+                for page in [Page::General, Page::Appearance, Page::Profile] {
+                    let mut settings = Settings::new(&UiConfig::default(), page, || ());
+                    settings.status = Some(("Saved to alacritty.toml".into(), false));
+                    for scroll in [0., f32::MAX] {
+                        settings.card_scroll = scroll;
+                        let panel = settings.panel(&layout);
+                        let name = format!("{page:?} {width}x{height} @{scale} scrolled {scroll}");
+                        check(&layout, &settings, &panel, &name);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn content_keeps_clear_of_the_footer() {
+        every_page(|layout, _, panel, name| {
+            let gap = layout.px(FOOTER_GAP);
+            let footer = |target| panel.buttons.iter().find(|(t, _)| *t == target).map(|b| b.1);
+            let (cancel, save) = (footer(Target::Cancel).unwrap(), footer(Target::Save).unwrap());
+            let viewport = panel.viewport;
+            // The viewport ends a gap above the footer's status and buttons.
+            for rect in [cancel, save, panel.status].into_iter().chain(footer(Target::Delete)) {
+                assert!(viewport.bottom() + gap <= rect.y + 0.01, "{name}: {rect:?}");
+            }
+            // The buttons sit as far in from the card's bottom as from its right, centered
+            // in line with each other and with the sidebar's buttons.
+            let card = panel.card;
+            assert_eq!(card.right() - save.right(), card.bottom() - save.bottom(), "{name}");
+            assert_eq!((cancel.y, cancel.h), (save.y, save.h), "{name}");
+            let middle = panel.new_profile.center().1;
+            assert!((middle - save.center().1).abs() <= 1., "{name}");
+            // The scrollbar runs inside the viewport, and the fades lie inside it too.
+            if let Some(bar) = panel.scrollbar {
+                assert!(bar.track.y >= viewport.y && bar.track.bottom() <= viewport.bottom());
+                assert!(bar.band.bottom() <= viewport.bottom(), "{name}");
+                for band in panel.fades {
+                    assert!(band.right() < bar.track.x, "{name}");
+                }
+            }
+            for band in panel.fades {
+                assert!(band.y >= viewport.y && band.bottom() <= viewport.bottom(), "{name}");
+                assert!(band.x > card.x && band.right() < card.right(), "{name}");
+            }
+        });
+    }
+
+    #[test]
+    fn last_row_scrolls_fully_into_view() {
+        every_page(|layout, settings, panel, name| {
+            let viewport = panel.viewport;
+            // What ends the page: the group of rows, or the profile's switches.
+            let (first, last) = match &panel.settings {
+                Some(page) => (page.heading.y, page.group.bottom()),
+                None => {
+                    let shown = panel.buttons.iter().find(|(t, _)| *t == Target::ToggleShown);
+                    (panel.tile.y, shown.unwrap().1.bottom())
+                },
+            };
+            if settings.card_scroll == 0. {
+                assert!(first >= viewport.y + layout.px(16.), "{name}");
+            } else if panel.scroll_max > 0. {
+                // Scrolled to the end, the last row shows whole, with room below it.
+                assert_eq!(panel.scrolled, panel.scroll_max, "{name}");
+                assert!(last + layout.px(16.) <= viewport.bottom() + 0.01, "{name}");
+                assert!(last + layout.px(32.) >= viewport.bottom(), "{name}");
+            } else {
+                assert!(last <= viewport.bottom(), "{name}");
+            }
+        });
+    }
+
+    #[test]
+    fn fades_ease_out_from_the_edge() {
+        let band = Rect::new(10., 100., 50., 16.);
+        for top in [true, false] {
+            let strips = fade(band, top, 2.);
+            assert_eq!(strips.len(), 8);
+            assert_eq!(strips.iter().map(|(rect, _)| rect.h).sum::<f32>(), band.h);
+            assert!(strips.iter().all(|(rect, _)| rect.x == band.x && rect.w == band.w));
+            assert!(strips.windows(2).all(|pair| pair[0].1 > pair[1].1));
+            let edge = if top { band.y } else { band.bottom() - 2. };
+            assert_eq!(strips[0].0.y, edge);
+            assert!(strips[0].1 > 0.8 && strips[7].1 < 0.05);
+        }
     }
 
     #[test]
