@@ -198,19 +198,34 @@ impl Layout {
             return Hit::Item(index.min(rows - 1));
         }
 
+        // Below the bar the whole margin around the panel resizes, and each corner reaches along
+        // both edges, so diagonal resizing is as easy to grab as the edges.
         let border = self.border;
-        let (left, right) = (x < border, x >= self.width - border);
-        let (top, bottom) = (y < border, y >= self.height - border);
-        let direction = match (left, right, top, bottom) {
-            (true, _, true, _) => Some(ResizeDirection::NorthWest),
-            (_, true, true, _) => Some(ResizeDirection::NorthEast),
-            (true, _, _, true) => Some(ResizeDirection::SouthWest),
-            (_, true, _, true) => Some(ResizeDirection::SouthEast),
-            (true, ..) => Some(ResizeDirection::West),
-            (_, true, ..) => Some(ResizeDirection::East),
-            (_, _, true, _) => Some(ResizeDirection::North),
-            (.., true) => Some(ResizeDirection::South),
-            _ => None,
+        let edge = if border > 0. && y >= self.bar { border.max(self.px(MARGIN)) } else { border };
+        let (left, right) = (x < edge, x >= self.width - edge);
+        let (top, bottom) =
+            (y < border, y >= self.height - border.max(self.px(MARGIN)) && border > 0.);
+        let corner = if border > 0. { self.px(24.) } else { 0. };
+        let (near_left, near_right) = (x < corner, x >= self.width - corner);
+        let (near_top, near_bottom) = (y < corner, y >= self.height - corner);
+        let direction = if (left && near_top) || (top && near_left) {
+            Some(ResizeDirection::NorthWest)
+        } else if (right && near_top) || (top && near_right) {
+            Some(ResizeDirection::NorthEast)
+        } else if (left && near_bottom) || (bottom && near_left) {
+            Some(ResizeDirection::SouthWest)
+        } else if (right && near_bottom) || (bottom && near_right) {
+            Some(ResizeDirection::SouthEast)
+        } else if left {
+            Some(ResizeDirection::West)
+        } else if right {
+            Some(ResizeDirection::East)
+        } else if top {
+            Some(ResizeDirection::North)
+        } else if bottom {
+            Some(ResizeDirection::South)
+        } else {
+            None
         };
         if let Some(direction) = direction {
             return Hit::Resize(direction);

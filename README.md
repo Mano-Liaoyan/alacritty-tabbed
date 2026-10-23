@@ -34,7 +34,8 @@ where the system has none, and other programs get a terminal. A profile can set 
 line, starting directory, font, environment variables, configuration overrides,
 the default profile, and whether a profile shows in the menu. The font field
 lists the system's monospaced fonts as you type; "Show all fonts" lists every
-font. Browse buttons use the
+font. Clicking the profile's icon picks one of the bundled logos, and Browse
+picks your own. Saved changes apply to the tabs already open with a profile. Browse buttons use the
 system's file pickers. Profiles can be added, duplicated, deleted, and dragged
 to reorder them. They are saved to `profiles.toml` beside `alacritty.toml`,
 which can also be edited by hand.
@@ -81,7 +82,8 @@ default = "Bash"                      # Profile for new windows, + and the new-t
 name = "Bash"
 command = "bash --login"              # Empty uses the shell from alacritty.toml.
 directory = "~/projects"              # Empty starts in the home directory.
-icon = "~/icons/bash.png"             # An image, or text such as "🐧"; empty uses the program's icon.
+icon = "~/icons/bash.png"             # An image, a bundled logo such as "bundled:python", or text
+                                      # such as "🐧"; empty uses the program's icon.
 font = "JetBrains Mono"               # Font family; empty uses the font from alacritty.toml.
 env = { EDITOR = "vim" }
 options = ["font.size=14"]            # Configuration overrides for this profile's tabs.

@@ -440,6 +440,19 @@ impl Layer {
         self.text(x, y - cell.1 / 2., text.into(), color, bold);
     }
 
+    /// Keep only what lies inside `rect`, keeping or dropping text by whole lines of `line` pixels.
+    pub fn clip(&mut self, rect: Rect, line: f32) {
+        self.rects.retain_mut(|r| {
+            let (left, top) = (r.x.max(rect.x), r.y.max(rect.y));
+            let (right, bottom) =
+                ((r.x + r.width).min(rect.right()), (r.y + r.height).min(rect.bottom()));
+            (r.x, r.y, r.width, r.height) = (left, top, right - left, bottom - top);
+            right > left && bottom > top
+        });
+        let inside = |y: f32| y >= rect.y - 0.5 && y + line <= rect.bottom() + 0.5;
+        self.texts.retain(|&(x, y, ..)| inside(y) && x < rect.right());
+    }
+
     /// Draw the layers over the window, whose size is `window`.
     pub fn draw(
         layers: Vec<Layer>,

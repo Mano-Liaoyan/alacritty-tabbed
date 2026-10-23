@@ -126,6 +126,8 @@ struct Tab {
     title: String,
     badge: String,
     icon: Option<Arc<Image>>,
+    /// Name of the profile the tab was opened with.
+    profile: Option<String>,
     /// Terminal of an inactive tab; the active tab's lives in the window context.
     session: Option<Session>,
 }
@@ -330,7 +332,9 @@ pub fn window_event(
         {
             if let Some(settings) = &mut tabs.settings {
                 let paste = || clipboard.load(ClipboardType::Clipboard);
-                if settings.key(key, tabs.modifiers, paste, config, &layout) {
+                let close = settings.key(key, tabs.modifiers, paste, config, &layout);
+                restyle(ctx, config);
+                if close {
                     close_settings(ctx);
                 }
                 redraw(ctx);
@@ -396,7 +400,9 @@ pub fn window_event(
             let pointer = tabs.pointer;
             if let Some(settings) = &mut tabs.settings {
                 let wake = waker(tabs.tabs.get(tabs.active).map_or(window_id, |tab| tab.id), proxy);
-                if settings.press(&layout, pointer, button, config, wake) {
+                let close = settings.press(&layout, pointer, button, config, wake);
+                restyle(ctx, config);
+                if close {
                     close_settings(ctx);
                 }
                 redraw(ctx);
@@ -529,7 +535,9 @@ fn sync(ctx: &mut WindowContext, config: &Rc<UiConfig>, resize: bool) {
             ctx.display.window.set_title(name.clone());
         }
         let tabs = &mut ctx.display.tabs;
-        tabs.tabs.push(Tab { id, name, title: String::new(), badge, icon, session: None });
+        let (title, session, opened) =
+            (String::new(), None, profile.as_ref().map(|p| p.name.clone()));
+        tabs.tabs.push(Tab { id, name, title, badge, icon, profile: opened, session });
         let options = profile.as_ref().map_or_else(Vec::new, Profile::overrides);
         if !options.is_empty() {
             ctx.window_config = ParsedOptions::from_options(&options);
@@ -824,6 +832,40 @@ fn waker(id: WindowId, proxy: &EventLoopProxy<Event>) -> impl Fn() + Send + 'sta
     }
 }
 
+/// Give the tabs opened with the profiles just saved their new look and configuration.
+fn restyle(ctx: &mut WindowContext, config: &Rc<UiConfig>) {
+    let saved = ctx.display.tabs.settings.as_mut().map(Settings::take_saved).unwrap_or_default();
+    let mut active = false;
+    for tab in &mut ctx.display.tabs.tabs {
+        let Some((_, profile)) = saved.iter().find(|(name, _)| tab.profile.as_ref() == Some(name))
+        else {
+            continue;
+        };
+        tab.profile = Some(profile.name.clone());
+        tab.badge = profile.badge();
+        tab.icon = profile.image(config);
+        if tab.title == tab.name {
+            tab.title = profile.name.clone();
+        }
+        tab.name = profile.name.clone();
+        let window_config = ParsedOptions::from_options(&profile.overrides());
+        match &mut tab.session {
+            Some(session) => session.window_config = window_config,
+            None => {
+                ctx.window_config = window_config;
+                active = true;
+            },
+        }
+    }
+    if active {
+        ctx.update_config(config.clone());
+        sync(ctx, config, false);
+    }
+    if !saved.is_empty() {
+        redraw(ctx);
+    }
+}
+
 fn close_settings(ctx: &mut WindowContext) {
     ctx.display.tabs.settings = None;
     ctx.display.damage_tracker.frame().mark_fully_damaged();
@@ -849,7 +891,8 @@ fn open(
             (config.window.identity.title.clone(), ">".into(), icon)
         },
     };
-    let tab = Tab { id, title: name.clone(), name, badge, icon, session: Some(session) };
+    let (title, opened) = (name.clone(), profile.map(|profile| profile.name.clone()));
+    let tab = Tab { id, title, name, badge, icon, profile: opened, session: Some(session) };
     ctx.display.tabs.tabs.push(tab);
     select(ctx, ctx.display.tabs.tabs.len() - 1, config);
 }
