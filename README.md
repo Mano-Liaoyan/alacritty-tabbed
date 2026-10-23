@@ -5,7 +5,7 @@ is a soft fork of [Alacritty](https://github.com/alacritty/alacritty) that adds
 tabs, shell profiles and a settings panel on Windows, Linux and macOS. It is not
 an official Alacritty release. Upstream's README follows the fork notes below.
 
-![Tabs in the caption, with the new-tab menu open](docs/tabs/tabs.png)
+![A tab group of three panes beside two tabs, one pane showing its controls](docs/tabs/tabs.png)
 
 ## Features
 
@@ -53,12 +53,12 @@ cards, and past five the stack shows five cards and a "+N" count.
   pointer comes near (and on every pane while Ctrl+Alt is held): the ••• grip
   to drag it, and a zoom button, which turns into an unzoom button in the same
   place while the pane is zoomed.
-- **Text size per pane:** Ctrl+mouse wheel (⌘+wheel on macOS) over the focused
-  pane, or Ctrl+= / Ctrl+− / Ctrl+0, makes only that pane's text larger or
-  smaller, from half to four times its size, with a short "120 %" sign. The size
-  stays with the pane while it lives, also when torn off, but is never saved to
-  the profile or `alacritty.toml`. Ctrl+0 or "Reset Text Size" in the pane's menu
-  goes back.
+- **Text size per pane:** Ctrl+mouse wheel over the focused pane, or Ctrl+= /
+  Ctrl+− / Ctrl+0 (⌘ instead of Ctrl on macOS), makes only that pane's text
+  larger or smaller, from half to four times its size, with a short "120 %"
+  sign. The size stays with the pane while it lives, also when torn off, but is
+  never saved to the profile or `alacritty.toml`. Ctrl+0 (⌘0) or "Reset Text
+  Size" in the pane's menu goes back.
 - **Hover** a tab's stack to fan its logos out; large groups wrap into a shelf
   below the bar. Resting on a logo shows its pane's own title, and for a pane
   that is not on screen a live preview of it. Click a logo to focus its pane.
@@ -137,9 +137,8 @@ application's pages above the profiles. **General** holds the session restore,
 the pinned tab bar and Ctrl+wheel text zoom. The gear opens **Appearance**: the
 corners, the interface font and its size, the background opacity, the
 terminal panel, the pane gap, the focus highlight, the tab track and the logo,
-saved to
-`alacritty.toml` (changing only those keys, and keeping its comments) and
-applied to every window. "Edit profiles…" in the ⌄ menu opens the profiles:
+saved to `alacritty.toml` (changing only those keys, and keeping its comments)
+and applied to every window. "Edit profiles…" in the ⌄ menu opens the profiles:
 name, icon, command line, starting directory, font, environment variables, configuration overrides,
 the default profile, and whether a profile shows in the menu. The font field
 lists the system's monospaced fonts as you type; "Show all fonts" lists every
@@ -149,7 +148,7 @@ system's file pickers. Profiles can be added, duplicated, deleted, and dragged
 to reorder them. They are saved to `profiles.toml` beside `alacritty.toml`,
 which can also be edited by hand.
 
-![Profile settings](docs/tabs/settings.png)
+![Settings, General page](docs/tabs/settings.png)
 
 **Interface font.** The bar, its menus and the settings use a proportional
 interface font of their own, apart from the terminal's font: the system's
