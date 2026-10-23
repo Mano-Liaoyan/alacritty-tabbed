@@ -10,6 +10,7 @@ use toml_edit::{DocumentMut, Item, value};
 
 use crate::config::UiConfig;
 use crate::config::window::Corners;
+use crate::display::color::Rgb;
 
 use super::profiles;
 
@@ -25,6 +26,10 @@ pub struct AppSettings {
     /// Whether the terminal is held in a panel, and the tabs set on a track.
     pub panel: bool,
     pub tab_track: bool,
+    /// Space between a tab's panes, in logical pixels.
+    pub pane_gap: u8,
+    /// Border of the focused pane; none uses the terminal's blue.
+    pub pane_highlight: Option<Rgb>,
 }
 
 impl AppSettings {
@@ -37,6 +42,8 @@ impl AppSettings {
             opacity: window.opacity.as_f32(),
             panel: window.panel,
             tab_track: window.tab_track,
+            pane_gap: window.pane_gap,
+            pane_highlight: window.pane_highlight,
         }
     }
 
@@ -82,6 +89,20 @@ impl AppSettings {
         if self.tab_track != before.tab_track {
             window["tab_track"] = value(self.tab_track);
         }
+        if self.pane_gap != before.pane_gap {
+            window["pane_gap"] = value(i64::from(self.pane_gap));
+        }
+        if self.pane_highlight != before.pane_highlight {
+            match self.pane_highlight {
+                Some(color) => window["pane_highlight"] = value(color.to_string()),
+                // The automatic color is what no color stands for.
+                None => {
+                    if let Some(window) = window.as_table_like_mut() {
+                        window.remove("pane_highlight");
+                    }
+                },
+            }
+        }
         Ok(document.to_string())
     }
 }
@@ -111,6 +132,8 @@ mod tests {
             opacity: 1.,
             panel: true,
             tab_track: true,
+            pane_gap: 16,
+            pane_highlight: None,
         }
     }
 
@@ -130,6 +153,8 @@ mod tests {
             opacity: 0.85,
             panel: false,
             tab_track: true,
+            pane_gap: 4,
+            pane_highlight: Some(Rgb::new(0xff, 0x95, 0)),
         };
         let edited = changed.edit(&defaults(), text).unwrap();
         assert!(edited.starts_with("# Mine.\n[window]\n"));
@@ -142,6 +167,17 @@ mod tests {
         assert_eq!(window["ui_font"]["size"].as_float(), Some(11.5));
         assert_eq!(window["panel"].as_bool(), Some(false));
         assert!(window.get("tab_track").is_none());
+        assert_eq!(window["pane_gap"].as_integer(), Some(4));
+        assert_eq!(window["pane_highlight"].as_str(), Some("#ff9500"));
+    }
+
+    #[test]
+    fn automatic_highlight_removes_its_key() {
+        let orange = AppSettings { pane_highlight: Some(Rgb::new(0xff, 0x95, 0)), ..defaults() };
+        let text = "[window]\npane_highlight = \"#ff9500\" # Orange.\npanel = true\n";
+        assert_eq!(defaults().edit(&orange, text).unwrap(), "[window]\npanel = true\n");
+        // Nothing is written for a key that is not there.
+        assert_eq!(defaults().edit(&orange, "").unwrap(), "");
     }
 
     #[test]

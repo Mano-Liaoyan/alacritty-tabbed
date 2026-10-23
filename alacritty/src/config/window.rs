@@ -12,9 +12,13 @@ use alacritty_config_derive::{ConfigDeserialize, SerdeReplace};
 
 use crate::config::LOG_TARGET_CONFIG;
 use crate::config::ui_config::{Delta, Percentage};
+use crate::display::color::Rgb;
 
 /// Default Alacritty name, used for window title and class.
 pub const DEFAULT_NAME: &str = "Alacritty";
+
+/// Widest space between a tab's panes, in logical pixels; wider gaps are narrowed to it.
+pub const MAX_PANE_GAP: u8 = 48;
 
 #[derive(ConfigDeserialize, Serialize, Debug, Clone, PartialEq)]
 pub struct WindowConfig {
@@ -41,6 +45,12 @@ pub struct WindowConfig {
 
     /// Set the tabs on a track, instead of on the bar itself.
     pub tab_track: bool,
+
+    /// Space between the panes of a tab, in logical pixels, up to [`MAX_PANE_GAP`].
+    pub pane_gap: u8,
+
+    /// Border of the focused pane; none uses the terminal's blue.
+    pub pane_highlight: Option<Rgb>,
 
     /// XEmbed parent.
     #[config(skip)]
@@ -100,6 +110,8 @@ impl Default for WindowConfig {
             corners: Default::default(),
             panel: true,
             tab_track: true,
+            pane_gap: 16,
+            pane_highlight: None,
             dynamic_padding: Default::default(),
             resize_increments: Default::default(),
             decorations_theme_variant: Default::default(),
@@ -367,5 +379,26 @@ impl From<WindowLevel> for WinitWindowLevel {
             WindowLevel::Normal => WinitWindowLevel::Normal,
             WindowLevel::AlwaysOnTop => WinitWindowLevel::AlwaysOnTop,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn panes_keep_their_gap_and_highlight_by_default() {
+        let window = WindowConfig::default();
+        assert_eq!(window.pane_gap, 16);
+        assert_eq!(window.pane_highlight, None);
+    }
+
+    #[test]
+    fn pane_gap_and_highlight_are_read() {
+        let value: toml::Value =
+            toml::from_str("pane_gap = 4\npane_highlight = \"#FF9500\"").unwrap();
+        let window = WindowConfig::deserialize(value).unwrap();
+        assert_eq!(window.pane_gap, 4);
+        assert_eq!(window.pane_highlight, Some(Rgb::new(0xff, 0x95, 0x00)));
     }
 }
