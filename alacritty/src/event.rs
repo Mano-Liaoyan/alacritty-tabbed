@@ -284,7 +284,6 @@ impl Processor {
                 | WindowEvent::Destroyed
                 | WindowEvent::ThemeChanged(_)
                 | WindowEvent::HoveredFile(_)
-                | WindowEvent::Moved(_)
         )
     }
 }
