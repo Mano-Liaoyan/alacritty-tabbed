@@ -1,6 +1,7 @@
 //! Context menus, opened by a right click: a pane's, to split, zoom, move or close it, and a tab's,
 //! to rename, ungroup, move or close it.
 
+use std::cmp::Ordering;
 use std::rc::Rc;
 use std::time::Instant;
 
@@ -498,10 +499,10 @@ fn ungroup<S>(tabs: &mut Vec<Tab<S>>, active: &mut usize, index: usize) -> bool 
     let count = others.len();
     let at = others.iter().position(|pane| pane.id == focus).map_or(0, |at| at + 1);
     tabs.splice(index + 1..index + 1, others.into_iter().map(Tab::new));
-    if *active == index {
-        *active += at;
-    } else if *active > index {
-        *active += count;
+    match (*active).cmp(&index) {
+        Ordering::Equal => *active += at,
+        Ordering::Greater => *active += count,
+        Ordering::Less => (),
     }
     true
 }
