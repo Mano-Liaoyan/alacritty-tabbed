@@ -1122,6 +1122,19 @@ impl Display {
         self.renderer.set_viewport(&size_info);
         self.tabs.draw(&mut self.renderer, &self.window, &size_info, config);
 
+        // A pane previewed from its icon, over the bar's card that holds it.
+        if let Some(peek) = self.tabs.peek(Instant::now()) {
+            let height = self.window.inner_size().height as f32;
+            let (rect, clip) = (peek.frame, peek.clip);
+            let mut frame = Frame::new(&peek.size, [rect.x, rect.y, rect.w, rect.h], height);
+            let bottom = height - clip.y - clip.h;
+            frame.clip = [clip.x, bottom, clip.w, clip.h].map(|value| value.round() as i32);
+            let mut terminal = peek.terminal.lock();
+            terminal.is_focused = false;
+            self.draw_pane(terminal, peek.size, &peek.config, frame);
+            self.tabs.draw_over(&mut self.renderer, &size_info, config);
+        }
+
         // Notify winit that we're about to present.
         self.window.pre_present_notify();
 

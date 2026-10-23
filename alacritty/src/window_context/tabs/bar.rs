@@ -28,7 +28,7 @@ use super::anim::{Curve, Tween};
 use super::dnd::{Source, Target};
 use super::paint::{self, BLACK, Image, Layer, Palette, Rect, WHITE, mix};
 use super::text::UiFont;
-use super::{Frame, Pane, Tab, Tabs, context, icons, panes};
+use super::{Frame, Pane, Tab, Tabs, context, icons, panes, peek, rename};
 
 /// Height of the bar in logical pixels, on every platform.
 pub const BAR: f32 = 48.;
@@ -376,10 +376,18 @@ impl Layout {
     }
 
     /// Where the icon of the pane `pane` of the tab at `index` is once its deck is fanned out.
-    #[allow(dead_code)] // The anchor of the hover card, which comes next.
     pub fn icon(&self, index: usize, pane: usize) -> Option<Rect> {
         let (.., icons) = self.stacks.iter().find(|(i, ..)| *i == index)?;
         icons.iter().find(|(p, _)| *p == pane).map(|(_, rect)| *rect)
+    }
+
+    /// What the card of the pane `pane` of the tab at `index` hangs from: its icon, fanned out,
+    /// reaching down to the bottom of its tab, or of the shelf of icons it lies on.
+    pub fn anchor(&self, index: usize, pane: usize) -> Option<Rect> {
+        let icon = self.icon(index, pane)?;
+        let (_, area, _) = self.stacks.iter().find(|(i, ..)| *i == index)?;
+        let bottom = area.bottom().max(self.tab(index).map_or(0., |tab| tab.bottom()));
+        Some(Rect::new(icon.x, icon.y, icon.w, bottom - icon.y))
     }
 
     fn close(&self, tab: Rect) -> Rect {
@@ -648,7 +656,8 @@ impl Tabs {
             Hit::Icon(index, _) => self.tabs.get(index).is_some_and(|tab| tab.panes.len() > 1),
             _ => false,
         };
-        if panes > 1 || fanned || self.animating(Instant::now()) {
+        let now = Instant::now();
+        if panes > 1 || fanned || self.animating(now) || self.peeking.visible(now) {
             return vec![DamageRect::new(0, 0, width, height)];
         }
         if self.height > 0 {
@@ -682,7 +691,8 @@ impl Tabs {
         let layout = Layout::new(self);
         self.first = layout.first;
         let now = Instant::now();
-        let palette = Palette::new(&config.colors);
+        let mut palette = Palette::new(&config.colors);
+        palette.highlight = config.window.pane_highlight.unwrap_or(palette.primary);
         let (font, line_height) = (&*layout.font, layout.line);
         let (bar, width) = (layout.bar, layout.width);
         let px = |value: f32| layout.px(value);
@@ -690,6 +700,8 @@ impl Tabs {
         let icon = (1.3 * layout.scale).max(1.);
         let mut base = Layer::default();
         let mut top = Layer::default();
+        // What a drag holds, which fades while it would leave the window.
+        let mut lifted = Layer::default();
 
         // Chrome around the panels that hold the terminals.
         base.rect(Rect::new(0., 0., width, bar), palette.chrome);
@@ -734,6 +746,7 @@ impl Tabs {
         let dragging = self.drag.as_ref().filter(|drag| drag.moving);
         let source = dragging.map(|drag| drag.source);
         let target = dragging.and_then(|drag| drag.target);
+        let torn = target == Some(Target::Window);
         // Tabs slide along the track, the dragged one following the pointer.
         let (first, last) = match (layout.tabs.first(), layout.tabs.last()) {
             (Some((_, first)), Some((_, last))) => (first.x, last.x),
@@ -760,8 +773,8 @@ impl Tabs {
                 Some((held, _)) if held == index => {
                     let shadow = Rect::new(rect.x, rect.y + px(1.), rect.w, rect.h + px(2.));
                     let radius = layout.radius(TAB_RADIUS + 1.);
-                    top.rounded(shadow, radius, mix(palette.chrome, BLACK, 0.5));
-                    &mut top
+                    lifted.rounded(shadow, radius, mix(palette.chrome, BLACK, 0.5));
+                    &mut lifted
                 },
                 _ => &mut base,
             };
@@ -832,7 +845,9 @@ impl Tabs {
                 }
                 let card = |into: &mut Layer, order: usize, pane: usize, icon: Rect| {
                     let (fan, lift) = motion(pane);
-                    let alpha = opacity(order, count, fan);
+                    // A zoom hides the panes behind the focused one, and dims their icons.
+                    let hidden = tab.zoom && pane != tab.focus;
+                    let alpha = opacity(order, count, fan) * if hidden { 0.45 } else { 1. };
                     // Icons are cards, each cut out of the ones behind it.
                     if order + 1 < deck.icons.len() || deck.chip.is_some() {
                         let cut = icon.inset(-px(1.));
@@ -875,6 +890,11 @@ impl Tabs {
             }
 
             let close = layout.close(rect);
+            let left = layout.title(rect, count);
+            let field = Rect::new(left, rect.y, close.x - px(2.) - left, rect.h);
+            if rename::draw(self, &layout, &palette, index, field, layer) {
+                continue;
+            }
             if lit(index) {
                 if self.hover == Hit::Close(index) {
                     let radius = layout.radius(TAB_RADIUS - 4.);
@@ -884,9 +904,9 @@ impl Tabs {
                 layer.icon(close.center(), px(4.), icon, &lines, palette.muted);
             }
 
-            let left = layout.title(rect, count);
             let right = if lit(index) { close.x + px(2.) } else { rect.right() - px(10.) };
-            let title = font.fit(title(tab.focus), (right - left).max(0.), active);
+            let name = tab.name.as_deref().unwrap_or_else(|| title(tab.focus));
+            let title = font.fit(name, (right - left).max(0.), active);
             let color = if lit(index) { palette.foreground } else { palette.muted };
             let color = mix(color, surface, fade);
             layer.text(left, rect.center().1 - line_height / 2., title, color, active);
@@ -914,10 +934,10 @@ impl Tabs {
                 let size = px(22.);
                 let icon = Rect::new((x - size / 2.).round(), (y - size / 2.).round(), size, size);
                 let shadow = Rect::new(icon.x, icon.y + px(2.), size, size).inset(-px(2.));
-                top.rounded_alpha(shadow, layout.curve(shadow.w / 4.), BLACK, 0.3);
+                lifted.rounded_alpha(shadow, layout.curve(shadow.w / 4.), BLACK, 0.3);
                 let colors = (palette.raised, palette.accent(&pane.title), palette.foreground);
-                top.rounded(icon.inset(-px(1.)), layout.curve(size / 4.), palette.raised);
-                badge(&mut top, &layout, icon, pane.icon.as_ref(), &pane.badge, font, colors);
+                lifted.rounded(icon.inset(-px(1.)), layout.curve(size / 4.), palette.raised);
+                badge(&mut lifted, &layout, icon, pane.icon.as_ref(), &pane.badge, font, colors);
             }
         }
 
@@ -962,7 +982,13 @@ impl Tabs {
             }
         }
 
-        let mut layers = vec![base, fanned, top];
+        if torn {
+            lifted.fade(0.5, track);
+        }
+        let card = peek::draw(self, &layout, &palette, window.title(), now);
+        let mut layers = vec![base, fanned, lifted];
+        layers.extend(card);
+        layers.push(top);
         layers.extend(context::draw(self, &layout, &palette, now));
         if let Some(settings) = &self.settings {
             layers.extend(settings.draw(&layout, &palette, config, window));

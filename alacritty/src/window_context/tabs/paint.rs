@@ -487,6 +487,13 @@ impl Layer {
         self.texts.retain(|&(x, y, ..)| inside(y) && x < rect.right());
     }
 
+    /// Show what is drawn only `opacity` of the way over what is under it, its text blended
+    /// into `under`.
+    pub fn fade(&mut self, opacity: f32, under: Rgb) {
+        self.rects.iter_mut().for_each(|rect| rect.alpha *= opacity);
+        self.texts.iter_mut().for_each(|text| text.3 = mix(under, text.3, opacity));
+    }
+
     /// Draw the layers over the window, whose size is `window`.
     pub fn draw(layers: Vec<Layer>, renderer: &mut Renderer, font: &UiFont, window: &SizeInfo) {
         for layer in layers {
