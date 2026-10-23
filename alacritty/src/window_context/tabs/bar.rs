@@ -7,13 +7,15 @@
 //! rounded by the outer radius less the space between them, so their curves run parallel, from
 //! the window's corners to the panel, the tab track, the tabs and the buttons.
 
+use std::collections::HashMap;
+use std::iter;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Instant;
 
 use glutin::surface::Rect as DamageRect;
 use winit::dpi::PhysicalPosition;
-use winit::window::ResizeDirection;
+use winit::window::{ResizeDirection, WindowId};
 
 use crate::config::UiConfig;
 use crate::config::window::Corners;
@@ -22,9 +24,11 @@ use crate::display::color::Rgb;
 use crate::display::window::Window;
 use crate::renderer::Renderer;
 
+use super::anim::{Curve, Tween};
+use super::dnd::{Source, Target};
 use super::paint::{self, BLACK, Image, Layer, Palette, Rect, WHITE, mix};
 use super::text::UiFont;
-use super::{Frame, Tabs, context, icons, panes};
+use super::{Frame, Pane, Tab, Tabs, context, icons, panes};
 
 /// Height of the bar in logical pixels, on every platform.
 pub const BAR: f32 = 48.;
@@ -58,6 +62,9 @@ const CONTROL_DOT: f32 = 12.;
 /// Last entry of the new-tab menu.
 const EDIT_PROFILES: &str = "Edit profiles…";
 
+/// Most icons a grouped tab stacks in its badge.
+const STACK: usize = 4;
+
 /// macOS keeps its own red, yellow and green window buttons at the left.
 const MAC: bool = cfg!(target_os = "macos");
 
@@ -73,7 +80,6 @@ pub enum Hit {
     Resize(ResizeDirection),
     Tab(usize),
     /// Icon of a pane of a grouped tab: the tab's index, then the pane's.
-    #[allow(dead_code)] // Until grouped tabs show their panes' icons.
     Icon(usize, usize),
     Close(usize),
     New,
@@ -110,6 +116,8 @@ pub struct Layout {
     mark: Rect,
     track: Rect,
     tabs: Vec<(usize, Rect)>,
+    /// Icons of the grouped tabs' panes, by tab, as they settle: see [`stack`].
+    stacks: Vec<(usize, Vec<(usize, Rect)>)>,
     buttons: Vec<(Hit, Rect)>,
     terminal: Rect,
     /// The menu and the height of its rows.
@@ -217,7 +225,7 @@ impl Layout {
             (Rect::new(x, bar - px(4.), w, rows as f32 * row + px(12.)), row)
         });
 
-        Self {
+        let mut layout = Self {
             scale,
             font,
             line,
@@ -233,10 +241,27 @@ impl Layout {
             mark,
             track,
             tabs: tab_rects,
+            stacks: Vec::new(),
             buttons,
             terminal,
             menu,
-        }
+        };
+
+        // A stack fans out under the pointer, the icon there lifted from it.
+        let hover = tabs.hover;
+        let fanned = |index| f32::from(matches!(hover, Hit::Icon(i, _) if i == index));
+        let lifted = |index, pane| f32::from(hover == Hit::Icon(index, pane));
+        layout.stacks = layout
+            .tabs
+            .iter()
+            .filter_map(|&(index, rect)| {
+                let tab = tabs.tabs.get(index).filter(|tab| tab.panes.len() > 1)?;
+                let motion = |pane| (fanned(index), lifted(index, pane));
+                let icons = stack(layout.badge(rect), tab.panes.len(), tab.focus, scale, motion);
+                Some((index, icons))
+            })
+            .collect();
+        layout
     }
 
     pub fn px(&self, value: f32) -> f32 {
@@ -309,6 +334,13 @@ impl Layout {
         if let Some(&(hit, _)) = self.buttons.iter().find(|(_, rect)| rect.contains(point)) {
             return hit;
         }
+        // A fanned stack covers the end of its tab, close button included.
+        let row = self.tabs.first().is_some_and(|(_, rect)| y >= rect.y && y < rect.bottom());
+        for (index, icons) in self.stacks.iter().filter(|_| row) {
+            if let Some(pane) = icon_at(icons, x) {
+                return Hit::Icon(*index, pane);
+            }
+        }
         match self.tabs.iter().find(|(_, rect)| rect.contains(point)) {
             Some(&(index, rect)) if self.close(rect).contains(point) => Hit::Close(index),
             Some(&(index, _)) => Hit::Tab(index),
@@ -329,16 +361,121 @@ impl Layout {
         let size = self.px(18.);
         Rect::new(tab.x + self.px(9.), (tab.y + (tab.h - size) / 2.).round(), size, size)
     }
+
+    /// Where the title of a tab with `panes` panes begins, after its badge or stack of icons.
+    fn title(&self, tab: Rect, panes: usize) -> f32 {
+        let behind = panes.clamp(1, STACK) - 1;
+        self.badge(tab).right() + behind as f32 * self.px(6.) + self.px(8.)
+    }
+
+    /// Where the gap before the tab at `index` is, or after the last tab shown.
+    fn gap(&self, index: usize) -> Option<f32> {
+        let half = self.px(2.);
+        match self.tab(index) {
+            Some(rect) => Some(rect.x - half),
+            None => self
+                .tabs
+                .last()
+                .filter(|(last, _)| last + 1 == index)
+                .map(|(_, r)| r.right() + half),
+        }
+    }
 }
 
-/// How the bar's tabs and icons move.
+/// Where to draw the icons of a tab's `count` panes, from the back of the stack to its front.
+///
+/// The focused pane's icon fills the badge `front`, and up to three others peek out behind it to
+/// the right, each smaller than the one before, like cards. `motion(pane)` says how far the stack
+/// is fanned out and how far that pane's icon is lifted from it, each from 0 to 1: fanned out, the
+/// icons grow and spread apart, and a lifted one grows more.
+fn stack(
+    front: Rect,
+    count: usize,
+    focus: usize,
+    scale: f32,
+    motion: impl Fn(usize) -> (f32, f32),
+) -> Vec<(usize, Rect)> {
+    let behind = (0..count).filter(|&pane| pane != focus);
+    let (left, middle) = (front.x, front.center().1);
+    let mut icons: Vec<_> = iter::once(focus)
+        .chain(behind)
+        .take(STACK)
+        .enumerate()
+        .map(|(depth, pane)| {
+            let (fan, lift) = motion(pane);
+            let base = front.w + 4. * fan * scale;
+            let shrunk = base * (0.9 + 0.1 * fan).powi(depth as i32);
+            let size = (shrunk + 4. * lift * scale).round();
+            let right = left + base + depth as f32 * (6. + 20. * fan) * scale;
+            let (x, y) = (right - shrunk / 2., middle - 2. * lift * scale);
+            (pane, Rect::new((x - size / 2.).round(), (y - size / 2.).round(), size, size))
+        })
+        .collect();
+    icons.reverse();
+    icons
+}
+
+/// The pane whose icon in `icons`, drawn back to front, spans `x`: the frontmost, or else the
+/// nearest while `x` is within the stack.
+fn icon_at(icons: &[(usize, Rect)], x: f32) -> Option<usize> {
+    let left = icons.iter().map(|(_, rect)| rect.x).fold(f32::MAX, f32::min);
+    let right = icons.iter().map(|(_, rect)| rect.right()).fold(f32::MIN, f32::max);
+    if x < left || x >= right {
+        return None;
+    }
+    let distance = |rect: &Rect| (rect.x - x).max(x - rect.right()).max(0.);
+    let front_first = icons.iter().rev();
+    let nearest = front_first.min_by(|a, b| distance(&a.1).total_cmp(&distance(&b.1)));
+    nearest.map(|(pane, _)| *pane)
+}
+
+/// How the bar's tabs and icons move, by the panes they show.
+///
+/// A tab follows its focused pane, so a tab joining another slides from where it was.
 #[derive(Default)]
-pub struct Effects;
+pub struct Effects {
+    panes: HashMap<WindowId, Motion>,
+}
+
+/// Where a pane's tab is, by its index, and how far its icon is fanned out and lifted.
+struct Motion {
+    slot: Tween<f32>,
+    fan: Tween<f32>,
+    lift: Tween<f32>,
+}
 
 impl Effects {
+    /// Follow the tabs to their places and the icon under the pointer, at `now`.
+    fn update(&mut self, tabs: &[Tab], hover: Hit, now: Instant) {
+        self.panes.retain(|id, _| tabs.iter().any(|tab| tab.position(*id).is_some()));
+        for (index, tab) in tabs.iter().enumerate() {
+            let fanned = matches!(hover, Hit::Icon(i, _) if i == index);
+            for (position, pane) in tab.panes.iter().enumerate() {
+                let slot = index as f32;
+                let motion = self.panes.entry(pane.id).or_insert_with(|| Motion {
+                    slot: Tween::new(slot),
+                    fan: Tween::new(0.),
+                    lift: Tween::new(0.),
+                });
+                let lifted = hover == Hit::Icon(index, position);
+                motion.slot.to(slot, now, 200, Curve::SNAP);
+                motion.fan.to(f32::from(fanned), now, 160, Curve::EASE_OUT);
+                motion.lift.to(f32::from(lifted), now, 160, Curve::EASE_OUT);
+            }
+        }
+    }
+
+    /// Where the tab showing `pane` is at `now`, by index, and how far the pane's icon is fanned
+    /// out and lifted.
+    fn get(&self, pane: WindowId, now: Instant) -> (f32, f32, f32) {
+        let motion = self.panes.get(&pane);
+        motion.map_or((0., 0., 0.), |m| (m.slot.get(now), m.fan.get(now), m.lift.get(now)))
+    }
+
     /// Whether something in the bar is still moving at `now`.
-    pub fn running(&self, _now: Instant) -> bool {
-        false
+    pub fn running(&self, now: Instant) -> bool {
+        let mut tweens = self.panes.values().flat_map(|m| [&m.slot, &m.fan, &m.lift]);
+        tweens.any(|tween| tween.running(now))
     }
 }
 
@@ -440,7 +577,8 @@ impl Tabs {
             base.outlined(layout.track, radius, track, palette.track_outline, line);
         }
         let lit = |index: usize| {
-            index == self.active || matches!(self.hover, Hit::Tab(i) | Hit::Close(i) if i == index)
+            index == self.active
+                || matches!(self.hover, Hit::Tab(i) | Hit::Icon(i, _) | Hit::Close(i) if i == index)
         };
         for pair in layout.tabs.windows(2) {
             let ((index, rect), (next, _)) = (pair[0], pair[1]);
@@ -452,12 +590,21 @@ impl Tabs {
                 );
             }
         }
+        self.bar_effects.update(&self.tabs, self.hover, now);
         let dragging = self.drag.as_ref().filter(|drag| drag.moving);
+        let source = dragging.map(|drag| drag.source);
+        let target = dragging.and_then(|drag| drag.target);
+        // Stacks fanned out cover what is beside them.
+        let mut fanned = Layer::default();
         for &(index, mut rect) in &layout.tabs {
+            let tab = &self.tabs[index];
             let active = index == self.active;
+            // Tabs slide to new places.
+            let (slot, ..) = self.bar_effects.get(tab.pane().id, now);
+            rect.x = (rect.x + (slot - index as f32) * layout.step).round();
             let layer = match dragging {
                 // The dragged tab follows the pointer, above the others.
-                Some(drag) if active => {
+                Some(drag) if source == Some(Source::Tab(index)) => {
                     let (first, last) =
                         (layout.tabs[0].1.x, layout.tabs[layout.tabs.len() - 1].1.x);
                     rect.x = ((self.pointer.x - drag.grab) as f32).clamp(first, last).round();
@@ -470,6 +617,12 @@ impl Tabs {
             };
 
             let radius = layout.radius(TAB_RADIUS);
+            // A ring around the tab that what is dragged would join.
+            if target == Some(Target::Merge(index)) {
+                let ring = px(2.);
+                layer.rounded(rect.inset(-ring), radius + layout.curve(ring), palette.primary);
+                layer.rounded(rect, radius, track);
+            }
             let surface = if active {
                 layer.outlined(rect, radius, palette.raised, palette.raised_outline, line);
                 palette.raised
@@ -480,11 +633,53 @@ impl Tabs {
                 track
             };
 
-            let pane = self.tabs[index].pane();
-            let title = if active { window.title() } else { &pane.title };
-            let colors = (surface, palette.accent(title), palette.foreground);
-            let image = pane.icon.as_ref();
-            badge(layer, &layout, layout.badge(rect), image, &pane.badge, font, colors);
+            let title = |pane: usize| match &tab.panes[pane] {
+                _ if active && pane == tab.focus => window.title(),
+                pane => &pane.title,
+            };
+            let colors = |pane| (surface, palette.accent(title(pane)), palette.foreground);
+            let front = layout.badge(rect);
+            if tab.panes.len() == 1 {
+                let pane = tab.pane();
+                badge(layer, &layout, front, pane.icon.as_ref(), &pane.badge, font, colors(0));
+            } else {
+                let motion = |pane: usize| {
+                    let (_, fan, lift) = self.bar_effects.get(tab.panes[pane].id, now);
+                    (fan, lift)
+                };
+                let icons = stack(front, tab.panes.len(), tab.focus, layout.scale, motion);
+                let fan = motion(tab.focus).0;
+                let into = if fan > 0.001 { &mut fanned } else { &mut *layer };
+                if fan > 0.001 {
+                    let left = icons.iter().map(|(_, icon)| icon.x).fold(f32::MAX, f32::min);
+                    let right = icons.iter().map(|(_, icon)| icon.right()).fold(0., f32::max);
+                    let (x, y) = (left - px(3.), rect.y + px(2.));
+                    let plate = Rect::new(x, y, right - left + px(6.), rect.h - px(4.));
+                    into.rounded_alpha(plate, layout.radius(TAB_RADIUS - 2.), surface, fan.min(1.));
+                }
+                for (depth, &(pane, icon)) in icons.iter().rev().enumerate().rev() {
+                    if source == Some(Source::Pane(index, pane)) {
+                        continue;
+                    }
+                    // Icons are cards, each cut out of the ones behind it.
+                    if depth + 1 < icons.len() {
+                        let cut = icon.inset(-px(1.));
+                        into.rounded(cut, layout.curve(cut.w / 4.), surface);
+                    }
+                    let Pane { icon: image, badge: text, .. } = &tab.panes[pane];
+                    let image = image.as_ref();
+                    let icon = match image {
+                        Some(_) => {
+                            let card =
+                                mix(surface, palette.foreground, 0.16 + 0.1 * motion(pane).1);
+                            into.rounded(icon, layout.curve(icon.w / 4.), card);
+                            icon.inset((icon.w / 9.).round())
+                        },
+                        None => icon,
+                    };
+                    badge(into, &layout, icon, image, text, font, colors(pane));
+                }
+            }
 
             let close = layout.close(rect);
             if lit(index) {
@@ -496,11 +691,40 @@ impl Tabs {
                 layer.icon(close.center(), px(4.), icon, &lines, palette.muted);
             }
 
-            let left = layout.badge(rect).right() + px(8.);
+            let left = layout.title(rect, tab.panes.len());
             let right = if lit(index) { close.x + px(2.) } else { rect.right() - px(10.) };
-            let title = font.fit(title, (right - left).max(0.), active);
+            let title = font.fit(title(tab.focus), (right - left).max(0.), active);
             let color = if lit(index) { palette.foreground } else { palette.muted };
             layer.text(left, rect.center().1 - line_height / 2., title, color, active);
+        }
+
+        // Where a tab, or a pane let out of its tab, would land.
+        let gap = match (target, source) {
+            (Some(Target::Detach(index)), _) => Some(index),
+            (Some(Target::Reorder(index)), Some(Source::Tab(from))) if index != from => {
+                Some(if index < from { index } else { index + 1 })
+            },
+            _ => None,
+        };
+        if let (Some(x), Some(&(_, rect))) =
+            (gap.and_then(|gap| layout.gap(gap)), layout.tabs.first())
+        {
+            let caret = Rect::new(x - px(1.), rect.y + px(4.), px(2.), rect.h - px(8.));
+            top.rounded(caret, layout.curve(px(1.)), palette.primary);
+        }
+
+        // The icon of a dragged pane follows the pointer.
+        if let Some(Source::Pane(index, pane)) = source {
+            if let Some(pane) = self.tabs.get(index).and_then(|tab| tab.panes.get(pane)) {
+                let (x, y) = (self.pointer.x as f32, self.pointer.y as f32);
+                let size = px(22.);
+                let icon = Rect::new((x - size / 2.).round(), (y - size / 2.).round(), size, size);
+                let shadow = Rect::new(icon.x, icon.y + px(2.), size, size).inset(-px(2.));
+                top.rounded_alpha(shadow, layout.curve(shadow.w / 4.), BLACK, 0.3);
+                let colors = (palette.raised, palette.accent(&pane.title), palette.foreground);
+                top.rounded(icon.inset(-px(1.)), layout.curve(size / 4.), palette.raised);
+                badge(&mut top, &layout, icon, pane.icon.as_ref(), &pane.badge, font, colors);
+            }
         }
 
         for &(hit, rect) in &layout.buttons {
@@ -544,7 +768,7 @@ impl Tabs {
             }
         }
 
-        let mut layers = vec![base, top];
+        let mut layers = vec![base, fanned, top];
         layers.extend(context::draw(self, &layout, &palette, now));
         if let Some(settings) = &self.settings {
             layers.extend(settings.draw(&layout, &palette, config, window));
@@ -647,5 +871,87 @@ impl Tabs {
                 layer.icon(center, px(size), (1.3 * layout.scale).max(1.), lines, color);
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const FRONT: Rect = Rect { x: 100., y: 15., w: 18., h: 18. };
+
+    fn at_rest(_: usize) -> (f32, f32) {
+        (0., 0.)
+    }
+
+    #[test]
+    fn single_pane_fills_the_badge() {
+        assert_eq!(stack(FRONT, 1, 0, 1., at_rest), vec![(0, FRONT)]);
+    }
+
+    #[test]
+    fn stack_puts_the_focused_pane_in_front_of_the_others() {
+        let icons = stack(FRONT, 3, 1, 1., at_rest);
+        // Drawn from the back: the other panes in reading order behind the focused one.
+        let order: Vec<_> = icons.iter().map(|&(pane, _)| pane).collect();
+        assert_eq!(order, [2, 0, 1]);
+        assert_eq!(icons[2].1, FRONT);
+        for pair in icons.windows(2) {
+            let ((_, back), (_, front)) = (pair[0], pair[1]);
+            // Each card is smaller than the one in front of it and peeks out to its right.
+            assert!(back.w < front.w && back.h < front.h);
+            assert!(back.x > front.x && back.right() > front.right());
+            assert!((back.center().1 - front.center().1).abs() <= 0.5);
+        }
+    }
+
+    #[test]
+    fn stack_shows_at_most_four_icons() {
+        let icons = stack(FRONT, 7, 6, 1., at_rest);
+        assert_eq!(icons.len(), STACK);
+        assert_eq!(icons.last().unwrap().0, 6);
+    }
+
+    #[test]
+    fn fanned_stack_spreads_icons_apart_and_lifts_one() {
+        let icons = stack(FRONT, 4, 0, 1., |pane| (1., f32::from(pane == 2)));
+        for pair in icons.windows(2) {
+            let ((_, back), (_, front)) = (pair[0], pair[1]);
+            assert!(front.right() <= back.x, "{front:?} {back:?}");
+        }
+        let icon = |pane: usize| icons.iter().find(|(p, _)| *p == pane).unwrap().1;
+        assert_eq!((icon(0).w, icon(1).w, icon(2).w, icon(3).w), (22., 22., 26., 22.));
+        assert!(icon(2).center().1 < icon(1).center().1);
+    }
+
+    #[test]
+    fn stack_scales() {
+        let front = Rect::new(100., 30., 36., 36.);
+        let icons = stack(front, 2, 0, 2., at_rest);
+        assert_eq!(icons[1].1, front);
+        assert_eq!(icons[0].1.right() - front.right(), 12.);
+    }
+
+    #[test]
+    fn icons_are_hit_front_first() {
+        let icons = stack(FRONT, 3, 0, 1., at_rest);
+        assert_eq!(icon_at(&icons, 99.), None);
+        assert_eq!(icon_at(&icons, 100.), Some(0));
+        assert_eq!(icon_at(&icons, 117.), Some(0));
+        assert_eq!(icon_at(&icons, 120.), Some(1));
+        assert_eq!(icon_at(&icons, 128.), Some(2));
+        assert_eq!(icon_at(&icons, 130.), None);
+    }
+
+    #[test]
+    fn fanned_icons_are_hit_without_gaps() {
+        let icons = stack(FRONT, 3, 0, 1., |_| (1., 0.));
+        let (back, middle, front) = (icons[0].1, icons[1].1, icons[2].1);
+        assert_eq!(icon_at(&icons, front.x), Some(0));
+        // Between two icons the nearer one is hit.
+        assert_eq!(icon_at(&icons, front.right() + 1.), Some(0));
+        assert_eq!(icon_at(&icons, middle.x - 1.), Some(1));
+        assert_eq!(icon_at(&icons, back.right() - 1.), Some(2));
+        assert_eq!(icon_at(&icons, back.right()), None);
     }
 }
