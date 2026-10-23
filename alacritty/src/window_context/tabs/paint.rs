@@ -84,6 +84,10 @@ pub struct Palette {
     pub field: Rgb,
     pub field_outline: Rgb,
     pub focus: Rgb,
+    /// The main action, from the terminal's blue.
+    pub primary: Rgb,
+    /// Backing out of changes, from the terminal's red.
+    pub caution: Rgb,
     accents: [Rgb; 5],
 }
 
@@ -121,8 +125,22 @@ impl Palette {
             field,
             field_outline: mix(field, text, 0.1),
             focus: mix(terminal, text, 0.42),
+            primary: colors.normal.blue,
+            caution: colors.normal.red,
             accents: [normal.green, normal.yellow, normal.blue, normal.magenta, normal.cyan],
         }
+    }
+
+    /// Black or white, whichever contrasts more with `background`, as WCAG measures it.
+    pub fn on(background: Rgb) -> Rgb {
+        let linear = |channel: u8| {
+            let channel = f32::from(channel) / 255.;
+            if channel <= 0.04045 { channel / 12.92 } else { ((channel + 0.055) / 1.055).powf(2.4) }
+        };
+        let luminance = 0.2126 * linear(background.r)
+            + 0.7152 * linear(background.g)
+            + 0.0722 * linear(background.b);
+        if (luminance + 0.05) / 0.05 > 1.05 / (luminance + 0.05) { BLACK } else { WHITE }
     }
 
     /// A stable badge color for the kind of program a tab runs.
@@ -517,4 +535,17 @@ fn span(points: &[(f32, f32)], y: f32) -> Option<(f32, f32)> {
         }
     }
     span.filter(|(left, right)| right > left)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn text_on_a_color_contrasts_most() {
+        assert_eq!(Palette::on(Rgb::new(0x7a, 0xa6, 0xda)), BLACK);
+        assert_eq!(Palette::on(Rgb::new(0x0a, 0x3d, 0x91)), WHITE);
+        assert_eq!(Palette::on(WHITE), BLACK);
+        assert_eq!(Palette::on(BLACK), WHITE);
+    }
 }

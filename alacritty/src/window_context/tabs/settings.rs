@@ -38,11 +38,10 @@ enum Field {
     Options,
     UiFont,
     UiFontSize,
-    Opacity,
 }
 
 /// Number of fields, of the profiles and of the application.
-const FIELD_COUNT: usize = 10;
+const FIELD_COUNT: usize = 9;
 
 /// Fields of a profile.
 const FIELDS: [Field; 7] = [
@@ -56,7 +55,10 @@ const FIELDS: [Field; 7] = [
 ];
 
 /// Fields of the application's appearance.
-const APP_SETTING_FIELDS: [Field; 3] = [Field::UiFont, Field::UiFontSize, Field::Opacity];
+const APP_SETTING_FIELDS: [Field; 2] = [Field::UiFont, Field::UiFontSize];
+
+/// Smallest and largest size of the interface's font, in points.
+const UI_FONT_SIZES: (f32, f32) = (4., 72.);
 
 /// Most rows the font list shows at once.
 const FONT_ROWS: usize = 8;
@@ -90,8 +92,7 @@ impl Field {
             "Environment variables",
             "Configuration overrides",
             "Interface font",
-            "Interface font size",
-            "Background opacity",
+            "Font size",
         ][self.index()]
     }
 
@@ -104,9 +105,8 @@ impl Field {
             "Empty uses the font from alacritty.toml",
             "KEY=value, one per line",
             "e.g. font.size=14",
-            "Empty uses the system's",
-            "Points",
-            "Percent; 100 is opaque",
+            "Of the tab bar, menus and settings",
+            "In points",
         ][self.index()]
     }
 }
@@ -126,6 +126,10 @@ enum Target {
     /// Row of the sidebar for the application's appearance.
     Appearance,
     Corners(Corners),
+    /// Button that makes the interface's font larger, or smaller.
+    Step(bool),
+    /// Slider of the background's opacity.
+    Opacity,
     Row(usize),
     NewProfile,
     Duplicate,
@@ -245,6 +249,14 @@ fn copy_name(name: &str, taken: impl Fn(&str) -> bool) -> String {
     candidate
 }
 
+/// A path, starting from `~` when it lies in the home folder.
+fn home_relative(path: &Path) -> String {
+    match home::home_dir().and_then(|home| path.strip_prefix(home).ok().map(Path::to_owned)) {
+        Some(rest) => Path::new("~").join(rest).display().to_string(),
+        None => path.display().to_string(),
+    }
+}
+
 /// A sidebar row being dragged to a new position.
 struct Drag {
     /// Pointer offset from the row's top edge.
@@ -277,7 +289,7 @@ struct Panel {
     dialog: Rect,
     close: Rect,
     sidebar: Rect,
-    appearance: Rect,
+    appearance_row: Rect,
     rows: Vec<(usize, Rect)>,
     new_profile: Rect,
     duplicate: Rect,
@@ -288,9 +300,8 @@ struct Panel {
     scrolled: f32,
     scroll_max: f32,
     tile: Rect,
-    /// The page's title, and the choice of corners, on the appearance page.
-    heading: Rect,
-    corner_choice: Rect,
+    /// Geometry of the appearance page, while it is shown.
+    appearance: Option<AppearancePanel>,
     fields: [Rect; FIELD_COUNT],
     labels: [Rect; FIELD_COUNT],
     buttons: Vec<(Target, Rect)>,
@@ -301,6 +312,40 @@ struct Panel {
     logos: Option<(Rect, Rect, f32, usize)>,
 }
 
+/// The appearance page: settings in a group of rows, each named at the left with its control at
+/// the right, like the settings of macOS.
+struct AppearancePanel {
+    heading: Rect,
+    group: Rect,
+    /// Rows for the corners, the font, its size and the opacity.
+    rows: [Rect; 4],
+    corner_choice: Rect,
+    /// The buttons that end the font size's field.
+    stepper: Rect,
+    slider: Rect,
+}
+
+impl AppearancePanel {
+    /// Names and descriptions of the rows.
+    const ROWS: [(&'static str, &'static str); 4] = [
+        ("Corners", "Window, panels, tabs and buttons"),
+        ("Interface font", "Tab bar, menus and settings"),
+        ("Font size", "Interface text, in points"),
+        ("Background opacity", "Behind the terminal's text"),
+    ];
+
+    /// Radius of the slider's knob.
+    fn knob(layout: &Layout) -> f32 {
+        layout.px(9.)
+    }
+
+    /// Where the slider's knob can go, from transparent to opaque.
+    fn track(&self, layout: &Layout) -> (f32, f32) {
+        let knob = Self::knob(layout);
+        (self.slider.x + knob, (self.slider.w - 2. * knob).max(1.))
+    }
+}
+
 impl Target {
     /// Whether the target scrolls with the profile's fields.
     fn scrolls(self) -> bool {
@@ -308,6 +353,8 @@ impl Target {
             self,
             Target::Tile
                 | Target::Corners(_)
+                | Target::Step(_)
+                | Target::Opacity
                 | Target::Field(_)
                 | Target::Browse(_)
                 | Target::Reset
@@ -322,9 +369,13 @@ pub struct Settings {
     page: Page,
     /// The application's settings as last saved.
     saved_app_settings: AppSettings,
-    /// The application's settings as edited: the text of their fields, and the corners.
-    app_setting_texts: [String; 3],
+    /// The application's settings as edited: the text of their fields, the corners and the
+    /// opacity.
+    app_setting_texts: [String; 2],
     edited_corners: Corners,
+    edited_opacity: f32,
+    /// Whether the opacity's knob is being dragged.
+    sliding: bool,
     /// The configuration file just saved, to reload.
     reload: Option<PathBuf>,
     entries: Vec<Entry>,
@@ -368,12 +419,10 @@ impl Settings {
         let saved = AppSettings::new(config);
         Self {
             page,
-            app_setting_texts: [
-                saved.family.clone(),
-                app_settings::format(saved.size),
-                app_settings::format(saved.opacity * 100.),
-            ],
+            app_setting_texts: [saved.family.clone(), app_settings::format(saved.size)],
             edited_corners: saved.corners,
+            edited_opacity: saved.opacity,
+            sliding: false,
             saved_app_settings: saved,
             reload: None,
             default: profiles.list.iter().position(|profile| profile.name == profiles.default),
@@ -431,9 +480,9 @@ impl Settings {
             px(36.),
         );
         // The application's page, then the profiles, each under its heading.
-        let appearance = Rect::new(x + px(14.), sidebar.y + px(36.), side - px(12.), px(36.));
+        let appearance_row = Rect::new(x + px(14.), sidebar.y + px(36.), side - px(12.), px(36.));
         let mut rows = Vec::new();
-        let mut top = appearance.bottom() + px(38.);
+        let mut top = appearance_row.bottom() + px(38.);
         for index in self.scroll..self.entries.len() {
             if top + px(36.) > new_profile.y - px(6.) {
                 break;
@@ -454,11 +503,14 @@ impl Settings {
         // Delete, Cancel and Save stay at the card's bottom, with the status beside or above them.
         let (save, cancel) =
             (px(96.).min((width * 0.3).round()), px(92.).min((width * 0.28).round()));
-        let delete = px(128.).min(width - save - cancel - px(16.)).max(0.);
-        let status_width = width - save - cancel - delete - px(24.);
+        let gap = px(12.);
+        let delete = px(128.).min(width - save - cancel - gap - px(16.)).max(0.);
+        // The status starts the row where no Delete button does.
+        let before_status = if self.page == Page::Profile { delete + gap } else { 0. };
+        let status_width = width - save - cancel - before_status - 2. * gap;
         let footer = card.bottom() - px(58.);
         let status = if status_width >= px(160.) {
-            Rect::new(x0 + delete + px(12.), footer, status_width, px(34.))
+            Rect::new(x0 + before_status, footer, status_width, px(34.))
         } else {
             Rect::new(x0, footer - ch - px(10.), width, ch + px(6.))
         };
@@ -499,47 +551,55 @@ impl Settings {
             (tile, fields, labels, toggles, toggles[1].bottom() + px(24.) - top)
         };
 
-        // The appearance's settings from `top`: the page's title, the corners, then the fields,
-        // and their end.
+        // The appearance's settings from `top`: the page's title, then a row for each setting with
+        // its control at the right, and their end.
         let place_appearance = |top: f32| {
             let heading = Rect::new(x0, top + px(24.), width, 2. * ch);
+            let row = px(56.).max(2. * ch + px(16.));
+            let group = Rect::new(x0, heading.bottom() + px(20.), width, 4. * row);
+            let rows =
+                [0., 1., 2., 3.].map(|i| Rect::new(group.x, group.y + i * row, group.w, row));
             let mut fields = [Rect::default(); FIELD_COUNT];
-            let mut labels = [Rect::default(); FIELD_COUNT];
+
+            // Controls keep their own widths, giving up room to the names only in narrow cards.
+            let right = group.right() - px(16.);
+            let room = ((group.w - px(32.)) * 0.6).round();
+            let control = px(30.);
+            let control_at = |row: Rect, width: f32| {
+                let width = width.min(room);
+                Rect::new(right - width, (row.y + (row.h - control) / 2.).round(), width, control)
+            };
             let words = font.width("Rounded", false).max(font.width("Square", false));
-            let choice_width = (2. * (px(42.) + words) + px(6.)).min(width);
-            let mut at = heading.bottom() + px(28.);
-            let corner_choice = Rect::new(x0, at + px(24.), choice_width, px(34.));
-            at += px(72.);
-            let ui_font = Field::UiFont.index();
-            labels[ui_font] = field(x0, at, x1, px(20.));
-            fields[ui_font] = field(x0, at + px(24.), x1, px(34.));
-            at += px(72.);
-            for (setting, (left, right)) in
-                [Field::UiFontSize, Field::Opacity].into_iter().zip(halves)
-            {
-                labels[setting.index()] = field(left, at, right, px(20.));
-                fields[setting.index()] = field(left, at + px(24.), right, px(34.));
-                if narrow || setting == Field::Opacity {
-                    at += px(72.);
-                }
-            }
-            (heading, corner_choice, fields, labels, at - top)
+            let corner_choice = control_at(rows[0], 2. * (px(42.) + words) + px(6.));
+            fields[Field::UiFont.index()] = control_at(rows[1], px(240.));
+            let stepper = control_at(rows[2], px(22.));
+            let size_width = px(64.).max(font.width("72.5", false) + px(24.));
+            fields[Field::UiFontSize.index()] =
+                Rect { x: stepper.x - size_width, w: size_width, ..stepper };
+            let value = font.width("100%", false).ceil();
+            let slider = control_at(rows[3], px(200.) + px(12.) + value);
+            let slider = Rect { w: (slider.w - px(12.) - value).max(px(40.)), ..slider };
+
+            let panel = AppearancePanel { heading, group, rows, corner_choice, stepper, slider };
+            (panel, fields, group.bottom() + px(24.) - top)
         };
 
         let mut buttons = vec![(
             Target::Close,
             Rect::new(dialog.right() - px(48.), y + px(8.), px(40.), px(32.)),
         )];
-        let (tile, heading, corner_choice, fields, labels, scrolled, scroll_max);
+        let (tile, appearance, fields, labels, scrolled, scroll_max);
         match self.page {
             Page::Appearance => {
-                scroll_max = (place_appearance(0.).4 - viewport.h).max(0.);
+                scroll_max = (place_appearance(0.).2 - viewport.h).max(0.);
                 scrolled = self.card_scroll.clamp(0., scroll_max);
-                (heading, corner_choice, fields, labels, _) =
-                    place_appearance(viewport.y - scrolled);
-                tile = Rect::default();
-                let segments = corner_choice.inset(px(3.));
+                let page;
+                (page, fields, _) = place_appearance(viewport.y - scrolled);
+                (tile, labels) = (Rect::default(), [Rect::default(); FIELD_COUNT]);
+                let segments = page.corner_choice.inset(px(3.));
                 let half = (segments.w / 2.).round();
+                let stepper = page.stepper;
+                let upper = (stepper.h / 2.).round();
                 buttons.extend([
                     (Target::Corners(Corners::Round), Rect { w: half, ..segments }),
                     (Target::Corners(Corners::Square), Rect {
@@ -547,7 +607,15 @@ impl Settings {
                         w: segments.w - half,
                         ..segments
                     }),
+                    (Target::Step(true), Rect { h: upper, ..stepper }),
+                    (Target::Step(false), Rect {
+                        y: stepper.y + upper,
+                        h: stepper.h - upper,
+                        ..stepper
+                    }),
+                    (Target::Opacity, page.slider),
                 ]);
+                appearance = Some(page);
             },
             Page::Profile => {
                 // Multiline fields give up height down to two lines before the fields scroll.
@@ -559,7 +627,7 @@ impl Settings {
                 scrolled = self.card_scroll.clamp(0., scroll_max);
                 let toggles;
                 (tile, fields, labels, toggles, _) = place(viewport.y - scrolled, lines);
-                (heading, corner_choice) = (Rect::default(), Rect::default());
+                appearance = None;
 
                 let beside = |field: Rect, offset: f32| {
                     Rect::new(field.right() + px(8.) + offset, field.y, button, field.h)
@@ -589,7 +657,7 @@ impl Settings {
         buttons.extend([
             (Target::NewProfile, new_profile),
             (Target::Duplicate, duplicate),
-            (Target::Cancel, Rect::new(x1 - save - px(4.) - cancel, footer, cancel, px(34.))),
+            (Target::Cancel, Rect::new(x1 - save - gap - cancel, footer, cancel, px(34.))),
             (Target::Save, Rect::new(x1 - save, footer, save, px(34.))),
         ]);
 
@@ -632,7 +700,7 @@ impl Settings {
             dialog,
             close: buttons[0].1,
             sidebar,
-            appearance,
+            appearance_row,
             rows,
             new_profile,
             duplicate,
@@ -641,8 +709,7 @@ impl Settings {
             scrolled,
             scroll_max,
             tile,
-            heading,
-            corner_choice,
+            appearance,
             fields,
             labels,
             buttons,
@@ -682,7 +749,7 @@ impl Settings {
             .iter()
             .find(|field| panel.fields[field.index()].contains(point))
             .filter(|_| panel.viewport.contains(point));
-        let appearance = panel.appearance.contains(point).then_some(Target::Appearance);
+        let appearance = panel.appearance_row.contains(point).then_some(Target::Appearance);
         button
             .map(|(target, _)| *target)
             .or(appearance)
@@ -856,6 +923,35 @@ impl Settings {
         self.font_list = None;
     }
 
+    /// Make the interface's font a point larger, or smaller, from the size typed.
+    fn step_font_size(&mut self, larger: bool) {
+        let typed = self.text(Field::UiFontSize).trim().parse::<f32>();
+        let size = typed.unwrap_or(self.saved_app_settings.size);
+        let size = if larger { size.floor() + 1. } else { size.ceil() - 1. };
+        let size = app_settings::format(size.clamp(UI_FONT_SIZES.0, UI_FONT_SIZES.1));
+        if size != self.text(Field::UiFontSize) {
+            self.caret = size.len();
+            *self.text_mut(Field::UiFontSize) = size;
+            self.touched();
+        }
+    }
+
+    /// Set the opacity to a whole percent.
+    fn set_opacity(&mut self, opacity: f32) {
+        let opacity = (opacity.clamp(0., 1.) * 100.).round() / 100.;
+        if opacity != self.edited_opacity {
+            self.edited_opacity = opacity;
+            self.touched();
+        }
+    }
+
+    /// Set the opacity to where the pointer is along the slider.
+    fn slide(&mut self, panel: &Panel, layout: &Layout) {
+        let Some(appearance) = &panel.appearance else { return };
+        let (start, length) = appearance.track(layout);
+        self.set_opacity((self.pointer.x as f32 - start) / length);
+    }
+
     fn focus(&mut self, field: Field) {
         self.focus = Some(field);
         self.caret = self.text(field).len();
@@ -869,6 +965,10 @@ impl Settings {
     pub fn moved(&mut self, layout: &Layout, point: PhysicalPosition<f64>) -> bool {
         self.pointer = point;
         let panel = self.panel(layout);
+        if self.sliding {
+            self.slide(&panel, layout);
+            return true;
+        }
         if let Some(drag) = &mut self.drag {
             let y = point.y as f32;
             drag.y = y;
@@ -948,6 +1048,11 @@ impl Settings {
                     self.touched();
                 }
             },
+            Target::Step(larger) => self.step_font_size(larger),
+            Target::Opacity => {
+                self.sliding = true;
+                self.slide(&panel, layout);
+            },
             Target::Row(index) => {
                 self.select(index, layout);
                 let rect =
@@ -1025,10 +1130,23 @@ impl Settings {
 
     pub fn release(&mut self) {
         self.drag = None;
+        self.sliding = false;
     }
 
     pub fn scroll(&mut self, layout: &Layout, down: bool) {
         let (panel, count) = (self.panel(layout), self.candidates().len());
+
+        // The wheel turns the font's size and the opacity under the pointer.
+        let over = |rect: Rect| rect.contains(self.pointer);
+        if let Some(appearance) = &panel.appearance {
+            let size = panel.fields[Field::UiFontSize.index()];
+            if self.font_list().is_none() && (over(size) || over(appearance.stepper)) {
+                return self.step_font_size(!down);
+            }
+            if over(appearance.slider) {
+                return self.set_opacity(self.edited_opacity + if down { -0.01 } else { 0.01 });
+            }
+        }
         if let (Some(picker), Some((rect, cells, cell, columns))) = (&mut self.logos, panel.logos) {
             if rect.contains(self.pointer) {
                 let rows = (icons::names().count() + 1).div_ceil(columns);
@@ -1100,7 +1218,11 @@ impl Settings {
         let start =
             text.split('\n').take(line).map(|line| line.len() + 1).sum::<usize>().min(text.len());
         let line_text = text[start..].split('\n').next().unwrap_or("");
-        start + layout.font.offset(line_text, point.x as f32 - rect.x - layout.px(10.) + skip)
+        let indent = self.indent(field, rect, layout);
+        start
+            + layout
+                .font
+                .offset(line_text, point.x as f32 - rect.x - layout.px(10.) - indent + skip)
     }
 
     /// Line of the caret in the focused field, and its distance from the start of the line.
@@ -1118,6 +1240,16 @@ impl Settings {
             text.insert_str(self.caret.min(text.len()), &self.preedit);
         }
         text
+    }
+
+    /// How far the field's text is pushed right: the appearance's values end at the right of their
+    /// fields, like the controls they sit beside, while they fit.
+    fn indent(&self, field: Field, rect: Rect, layout: &Layout) -> f32 {
+        if !field.is_app_setting() {
+            return 0.;
+        }
+        let room = rect.w - layout.px(20.);
+        (room - layout.font.width(&self.composed(field), false)).max(0.).round()
     }
 
     /// First line shown, and the width of text scrolled out at the left, keeping the caret
@@ -1184,6 +1316,11 @@ impl Settings {
         }
         match event.logical_key.as_ref() {
             Key::Named(NamedKey::Escape) => return self.close(),
+            Key::Named(key @ (NamedKey::ArrowUp | NamedKey::ArrowDown))
+                if self.focus == Some(Field::UiFontSize) =>
+            {
+                self.step_font_size(key == NamedKey::ArrowUp)
+            },
             Key::Character("s") if command => self.save(config),
             Key::Character("v") if command => self.insert(&paste()),
             Key::Named(NamedKey::Tab) => {
@@ -1323,8 +1460,8 @@ impl Settings {
         Ok(AppSettings {
             corners: self.edited_corners,
             family: self.text(Field::UiFont).trim().into(),
-            size: number(Field::UiFontSize, 4.0..=72.)?,
-            opacity: number(Field::Opacity, 0.0..=100.)? / 100.,
+            size: number(Field::UiFontSize, UI_FONT_SIZES.0..=UI_FONT_SIZES.1)?,
+            opacity: self.edited_opacity,
         })
     }
 
@@ -1383,7 +1520,7 @@ impl Settings {
         }
         self.dirty = false;
         self.confirm_close = false;
-        let paths: Vec<_> = paths.iter().map(|path| path.display().to_string()).collect();
+        let paths: Vec<_> = paths.iter().map(|path| home_relative(path)).collect();
         let message = if paths.is_empty() {
             "Nothing changed".into()
         } else {
@@ -1459,7 +1596,7 @@ impl Settings {
         layer.outlined(panel.sidebar, radius, palette.track, palette.track_outline, line);
         let section = |y: f32| Rect::new(panel.sidebar.x + px(14.), y, px(200.), px(22.));
         left(&mut layer, section(panel.sidebar.y + px(8.)), "APPLICATION", palette.muted, false);
-        let rect = panel.appearance;
+        let rect = panel.appearance_row;
         let selected = self.page == Page::Appearance;
         let radius = layout.radius(ITEM_RADIUS);
         let surface = if selected {
@@ -1476,7 +1613,7 @@ impl Settings {
         layer.gear(icon.center(), px(8.), color, surface);
         let label = Rect::new(icon.right() + px(10.), rect.y, rect.w - px(36.), rect.h);
         left(&mut layer, label, "Appearance", color, selected);
-        let profiles = section(panel.appearance.bottom() + px(8.));
+        let profiles = section(panel.appearance_row.bottom() + px(8.));
         left(&mut layer, profiles, "PROFILES", palette.muted, false);
         let lifted = self.drag.as_ref().filter(|drag| drag.moving);
         for &(index, mut rect) in &panel.rows {
@@ -1552,8 +1689,8 @@ impl Settings {
         let radius = layout.radius(PANEL_RADIUS);
         layer.outlined(panel.card, radius, palette.terminal, palette.card_outline, line);
         let mut content = Layer::default();
-        match self.page {
-            Page::Profile => {
+        match &panel.appearance {
+            None => {
                 let profile = self.entries[self.selected].draft();
                 let tile_outline =
                     if hover(Target::Tile) { palette.focus } else { palette.raised_outline };
@@ -1574,38 +1711,27 @@ impl Settings {
                     layout,
                 );
             },
-            // The page's title, and the corners on a track like the tabs'.
-            Page::Appearance => {
-                let heading = panel.heading;
-                let title = Rect { h: ch, ..heading };
-                left(&mut content, title, "Appearance", palette.foreground, true);
-                let note = "For every window; saved to alacritty.toml";
-                left(&mut content, Rect { y: heading.y + ch, ..title }, note, palette.muted, false);
-                let choice = panel.corner_choice;
-                let label = Rect::new(choice.x, choice.y - px(24.), heading.w, px(20.));
-                left(&mut content, label, "Corners", palette.foreground, true);
-                let hint = "Of the window, its panels, tabs and buttons";
-                let hint_width = font.width(hint, false);
-                if font.width("Corners", true) + px(16.) + hint_width <= label.w {
-                    let hint_rect =
-                        Rect::new(label.right() - hint_width, label.y, hint_width, label.h);
-                    left(&mut content, hint_rect, hint, palette.muted, false);
-                }
-                let radius = layout.radius(10.);
-                content.outlined(choice, radius, palette.track, palette.track_outline, line);
-            },
+            Some(page) => self.draw_appearance(&mut content, page, &panel, layout, palette),
         }
 
         for &field in self.fields() {
             let rect = panel.fields[field.index()];
             let focused = self.focus == Some(field);
             let outline = if focused { palette.focus } else { palette.field_outline };
-            content.outlined(rect, layout.radius(7.), palette.field, outline, line);
+            // The font size's field ends in its buttons, in one frame.
+            let frame = match (&panel.appearance, field) {
+                (Some(page), Field::UiFontSize) => {
+                    Rect { w: page.stepper.right() - rect.x, ..rect }
+                },
+                _ => rect,
+            };
+            content.outlined(frame, layout.radius(7.), palette.field, outline, line);
 
             // Text scrolled to the caret, with any text being composed by the input method.
             let (first_line, skip) = self.scrolled(field, rect, layout);
             let text = self.composed(field);
             let room = (rect.w - px(20.)).max(0.);
+            let left_edge = rect.x + px(10.) + self.indent(field, rect, layout);
             let lines =
                 if field.multiline() { ((rect.h - px(16.)) / ch).max(1.) as usize } else { 1 };
             let top = if field.multiline() { rect.y + px(8.) } else { rect.center().1 - ch / 2. };
@@ -1618,7 +1744,7 @@ impl Settings {
                     (start >= skip && end - skip <= room).then_some(c)
                 });
                 content.text(
-                    rect.x + px(10.),
+                    left_edge,
                     top + index as f32 * ch,
                     visible.collect(),
                     palette.foreground,
@@ -1626,9 +1752,21 @@ impl Settings {
                 );
             }
 
+            // An empty field shows what is used in its place.
+            if let Some(placeholder) =
+                self.placeholder(field, config, layout).filter(|_| text.is_empty())
+            {
+                let placeholder = font.fit(&placeholder, room, false);
+                let x = match field.is_app_setting() {
+                    true => rect.right() - px(10.) - font.width(&placeholder, false),
+                    false => rect.x + px(10.),
+                };
+                content.text(x, top, placeholder, palette.muted, false);
+            }
+
             if focused {
                 let (caret_line, caret_x) = self.caret_position(field, font);
-                let x = (rect.x + px(10.) + caret_x - skip).round();
+                let x = (left_edge + caret_x - skip).round();
                 let y = top + (caret_line - first_line) as f32 * ch;
                 if !self.preedit.is_empty() {
                     let width = font.width(&self.preedit, false);
@@ -1640,6 +1778,10 @@ impl Settings {
                 window.update_ime_position(Point::new(0, Column(0)), &size);
             }
 
+            // The appearance page names its settings in its rows.
+            if field.is_app_setting() {
+                continue;
+            }
             let label = panel.labels[field.index()];
             if field == Field::Name {
                 left(&mut content, label, "Click the icon to choose a logo", palette.muted, false);
@@ -1685,28 +1827,54 @@ impl Settings {
                 },
                 Target::Browse(_) => ("Browse…", palette.foreground, false),
                 Target::Reset if self.enabled(target) => ("Reset", palette.foreground, false),
-                Target::Cancel => ("Cancel", palette.foreground, false),
-                Target::Save if self.dirty => {
-                    let fill = if hovered {
-                        mix(palette.foreground, palette.terminal, 0.12)
-                    } else {
-                        palette.foreground
-                    };
-                    layer.rounded(rect, layout.radius(8.), fill);
-                    center(layer, rect, "Save", palette.terminal, true);
+                // Cancel is tinted with the terminal's red, and Save, once there is something to
+                // save, filled with its blue, as the main action.
+                Target::Cancel => {
+                    let caution = palette.caution;
+                    let fill = mix(palette.raised, caution, if hovered { 0.2 } else { 0.1 });
+                    let outline = mix(palette.raised_outline, caution, 0.35);
+                    layer.outlined(rect, layout.radius(8.), fill, outline, line);
+                    let color = mix(caution, palette.foreground, 0.35);
+                    center(layer, rect, "Cancel", color, false);
                     continue;
                 },
+                Target::Save if self.dirty => {
+                    let primary = palette.primary;
+                    let fill =
+                        if hovered { mix(primary, super::paint::WHITE, 0.12) } else { primary };
+                    layer.rounded(rect, layout.radius(8.), fill);
+                    center(layer, rect, "Save", Palette::on(fill), true);
+                    continue;
+                },
+                // The size's buttons, one above the other, set off from its number by a line.
+                Target::Step(larger) => {
+                    if hovered {
+                        let fill = mix(palette.field, palette.foreground, 0.1);
+                        layer.rounded(rect.inset(px(2.)), layout.radius(5.), fill);
+                    }
+                    if larger {
+                        let divider =
+                            Rect::new(rect.x, rect.y + px(6.), line, 2. * rect.h - px(12.));
+                        layer.rect(divider, palette.field_outline);
+                    }
+                    let (top, bottom) = if larger { (-0.5, 0.5) } else { (0.5, -0.5) };
+                    let chevron = [[-1., bottom, 0., top], [0., top, 1., bottom]];
+                    let color = if hovered { palette.foreground } else { palette.muted };
+                    layer.icon(rect.center(), px(3.5), px(1.3).max(1.), &chevron, color);
+                    continue;
+                },
+                Target::Opacity => continue,
                 Target::Save => ("Save", palette.muted, true),
                 Target::Delete if self.enabled(target) => {
                     if hovered {
-                        let fill = mix(palette.terminal, palette.danger, 0.18);
+                        let fill = mix(palette.terminal, palette.caution, 0.18);
                         layer.rounded(rect, layout.radius(8.), fill);
                     }
                     center(
                         layer,
                         rect,
                         "Delete profile",
-                        mix(palette.danger, palette.foreground, 0.25),
+                        mix(palette.caution, palette.foreground, 0.35),
                         false,
                     );
                     continue;
@@ -1714,9 +1882,10 @@ impl Settings {
                 Target::AllFonts => {
                     let check = Rect::new(rect.x + px(4.), rect.y, px(18.), rect.h).square(px(18.));
                     if self.all_fonts {
-                        layer.rounded(check, layout.radius(5.), palette.foreground);
+                        layer.rounded(check, layout.radius(5.), palette.primary);
                         let mark = [[-1., 0., -0.3, 0.7], [-0.3, 0.7, 1., -0.7]];
-                        layer.icon(check.center(), px(5.), px(1.5), &mark, palette.terminal);
+                        let color = Palette::on(palette.primary);
+                        layer.icon(check.center(), px(5.), px(1.5), &mark, color);
                     } else {
                         let outline = if hovered { palette.foreground } else { palette.focus };
                         layer.outlined(check, layout.radius(5.), palette.field, outline, line);
@@ -1745,8 +1914,9 @@ impl Settings {
                         if on { track.right() - px(4.) - knob } else { track.x + px(4.) + knob };
                     let radius = layout.radius(11.);
                     if on {
-                        layer.rounded(track, radius, palette.foreground);
-                        layout.dot(layer, (x, track.center().1), knob, palette.terminal);
+                        layer.rounded(track, radius, palette.primary);
+                        let knob_color = super::paint::WHITE;
+                        layout.dot(layer, (x, track.center().1), knob, knob_color);
                     } else {
                         layer.outlined(track, radius, palette.field, palette.focus, line);
                         layout.dot(layer, (x, track.center().1), knob, palette.muted);
@@ -1806,10 +1976,9 @@ impl Settings {
 
         if let Some((message, error)) = &self.status {
             let color =
-                if *error { mix(palette.danger, palette.foreground, 0.25) } else { palette.muted };
+                if *error { mix(palette.caution, palette.foreground, 0.35) } else { palette.muted };
             let message = font.fit(message, panel.status.w, false);
-            let x = panel.status.right() - font.width(&message, false);
-            layer.text(x, panel.status.center().1 - ch / 2., message, color, false);
+            layer.text(panel.status.x, panel.status.center().1 - ch / 2., message, color, false);
         }
 
         // The font list covers the fields below its own, so it is drawn after their text.
@@ -1927,6 +2096,85 @@ impl Settings {
         }
         popup.clip(panel.dialog, ch);
         vec![layer, content, popup]
+    }
+
+    /// What an empty field stands for.
+    fn placeholder(&self, field: Field, config: &UiConfig, layout: &Layout) -> Option<String> {
+        match field {
+            Field::Command => Some(profiles::shell(config)),
+            Field::Directory => Some("~".into()),
+            Field::Font => Some(config.font.normal().family.clone()),
+            // The font shown is the system's while none is saved.
+            Field::UiFont if self.saved_app_settings.family.trim().is_empty() => {
+                Some(format!("System · {}", layout.font.family))
+            },
+            Field::UiFont => Some("System".into()),
+            _ => None,
+        }
+    }
+
+    /// Draw the appearance page, but for its fields and buttons.
+    fn draw_appearance(
+        &self,
+        layer: &mut Layer,
+        page: &AppearancePanel,
+        panel: &Panel,
+        layout: &Layout,
+        palette: &Palette,
+    ) {
+        let px = |value: f32| layout.px(value);
+        let (font, ch) = (&*layout.font, layout.line);
+        let line = px(1.).max(1.);
+
+        let heading = page.heading;
+        layer.text(heading.x, heading.y, "Appearance".into(), palette.foreground, true);
+        let note = font.fit("For every window; saved to alacritty.toml", heading.w, false);
+        layer.text(heading.x, heading.y + ch, note, palette.muted, false);
+
+        // The settings in one group, a line between each, named at the left of their controls.
+        let group = mix(palette.terminal, palette.field, 0.5);
+        layer.outlined(page.group, layout.radius(10.), group, palette.field_outline, line);
+        let controls = [
+            page.corner_choice.x,
+            panel.fields[Field::UiFont.index()].x,
+            panel.fields[Field::UiFontSize.index()].x,
+            page.slider.x,
+        ];
+        for (index, (row, (name, description))) in
+            page.rows.iter().zip(AppearancePanel::ROWS).enumerate()
+        {
+            if index > 0 {
+                let rule = Rect::new(row.x + px(16.), row.y, row.w - px(16.), line);
+                layer.rect(rule, palette.field_outline);
+            }
+            let (x, middle) = (row.x + px(16.), row.center().1);
+            let room = (controls[index] - px(16.) - x).max(0.);
+            layer.text(x, middle - ch, font.fit(name, room, false), palette.foreground, false);
+            layer.text(x, middle, font.fit(description, room, false), palette.muted, false);
+        }
+
+        // The choice of corners, on a track like the tabs'.
+        let radius = layout.radius(10.);
+        layer.outlined(page.corner_choice, radius, palette.track, palette.track_outline, line);
+
+        // The opacity: a track filled up to its knob, and the percentage beside it.
+        let (start, length) = page.track(layout);
+        let (thickness, y) = (px(4.), page.slider.center().1);
+        let track = Rect::new(start, (y - thickness / 2.).round(), length, thickness);
+        layer.rounded(
+            track,
+            layout.curve(thickness / 2.),
+            mix(palette.field, palette.foreground, 0.15),
+        );
+        let knob = start + length * self.edited_opacity;
+        let filled = Rect { w: knob - start, ..track };
+        layer.rounded(filled, layout.curve(thickness / 2.), palette.primary);
+        let size = AppearancePanel::knob(layout);
+        layout.dot(layer, (knob, y), size, palette.raised_outline);
+        layout.dot(layer, (knob, y), size - line, palette.foreground);
+        let percent = format!("{}%", (self.edited_opacity * 100.).round());
+        let x = page.slider.right() + px(12.);
+        layer.text(x, y - ch / 2., percent, palette.foreground, false);
     }
 
     /// Draw a profile's icon, or a badge with text.

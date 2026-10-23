@@ -112,6 +112,8 @@ pub struct Tabs {
     hover: Hit,
     press: Press,
     last_click: Option<Instant>,
+    /// Wheel movement in the settings short of a whole step, in lines.
+    wheel: f64,
     /// Where the bar was pressed to move the window, once the pointer moves.
     grab: Option<PhysicalPosition<f64>>,
     drag: Option<Drag>,
@@ -440,12 +442,23 @@ pub fn window_event(
             }
         },
         WindowEvent::MouseWheel { delta, .. } if modal || tabs.pointer.y < layout.bar as f64 => {
+            let delta_kind = delta;
             let delta = match delta {
                 MouseScrollDelta::LineDelta(_, delta) => f64::from(delta),
                 MouseScrollDelta::PixelDelta(delta) => delta.y,
             };
             if let Some(settings) = &mut tabs.settings {
-                settings.scroll(&layout, delta < 0.);
+                // Touchpads scroll by pixels; the settings move by whole steps of 20.
+                let lines = match delta_kind {
+                    MouseScrollDelta::LineDelta(..) => delta,
+                    MouseScrollDelta::PixelDelta(_) => delta / 20.,
+                };
+                tabs.wheel += lines;
+                let steps = tabs.wheel.trunc();
+                tabs.wheel -= steps;
+                for _ in 0..steps.abs() as usize {
+                    settings.scroll(&layout, steps < 0.);
+                }
                 redraw(ctx);
             } else if delta != 0. && tabs.menu.is_none() {
                 run(ctx, if delta > 0. { Command::Previous } else { Command::Next }, config, proxy);
