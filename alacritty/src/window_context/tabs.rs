@@ -154,7 +154,6 @@ pub enum FontChange {
     /// Larger or smaller by steps.
     By(i32),
     /// Back to the size of its configuration.
-    #[allow(dead_code, reason = "lane P resets the text size from the pane menu")]
     Reset,
 }
 
@@ -220,7 +219,6 @@ pub struct Tabs {
     autohide: autohide::State,
     /// The live pane whose text size last changed, the size relative to its configuration in
     /// percent, and when, for the size to show over it.
-    #[allow(dead_code, reason = "lane P shows the text size over the pane")]
     font_hud: Option<(WindowId, u16, Instant)>,
     /// The live pane and its text size relative to its configuration, as last seen.
     live_font: Option<(WindowId, u16)>,
@@ -1471,6 +1469,12 @@ pub fn relayout(ctx: &mut WindowContext) {
     let animate = tabs.press != Press::Divider;
     tabs.pane_effects.place(&placed, Instant::now(), animate);
 
+    // The pointer, still where it was, may be on other panes' controls now.
+    if tabs.near.is_some() || tabs.control.is_some() {
+        tabs.near = panes::near(tabs, tabs.pointer);
+        tabs.control = panes::control(tabs, tabs.pointer, scale);
+    }
+
     let rect = tabs.focused_rect();
     if (rect.w, rect.h) != (size.width(), size.height()) {
         resize_live(ctx);
@@ -1945,13 +1949,20 @@ pub fn set_live_font(ctx: &mut WindowContext, size: FontSize) {
 pub fn zoom_live(ctx: &mut WindowContext, change: FontChange) {
     let scale = ctx.display.window.scale_factor as f32;
     let font = &ctx.config.font;
-    let configured = font.size().scale(scale).as_px();
     let min = FontSize::new(ZOOM_MIN_POINTS).scale(scale).as_px();
-    let px = match change {
-        FontChange::By(steps) => zoomed_px(ctx.display.font_size.as_px(), steps, configured, min),
+    let size = zoomed(ctx.display.font_size, change, font.size().scale(scale), min);
+    set_live_font(ctx, size);
+}
+
+/// Text of size `current` after `change`, for text `configured` at that size, never below `min`
+/// pixels: a reset gives back the configured size exactly, which pixels would not round-trip.
+fn zoomed(current: FontSize, change: FontChange, configured: FontSize, min: f32) -> FontSize {
+    match change {
+        FontChange::By(steps) => {
+            FontSize::from_px(zoomed_px(current.as_px(), steps, configured.as_px(), min))
+        },
         FontChange::Reset => configured,
-    };
-    set_live_font(ctx, FontSize::from_px(px));
+    }
 }
 
 /// Size in pixels of text of `current` pixels made larger by `steps`, or smaller by negative
@@ -2402,6 +2413,17 @@ mod tests {
         assert!(tabs.closed_whole());
         assert!(!Tabs { ending: Some(Ending::Tabs), ..Tabs::default() }.closed_whole());
         assert!(!Tabs::default().closed_whole(), "the last shell exited");
+    }
+
+    #[test]
+    fn reset_text_is_exactly_as_configured() {
+        // Sizes whose pixels do not round-trip to the same size.
+        for (points, scale) in [(11.4, 1.), (12.1, 1.), (10.9, 2.), (11.25, 1.)] {
+            let configured = FontSize::new(points).scale(scale);
+            let larger = zoomed(configured, FontChange::By(3), configured, 4.);
+            assert_ne!(larger, configured);
+            assert_eq!(zoomed(larger, FontChange::Reset, configured, 4.), configured, "{points}");
+        }
     }
 
     #[test]

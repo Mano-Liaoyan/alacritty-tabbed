@@ -1,5 +1,5 @@
-//! Context menus, opened by a right click: a pane's, to split, zoom, move or close it, and a tab's,
-//! to rename, ungroup, move or close it.
+//! Context menus, opened by a right click: a pane's, to split, zoom, move or close it or reset its
+//! text size, and a tab's, to rename, ungroup, move or close it.
 
 use std::cmp::Ordering;
 use std::rc::Rc;
@@ -24,8 +24,8 @@ use super::paint::{BLACK, Layer, Palette, Rect, UNZOOM_GLYPH, ZOOM_GLYPH, mix};
 use super::split::{Axis, Side, Split};
 use super::tear::{can_tear, tear_off};
 use super::{
-    Press, Tab, Tabs, close as close_tab, close_pane, focus_pane, move_pane, redraw, relayout,
-    rename, split, toggle_zoom,
+    FontChange, Press, Tab, Tabs, close as close_tab, close_pane, focus_pane, move_pane, redraw,
+    relayout, rename, split, toggle_zoom, zoom_live,
 };
 
 /// Something a menu offers to do with the pane or the tab it was opened on.
@@ -38,6 +38,8 @@ enum Item {
     /// Show only this pane, over the whole tab.
     Zoom,
     Unzoom,
+    /// Give the pane's text the size of its configuration again.
+    ResetTextSize,
     MoveToNewTab,
     /// Move the pane, or the tab, to a window of its own.
     NewWindow,
@@ -59,6 +61,7 @@ impl Item {
             Item::SplitHorizontally => "Split Horizontally",
             Item::Zoom => "Zoom Pane",
             Item::Unzoom => "Unzoom Pane",
+            Item::ResetTextSize => "Reset Text Size",
             Item::MoveToNewTab => "Move Pane to New Tab",
             Item::NewWindow if tab => "Move Tab to New Window",
             Item::NewWindow => "Move Pane to New Window",
@@ -80,6 +83,18 @@ impl Item {
             Item::SplitHorizontally => &[BOX[0], BOX[1], BOX[2], BOX[3], [-1., 0., 1., 0.]],
             Item::Zoom => ZOOM_GLYPH,
             Item::Unzoom => UNZOOM_GLYPH,
+            // A magnifying glass.
+            Item::ResetTextSize => &[
+                [0.45, -0.2, 0.26, 0.26],
+                [0.26, 0.26, -0.2, 0.45],
+                [-0.2, 0.45, -0.66, 0.26],
+                [-0.66, 0.26, -0.85, -0.2],
+                [-0.85, -0.2, -0.66, -0.66],
+                [-0.66, -0.66, -0.2, -0.85],
+                [-0.2, -0.85, 0.26, -0.66],
+                [0.26, -0.66, 0.45, -0.2],
+                [0.26, 0.26, 1., 1.],
+            ],
             // An arrow leaving a box by its open corner.
             Item::MoveToNewTab => &[
                 [0., -1., -1., -1.],
@@ -141,7 +156,7 @@ impl Item {
         let section = |item| match item {
             Item::SplitVertically | Item::SplitHorizontally => 0,
             Item::Rename { .. } | Item::ResetName => 0,
-            Item::Zoom | Item::Unzoom => 1,
+            Item::Zoom | Item::Unzoom | Item::ResetTextSize => 1,
             Item::MoveToNewTab | Item::NewWindow | Item::Ungroup => 2,
             Item::Close => 3,
         };
@@ -149,12 +164,19 @@ impl Item {
     }
 }
 
-/// What the menu offers for a pane of a tab with `panes` panes, `zoomed` or not, which can `tear`
-/// off into a window of its own or not.
-fn pane_items(panes: usize, zoomed: bool, tear: bool) -> Vec<Item> {
+/// What the menu offers for a pane of a tab with `panes` panes, `zoomed` or not, whose text is
+/// `sized` away from its configuration's or not, and which can `tear` off into a window of its
+/// own or not.
+fn pane_items(panes: usize, zoomed: bool, sized: bool, tear: bool) -> Vec<Item> {
     let mut items = vec![Item::SplitVertically, Item::SplitHorizontally];
     if panes > 1 {
-        items.extend([if zoomed { Item::Unzoom } else { Item::Zoom }, Item::MoveToNewTab]);
+        items.push(if zoomed { Item::Unzoom } else { Item::Zoom });
+    }
+    if sized {
+        items.push(Item::ResetTextSize);
+    }
+    if panes > 1 {
+        items.push(Item::MoveToNewTab);
     }
     if tear {
         items.push(Item::NewWindow);
@@ -346,9 +368,13 @@ pub fn press(
         return true;
     }
 
+    let scale = ctx.display.window.scale_factor as f32;
+    let sized = ctx.display.font_size != ctx.config.font.size().scale(scale);
+    let tabs = &ctx.display.tabs;
     let Some(tab) = tabs.tabs.get(tabs.active) else { return false };
     let tear = can_tear(tabs, Source::Pane(tabs.active, tab.focus));
-    let (items, owner) = (pane_items(tab.panes.len(), tab.zoom, tear), Owner::Pane(tab.pane().id));
+    let items = pane_items(tab.panes.len(), tab.zoom, sized, tear);
+    let owner = Owner::Pane(tab.pane().id);
     open(ctx, items, owner);
     true
 }
@@ -455,6 +481,7 @@ fn choose(
             split(ctx, Axis::Column, Side::After, config, proxy);
         },
         Item::Zoom | Item::Unzoom => toggle_zoom(ctx),
+        Item::ResetTextSize => zoom_live(ctx, FontChange::Reset),
         Item::MoveToNewTab => move_pane(ctx, (tab, pane), Target::Detach(tab + 1), config),
         Item::NewWindow => {
             tear_off(ctx, source, None, config);
@@ -580,14 +607,22 @@ mod tests {
         use Item::*;
         // A tab's only pane, with other tabs or alone in the window.
         let lone = [SplitVertically, SplitHorizontally, NewWindow, Close];
-        assert_eq!(pane_items(1, false, true), lone);
-        assert_eq!(pane_items(1, false, false), [SplitVertically, SplitHorizontally, Close]);
+        assert_eq!(pane_items(1, false, false, true), lone);
+        assert_eq!(pane_items(1, false, false, false), [SplitVertically, SplitHorizontally, Close]);
         // A pane of a group.
         let group = [SplitVertically, SplitHorizontally, Zoom, MoveToNewTab, NewWindow, Close];
-        assert_eq!(pane_items(2, false, true), group);
-        assert_eq!(pane_items(5, false, true), group);
+        assert_eq!(pane_items(2, false, false, true), group);
+        assert_eq!(pane_items(5, false, false, true), group);
         let zoomed = [SplitVertically, SplitHorizontally, Unzoom, MoveToNewTab, NewWindow, Close];
-        assert_eq!(pane_items(3, true, true), zoomed);
+        assert_eq!(pane_items(3, true, false, true), zoomed);
+        // A pane whose text was made larger or smaller, beside its zoom.
+        let sized = [SplitVertically, SplitHorizontally, ResetTextSize, Close];
+        assert_eq!(pane_items(1, false, true, false), sized);
+        let items = pane_items(2, true, true, true);
+        assert_eq!(items[2..5], [Unzoom, ResetTextSize, MoveToNewTab]);
+        assert!(!ResetTextSize.separated(Unzoom) && MoveToNewTab.separated(ResetTextSize));
+        assert!(ResetTextSize.separated(SplitHorizontally));
+        assert_eq!(ResetTextSize.label(false), "Reset Text Size");
     }
 
     #[test]
@@ -656,7 +691,7 @@ mod tests {
 
     #[test]
     fn rows_are_hit_below_their_separator() {
-        let items = pane_items(1, false, false);
+        let items = pane_items(1, false, false, false);
         let (menu, rows) = geometry(&items, (100., 100.), METRICS, BOUNDS);
         assert_eq!(menu, Rect::new(100., 100., 200., 3. * 30. + 10. + 10.));
         let at = |y: f64| row_at(&rows, PhysicalPosition::new(150., y));
@@ -672,7 +707,7 @@ mod tests {
 
     #[test]
     fn opens_inside_the_window() {
-        let items = pane_items(1, false, false);
+        let items = pane_items(1, false, false, false);
         let inside = |menu: Rect| {
             menu.x >= BOUNDS.x
                 && menu.y >= BOUNDS.y
