@@ -28,7 +28,7 @@ use super::anim::{Curve, Tween};
 use super::dnd::{Source, Target};
 use super::paint::{self, BLACK, Image, Layer, Palette, Rect, WHITE, mix};
 use super::text::UiFont;
-use super::{Frame, Pane, Tab, Tabs, context, icons, panes, peek, rename};
+use super::{Frame, Pane, Tab, Tabs, confirm, context, icons, panes, peek, rename};
 
 /// Height of the bar in logical pixels, on every platform.
 pub const BAR: f32 = 48.;
@@ -1173,6 +1173,7 @@ impl Tabs {
         }
         layers.push(carried);
         layers.extend(context::draw(self, &layout, &palette, now));
+        layers.extend(confirm::draw(self, &layout, &palette, now));
         if let Some(settings) = &self.settings {
             layers.extend(settings.draw(&layout, &palette, config, window));
         }

@@ -44,7 +44,6 @@ pub struct Live {
     pub preserve_title: bool,
     #[cfg(not(windows))]
     pub master_fd: RawFd,
-    #[cfg(not(windows))]
     pub shell_pid: u32,
     /// Size of the terminal's text, in its window's pixels, while it is zoomed away from its
     /// configuration's.

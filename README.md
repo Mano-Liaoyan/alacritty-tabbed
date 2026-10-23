@@ -49,10 +49,15 @@ cards, and past five the stack shows five cards and a "+N" count.
   back to half and half. Ctrl+Shift+Z (Cmd+Shift+Enter on macOS), "Zoom
   Pane" or the zoom button of a pane's controls zooms the pane to the whole tab
   and back.
-- **Pane controls** appear at the top of a pane, just inside it, when the
-  pointer comes near (and on every pane while Ctrl+Alt is held): the ••• grip
-  to drag it, and a zoom button, which turns into an unzoom button in the same
-  place while the pane is zoomed.
+- **Pane controls** appear at the top of a pane, just inside it, all together
+  when the pointer comes near any of them (and on every pane while Ctrl+Alt is
+  held): in the middle the ••• grip to drag it and a zoom button, which turns
+  into an unzoom button in the same place while the pane is zoomed, and in the
+  top right corner × to close it. They sit flat on the pane and light up only
+  under the pointer, × in the red of the window's close button. While a program
+  other than the shell runs in the pane, × asks first (Enter closes, Escape
+  keeps it). On Windows that is any process the shell started; programs inside
+  WSL or over SSH are not seen, so such panes close without asking.
 - **Text size per pane:** Ctrl+mouse wheel over the focused pane, or Ctrl+= /
   Ctrl+− / Ctrl+0 (⌘ instead of Ctrl on macOS), makes only that pane's text
   larger or smaller, from half to four times its size, with a short "120 %"
