@@ -72,6 +72,8 @@ pub struct State {
     thumbnail: Option<Thumbnail>,
     /// The cells of the last preview font the display measured.
     cells: Option<(Font, (f32, f32))>,
+    /// Whether the card's preview waits for the display to measure its font.
+    measuring: bool,
 }
 
 /// The preview's place in its card, and the cells of the pane it shows.
@@ -113,6 +115,7 @@ impl Default for State {
             clicked: None,
             thumbnail: None,
             cells: None,
+            measuring: false,
         }
     }
 }
@@ -120,7 +123,7 @@ impl Default for State {
 impl State {
     /// Whether the card waits to show or fades at `now`, which needs another frame.
     pub fn running(&self, now: Instant) -> bool {
-        (self.hovered.is_some() && !self.open) || self.shown.running(now)
+        (self.hovered.is_some() && !self.open) || self.shown.running(now) || self.measuring
     }
 
     /// Whether any of the card is shown at `now`.
@@ -297,6 +300,7 @@ pub fn draw(
     let click = mem::replace(&mut tabs.peeking.clicked, clicked) != clicked;
     tabs.peeking.update(hover, tabs.pointer, busy || click, now);
     tabs.peeking.thumbnail = None;
+    tabs.peeking.measuring = false;
 
     let shown = tabs.peeking.shown.get(now);
     let (index, position) = tabs.peeking.target.filter(|_| shown > 0.)?;
@@ -305,14 +309,16 @@ pub fn draw(
     let title = if (index, position) == tabs.live() { title } else { &pane.title };
     let profile = pane.profile.as_deref().filter(|profile| *profile != title);
     // The preview waits for the display to measure its font's cells.
-    let preview =
-        pane.session.as_ref().filter(|_| !tabs.on_screen(index, position)).and_then(|session| {
-            let font = tabs.preview_font(session);
-            match &tabs.peeking.cells {
-                Some((measured, cells)) if *measured == font => Some((session, font, *cells)),
-                _ => None,
-            }
-        });
+    let session = pane.session.as_ref().filter(|_| !tabs.on_screen(index, position));
+    let preview = session.and_then(|session| {
+        let font = tabs.preview_font(session);
+        match &tabs.peeking.cells {
+            Some((measured, cells)) if *measured == font => Some((session, font, *cells)),
+            _ => None,
+        }
+    });
+    // Another frame measures it, as when the card shows at once without moving.
+    let measuring = session.is_some() && preview.is_none();
 
     let px = |value: f32| layout.px(value);
     let (font, line) = (&*layout.font, layout.line);
@@ -430,6 +436,7 @@ pub fn draw(
             }
         },
     }
+    tabs.peeking.measuring = measuring;
     Some(layer)
 }
 
