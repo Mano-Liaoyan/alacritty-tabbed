@@ -46,6 +46,10 @@ pub struct Live {
     pub master_fd: RawFd,
     #[cfg(not(windows))]
     pub shell_pid: u32,
+    /// Size of the terminal's text, in its window's pixels, while it is zoomed away from its
+    /// configuration's.
+    #[allow(dead_code, reason = "lane X gives a torn-off pane its text size")]
+    pub zoom: Option<crossfont::Size>,
 }
 
 /// A tab taken out of its window, waiting for a window of its own.

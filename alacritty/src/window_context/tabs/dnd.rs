@@ -157,7 +157,7 @@ pub fn start(ctx: &mut WindowContext, layout: &Layout, source: Source, previous:
     let start = tabs.pointer;
     // A tab dragged from its pane is held by its middle.
     let grab = match layout.tab(tab) {
-        Some(rect) if start.y < f64::from(layout.bar) => start.x - f64::from(rect.x),
+        Some(rect) if start.y < f64::from(bar(layout)) => start.x - f64::from(rect.x),
         Some(rect) => f64::from(rect.w / 2.),
         None => 0.,
     };
@@ -179,7 +179,7 @@ pub fn moved(ctx: &mut WindowContext, layout: &Layout, config: &Rc<UiConfig>) {
     // A tab dragged below the bar is docked into the tab that was shown before it was pressed.
     let (source, previous) = (drag.source, drag.previous);
     if let Source::Tab(tab) = source {
-        let below = pointer.y >= f64::from(layout.bar);
+        let below = pointer.y >= f64::from(bar(layout));
         let shown = if below && previous < tabs.tabs.len() { previous } else { tab };
         if shown != tabs.active {
             select(ctx, shown, config);
@@ -193,10 +193,15 @@ pub fn moved(ctx: &mut WindowContext, layout: &Layout, config: &Rc<UiConfig>) {
     let changed = mem::replace(&mut drag.target, target) != target;
     ctx.display.window.set_mouse_cursor(CursorIcon::Grabbing);
     // A drop preview over the terminal repaints more than the bar.
-    if changed || pointer.y >= f64::from(layout.bar) {
+    if changed || pointer.y >= f64::from(bar(layout)) {
         ctx.display.damage_tracker.frame().mark_fully_damaged();
     }
     redraw(ctx);
+}
+
+/// Bottom of the bar that drops land on: none while the bar is hidden, where the panes are.
+fn bar(layout: &Layout) -> f32 {
+    if layout.bar_live { layout.bar } else { 0. }
 }
 
 /// The places to drop onto, as the window is now.
@@ -226,7 +231,7 @@ fn scene(ctx: &WindowContext, layout: &Layout, source: Source) -> Scene {
         left.iter().find(|(pane, _)| Some(*pane) == id).map_or(rect, |&(_, room)| room)
     });
     Scene {
-        bar: layout.bar,
+        bar: bar(layout),
         area: tabs.area(),
         tabs: shown.collect(),
         groups: tabs.tabs.iter().map(|tab| tab.layout.clone()).collect(),

@@ -2,6 +2,8 @@
 //!
 //! The tree only knows the panes' ids; the tab keeps the panes themselves.
 
+use serde::{Deserialize, Serialize};
+
 use super::paint::Rect;
 
 /// Fewest columns and lines a split may leave either pane.
@@ -9,7 +11,7 @@ pub const MIN_COLUMNS: f32 = 20.;
 pub const MIN_LINES: f32 = 5.;
 
 /// How two panes are placed.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Axis {
     /// Side by side, with a vertical divider.
     Row,
@@ -26,7 +28,7 @@ pub enum Side {
     After,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Split<P> {
     Pane(P),
     /// Two parts, `first` taking `ratio` of the space.
@@ -36,6 +38,22 @@ pub enum Split<P> {
         first: Box<Split<P>>,
         second: Box<Split<P>>,
     },
+}
+
+impl<P> Split<P> {
+    /// The same tree, each pane given by `f`, in the order of the tree.
+    #[allow(dead_code, reason = "lane X saves and restores layouts by pane index")]
+    pub fn map<Q>(self, f: &mut impl FnMut(P) -> Q) -> Split<Q> {
+        match self {
+            Split::Pane(pane) => Split::Pane(f(pane)),
+            Split::Pair { axis, ratio, first, second } => Split::Pair {
+                axis,
+                ratio,
+                first: Box::new(first.map(f)),
+                second: Box::new(second.map(f)),
+            },
+        }
+    }
 }
 
 impl<P: Copy + PartialEq> Split<P> {
@@ -313,6 +331,26 @@ mod tests {
     /// └───┴───┘
     fn three() -> Split<u32> {
         pair(Axis::Row, Split::Pane(1), pair(Axis::Column, Split::Pane(2), Split::Pane(3)))
+    }
+
+    #[test]
+    fn trees_map_and_round_trip() {
+        let mut split = three();
+        split.set_ratio(0, 0.62);
+        let mut seen = Vec::new();
+        let mapped = split.clone().map(&mut |pane| {
+            seen.push(pane);
+            u64::from(pane) * 10
+        });
+        assert_eq!((seen, mapped.panes()), (vec![1, 2, 3], vec![10, 20, 30]));
+        assert_eq!(mapped.dividers(Rect::new(0., 0., 100., 100.), 0.)[0].at, 62.);
+
+        let json = serde_json::to_string(&split).unwrap();
+        assert!(
+            json.starts_with(r#"{"Pair":{"axis":"Row","ratio":0.62,"first":{"Pane":1}"#),
+            "{json}"
+        );
+        assert_eq!(serde_json::from_str::<Split<u32>>(&json).unwrap(), split);
     }
 
     #[test]

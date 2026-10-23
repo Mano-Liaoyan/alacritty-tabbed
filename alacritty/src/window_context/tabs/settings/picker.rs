@@ -221,7 +221,7 @@ impl ColorPicker {
             let row = Rect::new(square.x, square.y + y as f32, square.w, 1.);
             band(layer, row, BLACK, (y as f32 + 0.5) / square.h);
         }
-        layer.corners(square, layout.radius(6.), palette.popup, palette.popup, 0.);
+        layer.corners(square, [layout.radius(6.); 4], palette.popup, palette.popup, 0.);
         let knob = self.knob(parts);
         disc(layer, knob, px(7.), BLACK, 0.3);
         disc(layer, knob, px(6.), WHITE, 1.);
@@ -232,7 +232,7 @@ impl ColorPicker {
             let color = hsv_to_rgb([(x as f32 + 0.5) / hue.w, 1., 1.]);
             layer.rect(Rect::new(hue.x + x as f32, hue.y, 1., hue.h), color);
         }
-        layer.corners(hue, layout.curve(hue.h / 2.), palette.popup, palette.popup, 0.);
+        layer.corners(hue, [layout.curve(hue.h / 2.); 4], palette.popup, palette.popup, 0.);
         let knob = self.hue_knob(parts);
         disc(layer, knob, px(8.), BLACK, 0.3);
         disc(layer, knob, px(7.), WHITE, 1.);

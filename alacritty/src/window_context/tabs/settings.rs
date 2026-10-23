@@ -1694,6 +1694,7 @@ impl Settings {
                 "" => None,
                 text => Some(parse_hex(text).ok_or("Focus highlight: write a color as #RRGGBB")?),
             },
+            ..self.saved_app_settings.clone()
         })
     }
 

@@ -52,6 +52,18 @@ pub struct WindowConfig {
     /// Border of the focused pane; none uses the terminal's blue.
     pub pane_highlight: Option<Rgb>,
 
+    /// Keep the tab bar shown, instead of sliding it in as the pointer reaches the top edge.
+    pub pin_tab_bar: bool,
+
+    /// Zoom the focused pane's text with Control and the mouse wheel.
+    pub wheel_zoom: bool,
+
+    /// Reopen the windows and tabs open when Alacritty last quit.
+    pub restore_session: RestoreSession,
+
+    /// The logo and names at the left of the tab bar.
+    pub brand: Brand,
+
     /// XEmbed parent.
     #[config(skip)]
     #[serde(skip_serializing)]
@@ -112,6 +124,10 @@ impl Default for WindowConfig {
             tab_track: true,
             pane_gap: 16,
             pane_highlight: None,
+            pin_tab_bar: true,
+            wheel_zoom: true,
+            restore_session: Default::default(),
+            brand: Default::default(),
             dynamic_padding: Default::default(),
             resize_increments: Default::default(),
             decorations_theme_variant: Default::default(),
@@ -225,6 +241,39 @@ pub enum Corners {
     #[default]
     Round,
     Square,
+}
+
+/// What of the windows open when Alacritty quits is reopened when it starts.
+#[derive(ConfigDeserialize, Serialize, Default, Debug, Copy, Clone, PartialEq, Eq)]
+pub enum RestoreSession {
+    #[default]
+    Off,
+    /// Windows, tabs, panes and their places, directories and text sizes.
+    Layout,
+    /// The layout and the text last shown in each pane.
+    Text,
+}
+
+/// The logo and names at the left of the tab bar.
+#[derive(ConfigDeserialize, Serialize, Debug, Clone, PartialEq, Eq)]
+pub struct Brand {
+    pub show: bool,
+    /// `alacritty`, `bundled:<name>` for a bundled logo, a path to an image, or empty for none.
+    pub icon: String,
+    /// Names beside the icon, where `{host}` stands for the computer's; empty hides a line.
+    pub title: String,
+    pub subtitle: String,
+}
+
+impl Default for Brand {
+    fn default() -> Self {
+        Self {
+            show: true,
+            icon: "alacritty".into(),
+            title: DEFAULT_NAME.into(),
+            subtitle: "{host}".into(),
+        }
+    }
 }
 
 #[derive(ConfigDeserialize, Serialize, Default, Debug, Copy, Clone, PartialEq, Eq)]
@@ -400,5 +449,39 @@ mod tests {
         let window = WindowConfig::deserialize(value).unwrap();
         assert_eq!(window.pane_gap, 4);
         assert_eq!(window.pane_highlight, Some(Rgb::new(0xff, 0x95, 0x00)));
+    }
+
+    #[test]
+    fn round_three_keys_default() {
+        let window = WindowConfig::default();
+        assert!(window.pin_tab_bar && window.wheel_zoom);
+        assert_eq!(window.restore_session, RestoreSession::Off);
+        let brand = &window.brand;
+        assert!(brand.show);
+        assert_eq!(
+            (&*brand.icon, &*brand.title, &*brand.subtitle),
+            ("alacritty", "Alacritty", "{host}")
+        );
+    }
+
+    #[test]
+    fn round_three_keys_are_read() {
+        for (text, restore) in [
+            ("off", RestoreSession::Off),
+            ("layout", RestoreSession::Layout),
+            ("text", RestoreSession::Text),
+        ] {
+            let value: toml::Value =
+                toml::from_str(&format!("restore_session = \"{text}\"")).unwrap();
+            assert_eq!(WindowConfig::deserialize(value).unwrap().restore_session, restore);
+        }
+        let text = "pin_tab_bar = false\nwheel_zoom = false\n[brand]\nshow = false\nicon = \
+                    \"bundled:opensuse\"\ntitle = \"\"\n";
+        let window =
+            WindowConfig::deserialize(toml::from_str::<toml::Value>(text).unwrap()).unwrap();
+        assert!(!window.pin_tab_bar && !window.wheel_zoom && !window.brand.show);
+        assert_eq!((&*window.brand.icon, &*window.brand.title), ("bundled:opensuse", ""));
+        // Keys left out keep their defaults.
+        assert_eq!(window.brand.subtitle, "{host}");
     }
 }

@@ -9,7 +9,7 @@ use std::{fs, io};
 use toml_edit::{DocumentMut, Item, Table, value};
 
 use crate::config::UiConfig;
-use crate::config::window::{Corners, MAX_PANE_GAP};
+use crate::config::window::{Brand, Corners, MAX_PANE_GAP, RestoreSession};
 use crate::display::color::Rgb;
 
 use super::profiles;
@@ -30,6 +30,13 @@ pub struct AppSettings {
     pub pane_gap: u8,
     /// Border of the focused pane; none uses the terminal's blue.
     pub pane_highlight: Option<Rgb>,
+    /// Whether the tab bar is always shown, rather than sliding in at the top edge.
+    pub pin_tab_bar: bool,
+    /// Whether Control and the wheel zoom the focused pane's text.
+    pub wheel_zoom: bool,
+    pub restore_session: RestoreSession,
+    /// The logo and names at the left of the tab bar.
+    pub brand: Brand,
 }
 
 impl AppSettings {
@@ -44,6 +51,10 @@ impl AppSettings {
             tab_track: window.tab_track,
             pane_gap: window.pane_gap.min(MAX_PANE_GAP),
             pane_highlight: window.pane_highlight,
+            pin_tab_bar: window.pin_tab_bar,
+            wheel_zoom: window.wheel_zoom,
+            restore_session: window.restore_session,
+            brand: window.brand.clone(),
         }
     }
 
@@ -76,9 +87,10 @@ impl AppSettings {
             Item::Table(table)
         };
         let window = document.entry("window").or_insert_with(section);
-        if self.family != before.family || self.size != before.size {
-            if let Some(window) = window.as_table_mut() {
-                window.entry("ui_font").or_insert_with(section);
+        let ui_font = self.family != before.family || self.size != before.size;
+        for (table, changed) in [("ui_font", ui_font), ("brand", self.brand != before.brand)] {
+            if let Some(window) = window.as_table_mut().filter(|_| changed) {
+                window.entry(table).or_insert_with(section);
             }
         }
         if self.corners != before.corners {
@@ -102,6 +114,33 @@ impl AppSettings {
         }
         if self.pane_gap != before.pane_gap {
             window["pane_gap"] = value(i64::from(self.pane_gap));
+        }
+        if self.pin_tab_bar != before.pin_tab_bar {
+            window["pin_tab_bar"] = value(self.pin_tab_bar);
+        }
+        if self.wheel_zoom != before.wheel_zoom {
+            window["wheel_zoom"] = value(self.wheel_zoom);
+        }
+        if self.restore_session != before.restore_session {
+            let restore = match self.restore_session {
+                RestoreSession::Off => "off",
+                RestoreSession::Layout => "layout",
+                RestoreSession::Text => "text",
+            };
+            window["restore_session"] = value(restore);
+        }
+        let (brand, old) = (&self.brand, &before.brand);
+        if brand.show != old.show {
+            window["brand"]["show"] = value(brand.show);
+        }
+        for (key, new, old) in [
+            ("icon", &brand.icon, &old.icon),
+            ("title", &brand.title, &old.title),
+            ("subtitle", &brand.subtitle, &old.subtitle),
+        ] {
+            if new != old {
+                window["brand"][key] = value(new.as_str());
+            }
         }
         if self.pane_highlight != before.pane_highlight {
             match self.pane_highlight {
@@ -133,7 +172,10 @@ pub fn format(number: f32) -> String {
 
 #[cfg(test)]
 mod tests {
+    use serde::Deserialize;
+
     use super::*;
+    use crate::config::window::WindowConfig;
 
     fn defaults() -> AppSettings {
         AppSettings {
@@ -145,6 +187,10 @@ mod tests {
             tab_track: true,
             pane_gap: 16,
             pane_highlight: None,
+            pin_tab_bar: true,
+            wheel_zoom: true,
+            restore_session: RestoreSession::Off,
+            brand: Brand::default(),
         }
     }
 
@@ -166,6 +212,7 @@ mod tests {
             tab_track: true,
             pane_gap: 4,
             pane_highlight: Some(Rgb::new(0xff, 0x95, 0)),
+            ..defaults()
         };
         let edited = changed.edit(&defaults(), text).unwrap();
         assert!(edited.starts_with("# Mine.\n[window]\n"));
@@ -217,6 +264,42 @@ mod tests {
         let changed = AppSettings { size: 12., pane_gap: 4, ..defaults() };
         let edited = changed.edit(&defaults(), "").unwrap();
         assert_eq!(edited, "[window]\npane_gap = 4\n\n[window.ui_font]\nsize = 12\n");
+    }
+
+    #[test]
+    fn round_three_settings_are_written_and_left_alone() {
+        let brand = Brand { show: false, icon: "bundled:opensuse".into(), ..Brand::default() };
+        let changed = AppSettings {
+            pin_tab_bar: false,
+            wheel_zoom: false,
+            restore_session: RestoreSession::Text,
+            brand,
+            ..defaults()
+        };
+        let edited = changed.edit(&defaults(), "").unwrap();
+        assert_eq!(
+            edited,
+            "[window]\npin_tab_bar = false\nwheel_zoom = false\nrestore_session = \
+             \"text\"\n\n[window.brand]\nshow = false\nicon = \"bundled:opensuse\"\n"
+        );
+        // Each level is written by the name the configuration reads.
+        for restore in [RestoreSession::Off, RestoreSession::Layout] {
+            let before = AppSettings { restore_session: RestoreSession::Text, ..defaults() };
+            let after = AppSettings { restore_session: restore, ..defaults() };
+            let edited = after.edit(&before, "").unwrap();
+            let config: toml::Table = toml::from_str(&edited).unwrap();
+            let window = WindowConfig::deserialize(config["window"].clone()).unwrap();
+            assert_eq!(window.restore_session, restore);
+        }
+        // Back to the defaults: each changed key is written again, and nothing else is touched.
+        let text = "# Mine.\n[window.brand]\ntitle = \"Work\" # Kept.\n";
+        let edited = defaults().edit(&changed, text).unwrap();
+        assert!(edited.contains("title = \"Work\" # Kept.\n"), "{edited}");
+        for key in ["pin_tab_bar = true", "show = true", "icon = \"alacritty\""] {
+            assert!(edited.contains(key), "{key}: {edited}");
+        }
+        // Unchanged, the file is left byte for byte.
+        assert_eq!(changed.edit(&changed, text).unwrap(), text);
     }
 
     #[test]

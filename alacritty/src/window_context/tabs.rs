@@ -14,6 +14,7 @@
 
 mod anim;
 mod app_settings;
+mod autohide;
 mod bar;
 mod context;
 mod divider;
@@ -25,6 +26,7 @@ mod panes;
 mod peek;
 mod profiles;
 mod rename;
+mod restore;
 mod settings;
 mod split;
 mod tear;
@@ -58,6 +60,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+use crossfont::Size as FontSize;
 use log::error;
 use winit::dpi::{PhysicalPosition, PhysicalSize};
 use winit::event::{
@@ -77,16 +80,20 @@ use alacritty_terminal::vte::ansi::NamedColor;
 
 use crate::cli::{ParsedOptions, WindowOptions};
 use crate::clipboard::Clipboard;
+use crate::config::font::Font;
 use crate::config::window::{Corners, UiFont as UiFontConfig};
 use crate::config::{Action, BindingKey, BindingMode, UiConfig};
 use crate::display::SizeInfo;
 use crate::event::{Event, EventProxy, EventType, InlineSearchState, SearchState};
+use crate::input::FONT_SIZE_STEP;
 use crate::window_context::WindowContext;
 
+use app_settings::AppSettings;
 use bar::{BAR, Hit, INSET, Layout, MARGIN};
 use dnd::{Drag, Source, Target};
 use paint::Image;
 pub use paint::Rect;
+use panes::Control;
 use profiles::{Profile, Profiles};
 use settings::{Page, Settings};
 use split::{Axis, Divider, Side, Split};
@@ -108,21 +115,56 @@ const PANE_DRAG: ModifiersState = ModifiersState::CONTROL.union(ModifiersState::
 #[cfg(target_os = "macos")]
 const PANE_DRAG: ModifiersState = ModifiersState::SUPER.union(ModifiersState::ALT);
 
-/// How the window is shown, which decides its resize border and the terminal's panel.
+/// Modifiers that zoom the focused pane's text with the wheel, exactly; macOS zooms the screen
+/// with Control.
+#[cfg(not(target_os = "macos"))]
+const ZOOM_WHEEL: ModifiersState = ModifiersState::CONTROL;
+#[cfg(target_os = "macos")]
+const ZOOM_WHEEL: ModifiersState = ModifiersState::SUPER;
+
+/// Logical pixels a touchpad scrolls for each step of a text zoom.
+const ZOOM_PIXELS: f64 = 24.;
+/// Smallest and largest text of a zoomed pane, relative to its configured size, and smallest in
+/// points.
+const ZOOM_RANGE: (f32, f32) = (0.5, 4.);
+const ZOOM_MIN_POINTS: f32 = 4.;
+
+/// How the window is shown, which decides its resize border and the corners it cuts.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Frame {
     #[default]
     Normal,
     Maximized,
-    /// The terminal fills the window below the bar, without a panel.
+    /// Fills the screen; like maximized, without resize borders.
     Fullscreen,
+}
+
+/// How a window's terminals are coming to an end.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Ending {
+    /// The window was closed as a window, by the system or its close button.
+    Window,
+    /// Its last tab was closed.
+    Tabs,
+}
+
+/// A change of the live pane's text size.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FontChange {
+    /// Larger or smaller by steps.
+    By(i32),
+    /// Back to the size of its configuration.
+    #[allow(dead_code, reason = "lane P resets the text size from the pane menu")]
+    Reset,
 }
 
 /// Tabs of one window.
 #[derive(Default)]
 pub struct Tabs {
-    /// Pixels above the terminal's area; zero without tabs.
+    /// Pixels above the terminal's area; zero without tabs, or with a bar that is not pinned.
     pub height: u32,
+    /// Whether the bar is shown, or slides in when it is not pinned.
+    caption: bool,
     /// All tabs, or none while tabs are off.
     tabs: Vec<Tab>,
     active: usize,
@@ -161,8 +203,10 @@ pub struct Tabs {
     bar_effects: bar::Effects,
     /// Space between the cards of a tab's panes, in logical pixels.
     gap: f32,
-    /// The pane whose drag handle is under the pointer.
-    handle: Option<usize>,
+    /// The control of a pane under the pointer, by the pane's index.
+    control: Option<(usize, Control)>,
+    /// The pane whose controls the pointer is near, which shows them.
+    near: Option<usize>,
     divider: divider::State,
     /// The tab whose name is being edited.
     rename: Option<rename::Edit>,
@@ -170,8 +214,18 @@ pub struct Tabs {
     peeking: peek::State,
     /// A tab taken out of the window, waiting for a window of its own.
     torn: Option<Torn>,
-    /// Close the window instead of a tab once the active terminal exits.
-    closing: bool,
+    /// How the window is ending, which closes it instead of a tab once the live terminal exits.
+    ending: Option<Ending>,
+    /// Whether the bar is shown when it is not pinned.
+    autohide: autohide::State,
+    /// The live pane whose text size last changed, the size relative to its configuration in
+    /// percent, and when, for the size to show over it.
+    #[allow(dead_code, reason = "lane P shows the text size over the pane")]
+    font_hud: Option<(WindowId, u16, Instant)>,
+    /// The live pane and its text size relative to its configuration, as last seen.
+    live_font: Option<(WindowId, u16)>,
+    /// Wheel movement with the zoom modifiers short of a whole step, in steps.
+    zoom_wheel: f64,
     /// Font of the bar, menus and settings, and what it was last loaded for.
     font: Option<Rc<UiFont>>,
     font_source: Option<(UiFontConfig, f64)>,
@@ -225,6 +279,8 @@ pub struct PaneDraw {
     pub frame: Rect,
     /// The pane's card, which nothing of it is drawn outside of.
     pub clip: Rect,
+    /// The pane's font, at its own size.
+    pub font: Font,
 }
 
 /// Where the mouse button that is down was pressed.
@@ -238,6 +294,8 @@ enum Press {
     Divider,
     /// On the close button of the tab at this index, which closes it if released there.
     Close(usize),
+    /// On the zoom control of the pane at this index, which zooms it if released there.
+    Control(usize),
     /// Over something that used the press, such as a pane it focused, so the terminal gets
     /// neither it nor its release.
     Swallowed,
@@ -267,6 +325,9 @@ struct Session {
     config: Rc<UiConfig>,
     /// Size of the pane's terminal.
     size: SizeInfo,
+    /// Size of the pane's text, in the window's pixels, while it is zoomed away from its
+    /// configuration's.
+    zoom: Option<FontSize>,
     /// Whether another window took over the terminal, which then keeps running.
     adopted: bool,
 }
@@ -337,7 +398,7 @@ impl Tabs {
     /// Pixels between the places of neighbouring panes, beyond the margins of their cards; it
     /// may be negative, where the margins overlap, though never so much that the cards do.
     fn spacing(&self) -> f32 {
-        if !self.panel || self.frame == Frame::Fullscreen {
+        if !self.panel {
             return 0.;
         }
         ((self.gap - 2. * MARGIN) * self.scale as f32).round().max(-2. * self.margin())
@@ -355,8 +416,13 @@ impl Tabs {
 
     /// Margin around each pane's card, in pixels.
     fn margin(&self) -> f32 {
-        let panel = self.panel && self.frame != Frame::Fullscreen;
-        if panel { (MARGIN * self.scale as f32).round() } else { 0. }
+        if self.panel { (MARGIN * self.scale as f32).round() } else { 0. }
+    }
+
+    /// Whether the window was closed as a window, rather than by closing its tabs.
+    #[allow(dead_code, reason = "lane X saves the session of windows closed whole")]
+    pub fn closed_whole(&self) -> bool {
+        self.ending == Some(Ending::Window)
     }
 
     /// Where each shown pane of the active tab is placed, by its index: only the focused one
@@ -433,6 +499,7 @@ impl Tabs {
                     size: session.size,
                     frame,
                     clip: self.card(frame),
+                    font: session.font(self.scale as f32),
                 })
             })
             .collect()
@@ -445,6 +512,7 @@ impl Tabs {
             || self.context.as_ref().is_some_and(|menu| menu.running(now))
             || self.divider.running(now)
             || self.peeking.running(now)
+            || self.autohide.running(now)
     }
 
     /// Every terminal kept aside.
@@ -670,13 +738,14 @@ fn group<S>(
 
 impl Session {
     /// Start a terminal for a new pane, with the settings of `profile`, in `directory` or else
-    /// the profile's.
+    /// the profile's, showing the text `history` saved from a pane before its shell starts.
     fn spawn(
         ctx: &WindowContext,
         config: &Rc<UiConfig>,
         proxy: &EventLoopProxy<Event>,
         profile: Option<&Profile>,
         directory: Option<PathBuf>,
+        history: Option<&str>,
     ) -> Result<(WindowId, Self), Box<dyn Error>> {
         let options = profile.map_or_else(Vec::new, Profile::overrides);
         let mut window_config = ParsedOptions::from_options(&options);
@@ -692,7 +761,10 @@ impl Session {
         let id = next_id();
         let event_proxy = EventProxy::new(proxy.clone(), id);
         let size = ctx.display.size_info;
-        let terminal = Term::new(config.term_options(), &size, event_proxy.clone());
+        let mut terminal = Term::new(config.term_options(), &size, event_proxy.clone());
+        if let Some(history) = history {
+            restore::replay(&mut terminal, history);
+        }
         let terminal = Arc::new(FairMutex::new(terminal));
 
         // Shells and `alacritty msg` refer to the window, not the tab.
@@ -719,12 +791,22 @@ impl Session {
             shell_pid,
             config,
             size,
+            zoom: None,
             adopted: false,
         }))
     }
 
-    /// Exchange this terminal with the window's live one.
+    /// The pane's font at its size, in a window of `scale`.
+    fn font(&self, scale: f32) -> Font {
+        let size = self.zoom.unwrap_or_else(|| self.config.font.size().scale(scale));
+        self.config.font.clone().with_size(size)
+    }
+
+    /// Exchange this terminal with the window's live one, and its text size, which the window's
+    /// display takes.
     fn swap(&mut self, ctx: &mut WindowContext) {
+        let scale = ctx.display.window.scale_factor as f32;
+        let incoming = self.font(scale).size();
         mem::swap(&mut self.terminal, &mut ctx.terminal);
         mem::swap(&mut self.notifier, &mut ctx.notifier);
         mem::swap(&mut self.search_state, &mut ctx.search_state);
@@ -740,6 +822,8 @@ impl Session {
         }
         self.config = ctx.config.clone();
         self.size = ctx.display.size_info;
+        let live = mem::replace(&mut ctx.display.font_size, incoming);
+        self.zoom = (live != self.config.font.size().scale(scale)).then_some(live);
     }
 
     /// Hand the terminal to another window, which keeps it running.
@@ -756,6 +840,7 @@ impl Session {
             master_fd: self.master_fd,
             #[cfg(not(windows))]
             shell_pid: self.shell_pid,
+            zoom: self.zoom,
         }
     }
 }
@@ -815,9 +900,12 @@ pub fn window_event(
         }
         ctx.display.tabs.window = size;
     }
+    if let WindowEvent::CloseRequested = event {
+        ctx.display.tabs.ending = Some(Ending::Window);
+    }
     sync(ctx, config, matches!(event, WindowEvent::Resized(_)));
     let first = ctx.first;
-    if ctx.display.tabs.height == 0 {
+    if !ctx.display.tabs.caption {
         return Some(event);
     }
 
@@ -838,8 +926,14 @@ pub fn window_event(
         WindowEvent::Resized(_) => {
             return Some(WindowEvent::Resized(PhysicalSize::new(pane.w as u32, pane.h as u32)));
         },
-        WindowEvent::ModifiersChanged(modifiers) => tabs.modifiers = modifiers.state(),
-        WindowEvent::CloseRequested => tabs.closing = true,
+        // Holding the modifiers that drag a pane shows what they would drag.
+        WindowEvent::ModifiersChanged(modifiers) => {
+            let held = tabs.pane_drag();
+            tabs.modifiers = modifiers.state();
+            if tabs.pane_drag() != held {
+                redraw(ctx);
+            }
+        },
         WindowEvent::Ime(ime) if tabs.rename.is_some() => {
             rename::ime(ctx, ime);
             return None;
@@ -889,6 +983,10 @@ pub fn window_event(
         WindowEvent::KeyboardInput { .. } if modal => return None,
         WindowEvent::CursorMoved { device_id, position } => {
             tabs.pointer = position;
+            if autohide::moved(tabs, position, modal, Instant::now()) {
+                redraw(ctx);
+            }
+            let tabs = &mut ctx.display.tabs;
             if let Some(settings) = &mut tabs.settings {
                 if settings.moved(&layout, position) {
                     redraw(ctx);
@@ -904,10 +1002,17 @@ pub fn window_event(
                 dnd::moved(ctx, &layout, config);
                 return None;
             }
-            // Panes take the pointer only where nothing above them, nor a selection, has it.
+            // Panes take the pointer only where nothing above them, nor a selection, has it; a
+            // fanned shelf covers the panes' controls under it.
             let free = tabs.press != Press::Terminal && tabs.menu.is_none();
             let under = layout.hit(position);
             let over_panes = free && under == Hit::Terminal;
+            let shelf = matches!(under, Hit::Icon(..));
+            let near = panes::near(tabs, position).filter(|_| free && !shelf);
+            if mem::replace(&mut tabs.near, near) != near {
+                redraw(ctx);
+            }
+            let tabs = &mut ctx.display.tabs;
             if (tabs.press == Press::Divider || over_panes) && divider::moved(ctx, position) {
                 return Some(WindowEvent::CursorLeft { device_id });
             }
@@ -918,19 +1023,20 @@ pub fn window_event(
                 return None;
             }
 
-            // A pane is grabbed by its handle, or anywhere with the modifiers that drag it; a
-            // fanned shelf covers the handles under it.
-            let shelf = matches!(under, Hit::Icon(..));
-            let handle = panes::handle_at(tabs, &layout, position).filter(|_| free && !shelf);
-            if tabs.handle != handle {
-                tabs.handle = handle;
+            // A pane is grabbed by its grip, or anywhere with the modifiers that drag it.
+            let control = panes::control_at(tabs, &layout, position).filter(|_| free && !shelf);
+            if mem::replace(&mut tabs.control, control) != control {
                 redraw(ctx);
             }
             let tabs = &ctx.display.tabs;
             let over_pane = over_panes && tabs.pane_at(position).is_some();
-            if handle.is_some() || over_pane && tabs.pane_drag() {
+            if control.is_some() || over_pane && tabs.pane_drag() {
                 hover(ctx, Hit::None);
-                ctx.display.window.set_mouse_cursor(CursorIcon::Grab);
+                let cursor = match control {
+                    Some((_, Control::Zoom)) => CursorIcon::Pointer,
+                    _ => CursorIcon::Grab,
+                };
+                ctx.display.window.set_mouse_cursor(cursor);
                 return Some(WindowEvent::CursorLeft { device_id });
             }
 
@@ -954,8 +1060,9 @@ pub fn window_event(
             return Some(WindowEvent::CursorLeft { device_id });
         },
         WindowEvent::CursorLeft { .. } => {
-            // The hovered handle or divider is no longer lit.
-            if tabs.handle.take().is_some() {
+            // The hovered control or divider is no longer lit, nor the bar shown.
+            let shown = tabs.control.take().is_some() | tabs.near.take().is_some();
+            if autohide::left(tabs, Instant::now()) | shown {
                 redraw(ctx);
             }
             divider::left(ctx);
@@ -1007,6 +1114,17 @@ pub fn window_event(
                     }
                     return None;
                 },
+                // Like a native button, the zoom control acts on release.
+                Press::Control(index) => {
+                    if panes::control_at(tabs, &layout, tabs.pointer)
+                        == Some((index, Control::Zoom))
+                    {
+                        let active = tabs.active;
+                        focus_pane(ctx, active, index, config);
+                        toggle_zoom(ctx);
+                    }
+                    return None;
+                },
                 Press::Swallowed => return None,
                 _ => (),
             }
@@ -1040,8 +1158,13 @@ pub fn window_event(
                 return None;
             }
             let tabs = &mut ctx.display.tabs;
+            if let (Some((index, Control::Zoom)), MouseButton::Left) = (tabs.control, button) {
+                tabs.press = Press::Control(index);
+                return None;
+            }
             let dragged = terminal && tabs.pane_drag();
-            let grabbed = tabs.handle.or_else(|| tabs.pane_at(pointer).filter(|_| dragged));
+            let grip = tabs.control.map(|(index, _)| index);
+            let grabbed = grip.or_else(|| tabs.pane_at(pointer).filter(|_| dragged));
             if let (Some(pane), MouseButton::Left) = (grabbed, button) {
                 // Like its icon in the bar, a pane is focused as it is pressed to drag it.
                 tabs.press = Press::Bar;
@@ -1074,7 +1197,23 @@ pub fn window_event(
                 return None;
             }
         },
-        WindowEvent::MouseWheel { delta, .. } if modal || tabs.pointer.y < layout.bar as f64 => {
+        // The wheel with the zoom modifiers sizes the text of the live pane, under the pointer.
+        WindowEvent::MouseWheel { delta, .. }
+            if !modal
+                && config.window.wheel_zoom
+                && tabs.modifiers == ZOOM_WHEEL
+                && layout.hit(tabs.pointer) == Hit::Terminal
+                && tabs.pane_at(tabs.pointer) == Some(tabs.live().1) =>
+        {
+            let steps = wheel_steps(delta, tabs.scale, &mut tabs.zoom_wheel);
+            if steps != 0 {
+                zoom_live(ctx, FontChange::By(steps));
+            }
+            return None;
+        },
+        WindowEvent::MouseWheel { delta, .. }
+            if modal || layout.bar_live && tabs.pointer.y < layout.bar as f64 =>
+        {
             let delta_kind = delta;
             let delta = match delta {
                 MouseScrollDelta::LineDelta(_, delta) => f64::from(delta),
@@ -1135,7 +1274,7 @@ pub fn route<S: BuildHasher>(
     if (tab, index) == tabs.live() {
         let event = match event {
             // The last pane, or a window being closed, closes like a window without tabs.
-            TerminalEvent::Exit if tabs.count() > 1 && !tabs.closing => {
+            TerminalEvent::Exit if tabs.count() > 1 && tabs.ending.is_none() => {
                 if !ctx.display.window.hold {
                     close_pane(ctx, tab, index, config);
                 }
@@ -1187,7 +1326,14 @@ pub fn route<S: BuildHasher>(
 fn sync(ctx: &mut WindowContext, config: &Rc<UiConfig>, resize: bool) {
     let id = ctx.first;
     let tabs = &mut ctx.display.tabs;
-    tabs.scale = ctx.display.window.scale_factor;
+    let scale = ctx.display.window.scale_factor;
+    let old = mem::replace(&mut tabs.scale, scale);
+    // Zoomed panes keep their text as large on a screen of another scale.
+    if old > 0. && old != scale {
+        for session in tabs.sessions() {
+            session.zoom = session.zoom.map(|size| size.scale((scale / old) as f32));
+        }
+    }
     if tabs.window == PhysicalSize::default() {
         tabs.window = ctx.display.window.inner_size();
     }
@@ -1230,15 +1376,20 @@ fn sync(ctx: &mut WindowContext, config: &Rc<UiConfig>, resize: bool) {
     };
     let px = |value: f32| (value * ctx.display.window.scale_factor as f32).round() as u32;
     // Without its panel the terminal fills the window, its text still lined up with the logo.
-    ctx.display.tabs.panel = config.window.panel;
+    let tabs = &mut ctx.display.tabs;
+    tabs.panel = config.window.panel;
+    tabs.caption = shown;
+    // A bar that is not pinned is drawn over the panes, which take the whole window.
+    tabs.autohide.pinned = config.window.pin_tab_bar;
     let gap = f32::from(config.window.pane_gap.min(48));
-    let regap = mem::replace(&mut ctx.display.tabs.gap, gap) != gap;
-    let (offset, inset) = match (shown, frame) {
-        (false, _) => (0, 0),
-        (_, Frame::Fullscreen) => (px(BAR), 0),
+    let regap = mem::replace(&mut tabs.gap, gap) != gap;
+    let (offset, inset) = match shown {
+        false => (0, 0),
+        _ if !config.window.pin_tab_bar => (0, (MARGIN + INSET) as u8),
         _ if !config.window.panel => (px(BAR), (MARGIN + INSET) as u8),
         _ => (px(BAR) - px(MARGIN), (MARGIN + INSET) as u8),
     };
+    note_font(ctx);
 
     // Pad the terminal into its panel, again whenever its configuration was replaced.
     let tabs = &mut ctx.display.tabs;
@@ -1281,7 +1432,6 @@ fn sync(ctx: &mut WindowContext, config: &Rc<UiConfig>, resize: bool) {
 /// The live terminal is resized with the window context's other updates, the others at once.
 pub fn relayout(ctx: &mut WindowContext) {
     let size = ctx.display.size_info;
-    let cells = (size.cell_width(), size.cell_height());
     let tabs = &mut ctx.display.tabs;
     let (area, scale) = (tabs.area(), tabs.scale as f32);
     // A minimized window leaves no room for the panes.
@@ -1290,11 +1440,25 @@ pub fn relayout(ctx: &mut WindowContext) {
         return;
     }
 
-    // Panes hidden by a zoom keep their size.
+    // Panes hidden by a zoom keep their size; the others are fit with cells of their own font.
     let rects = tabs.pane_rects();
+    let tab = &tabs.tabs[active];
+    let fonts: Vec<_> = rects
+        .iter()
+        .filter_map(|&(index, _)| {
+            let session = tab.panes[index].session.as_ref()?;
+            Some((index, session.config.clone(), session.font(scale)))
+        })
+        .collect();
+    let cells: Vec<_> = fonts
+        .into_iter()
+        .map(|(index, config, font)| (index, ctx.display.cell_size(&config, &font)))
+        .collect();
+    let tabs = &mut ctx.display.tabs;
     let Some(tab) = tabs.tabs.get_mut(active) else { return };
     for &(index, rect) in &rects {
         let Some(session) = &mut tab.panes[index].session else { continue };
+        let Some(&(_, cells)) = cells.iter().find(|&&(i, _)| i == index) else { continue };
         let new = fit(rect, cells, &session.config, scale);
         let old = mem::replace(&mut session.size, new);
         if new.columns() != old.columns() || new.screen_lines() != old.screen_lines() {
@@ -1452,6 +1616,9 @@ fn run(
 ) {
     let (active, len) = (ctx.display.tabs.active, ctx.display.tabs.len());
     let focus = ctx.display.tabs.live().1;
+    if !matches!(command, Command::Fullscreen | Command::Zoom) {
+        autohide::flash(&mut ctx.display.tabs, Instant::now());
+    }
     match command {
         Command::New => {
             let profiles = Profiles::load(config);
@@ -1515,6 +1682,7 @@ fn click(
             redraw(ctx);
         },
         (Hit::Settings, MouseButton::Left) => open_settings(ctx, config, proxy, Page::Appearance),
+        (Hit::Pin, MouseButton::Left) => toggle_pin(config, proxy),
         (Hit::Previous, MouseButton::Left) => run(ctx, Command::Previous, config, proxy),
         (Hit::Next, MouseButton::Left) => run(ctx, Command::Next, config, proxy),
         (Hit::Minimize, MouseButton::Left) => ctx.display.window.set_minimized(true),
@@ -1665,7 +1833,7 @@ fn open(
     proxy: &EventLoopProxy<Event>,
     profile: Option<&Profile>,
 ) {
-    let (id, session) = match Session::spawn(ctx, config, proxy, profile, None) {
+    let (id, session) = match Session::spawn(ctx, config, proxy, profile, None, None) {
         Ok(pane) => pane,
         Err(err) => return error!("Could not open tab: {err}"),
     };
@@ -1700,7 +1868,8 @@ pub fn split(
     let directory = crate::daemon::foreground_process_path(ctx.master_fd, ctx.shell_pid).ok();
     #[cfg(windows)]
     let directory = None;
-    let (id, session) = match Session::spawn(ctx, config, proxy, profile.as_ref(), directory) {
+    let spawned = Session::spawn(ctx, config, proxy, profile.as_ref(), directory, None);
+    let (id, session) = match spawned {
         Ok(pane) => pane,
         Err(err) => {
             error!("Could not split pane: {err}");
@@ -1749,6 +1918,87 @@ pub fn toggle_zoom(ctx: &mut WindowContext) {
     relayout(ctx);
 }
 
+/// Pin the bar, or let it slide in only when the pointer nears it, in every window: the setting
+/// is saved and the configuration reloaded.
+fn toggle_pin(config: &UiConfig, proxy: &EventLoopProxy<Event>) {
+    let before = AppSettings::new(config);
+    let after = AppSettings { pin_tab_bar: !before.pin_tab_bar, ..before.clone() };
+    match after.save(&before, config) {
+        Ok(path) => {
+            let _ = proxy.send_event(Event::new(EventType::ConfigReload(path), None));
+        },
+        Err(err) => error!("Could not save the tab bar's pin: {err}"),
+    }
+}
+
+/// Give the live pane text of `size`, in the window's pixels.
+pub fn set_live_font(ctx: &mut WindowContext, size: FontSize) {
+    if ctx.display.font_size != size {
+        ctx.display.font_size = size;
+        ctx.display.pending_update.set_font(ctx.config.font.clone().with_size(size));
+        note_font(ctx);
+        redraw(ctx);
+    }
+}
+
+/// Make the live pane's text larger or smaller, within its bounds, or as configured again.
+pub fn zoom_live(ctx: &mut WindowContext, change: FontChange) {
+    let scale = ctx.display.window.scale_factor as f32;
+    let font = &ctx.config.font;
+    let configured = font.size().scale(scale).as_px();
+    let min = FontSize::new(ZOOM_MIN_POINTS).scale(scale).as_px();
+    let px = match change {
+        FontChange::By(steps) => zoomed_px(ctx.display.font_size.as_px(), steps, configured, min),
+        FontChange::Reset => configured,
+    };
+    set_live_font(ctx, FontSize::from_px(px));
+}
+
+/// Size in pixels of text of `current` pixels made larger by `steps`, or smaller by negative
+/// ones, within [`ZOOM_RANGE`] of its `configured` size and never below `min`.
+fn zoomed_px(current: f32, steps: i32, configured: f32, min: f32) -> f32 {
+    let (low, high) = (ZOOM_RANGE.0 * configured, ZOOM_RANGE.1 * configured);
+    // Whole pixels, which text looks best at, like the keys that zoom it.
+    let px = current.round() + steps as f32 * FONT_SIZE_STEP;
+    px.clamp(low.max(min), high.max(min))
+}
+
+/// Whole steps of a text zoom that the wheel moved by `delta`, keeping what is short of a step in
+/// `rest`: a line a step, or [`ZOOM_PIXELS`] logical pixels of a touchpad at `scale`. Turning the
+/// wheel back starts afresh.
+fn wheel_steps(delta: MouseScrollDelta, scale: f64, rest: &mut f64) -> i32 {
+    let steps = match delta {
+        MouseScrollDelta::LineDelta(_, lines) => f64::from(lines),
+        MouseScrollDelta::PixelDelta(delta) => delta.y / (ZOOM_PIXELS * scale),
+    };
+    if steps * *rest < 0. {
+        *rest = 0.;
+    }
+    *rest += steps;
+    let whole = rest.trunc();
+    *rest -= whole;
+    whole as i32
+}
+
+/// Show the live pane's text size over it when it changed, by any key or the wheel, since last
+/// seen.
+fn note_font(ctx: &mut WindowContext) {
+    let scale = ctx.display.window.scale_factor as f32;
+    let configured = ctx.config.font.size().scale(scale).as_px();
+    let percent = (100. * ctx.display.font_size.as_px() / configured).round() as u16;
+    let tabs = &mut ctx.display.tabs;
+    let live = (tabs.live_id(ctx.first), percent);
+    if tabs.live_font.replace(live).is_some_and(|(id, old)| id == live.0 && old != percent) {
+        tabs.font_hud = Some((live.0, percent, Instant::now()));
+    }
+}
+
+/// How a window ends whose tab at `index`, of `len`, is closed: an index past the tabs closes the
+/// window itself.
+fn ending(len: usize, index: usize) -> Ending {
+    if index >= len { Ending::Window } else { Ending::Tabs }
+}
+
 /// Name the tab at `tab`, or give it back its focused pane's title with none.
 pub fn rename(ctx: &mut WindowContext, tab: usize, name: Option<String>) {
     let Some(tab) = ctx.display.tabs.tabs.get_mut(tab) else { return };
@@ -1769,24 +2019,34 @@ pub fn focus_pane(ctx: &mut WindowContext, tab: usize, pane: usize, config: &Rc<
     let (old_tab, old_pane) = tabs.live();
     tabs.tabs[old_tab].panes[old_pane].title = ctx.display.window.title().to_owned();
     let focused = ctx.terminal.lock().is_focused;
+    let before = ctx.config.font.clone().with_size(ctx.display.font_size);
     session.swap(ctx);
     let tabs = &mut ctx.display.tabs;
     relive(&mut tabs.tabs, &mut tabs.active, (tab, pane), session);
     let title = tabs.tabs[tab].panes[pane].title.clone();
 
-    // Apply the pane's configuration overrides, then its title and the current size.
+    // Apply the pane's configuration overrides and its text size, then its title and the
+    // current size.
+    let font_size = ctx.display.font_size;
     ctx.update_config(config.clone());
+    let font = ctx.config.font.clone().with_size(font_size);
+    // The configuration may have asked for its own size instead.
+    ctx.display.font_size = font_size;
+    if font != before || ctx.display.pending_update.font().is_some() {
+        ctx.display.pending_update.set_font(font.clone());
+    }
     sync(ctx, config, false);
     ctx.display.window.set_title(title);
-    // The terminal is fit to its own pane, which the display follows with its next update.
+    // The terminal is fit to its own pane in its own font, which the display follows with its
+    // next update.
     let (rect, display) = (ctx.display.tabs.focused_rect(), ctx.display.size_info);
-    let size =
-        if rect.w < 1. || rect.h < 1. || (rect.w, rect.h) == (display.width(), display.height()) {
-            display
-        } else {
-            let cells = (display.cell_width(), display.cell_height());
-            fit(rect, cells, &ctx.config, ctx.display.tabs.scale as f32)
-        };
+    let same = font == before && (rect.w, rect.h) == (display.width(), display.height());
+    let size = if rect.w < 1. || rect.h < 1. || same {
+        display
+    } else {
+        let cells = ctx.display.cell_size(&ctx.config, &font);
+        fit(rect, cells, &ctx.config, ctx.display.tabs.scale as f32)
+    };
     let mut terminal = ctx.terminal.lock();
     terminal.is_focused = focused;
     if terminal.columns() != size.columns() || terminal.screen_lines() != size.screen_lines() {
@@ -1876,7 +2136,7 @@ fn close(ctx: &mut WindowContext, index: usize, config: &Rc<UiConfig>) {
     ctx.display.tabs.drag = None;
     let len = ctx.display.tabs.tabs.len();
     if len <= 1 || index >= len {
-        ctx.display.tabs.closing = true;
+        ctx.display.tabs.ending = Some(ending(len, index));
         ctx.display.window.hold = false;
         ctx.terminal.lock().exit();
         return;
@@ -2117,6 +2377,65 @@ mod tests {
         assert!(tearable(&model.tabs, Source::Tab(1)));
         assert!(tearable(&model.tabs, Source::Pane(1, 0)));
         assert!(!tearable(&model.tabs, Source::Tab(2)));
+    }
+
+    #[test]
+    fn fullscreen_keeps_the_panel_like_maximized() {
+        for (panel, gap, scale) in
+            [(true, 16., 1.), (true, 0., 2.), (true, 48., 1.5), (false, 16., 1.)]
+        {
+            let tabs = |frame| Tabs { panel, gap, scale, frame, ..Tabs::default() };
+            let (maximized, fullscreen) = (tabs(Frame::Maximized), tabs(Frame::Fullscreen));
+            assert_eq!(fullscreen.margin(), maximized.margin());
+            assert_eq!(fullscreen.spacing(), maximized.spacing());
+            assert_eq!(fullscreen.margin() > 0., panel);
+        }
+    }
+
+    #[test]
+    fn closing_the_last_tab_or_the_window() {
+        assert_eq!(ending(1, 0), Ending::Tabs);
+        assert_eq!(ending(0, 0), Ending::Window, "without tabs");
+        assert_eq!(ending(3, usize::MAX), Ending::Window);
+        assert_eq!(ending(1, usize::MAX), Ending::Window);
+        let tabs = Tabs { ending: Some(Ending::Window), ..Tabs::default() };
+        assert!(tabs.closed_whole());
+        assert!(!Tabs { ending: Some(Ending::Tabs), ..Tabs::default() }.closed_whole());
+        assert!(!Tabs::default().closed_whole(), "the last shell exited");
+    }
+
+    #[test]
+    fn zoomed_text_stays_in_bounds() {
+        // Whole pixels, a step each.
+        assert_eq!(zoomed_px(16., 1, 16., 5.), 17.);
+        assert_eq!(zoomed_px(16.4, -3, 16., 5.), 13.);
+        // From half to four times as large as configured.
+        assert_eq!(zoomed_px(9., -5, 16., 5.), 8.);
+        assert_eq!(zoomed_px(60., 10, 16., 5.), 64.);
+        // Never smaller than the smallest text.
+        assert_eq!(zoomed_px(8., -5, 8., 5.), 5.);
+        assert_eq!(zoomed_px(8., 0, 8., 5.), 8.);
+    }
+
+    #[test]
+    fn wheel_zooms_by_whole_steps() {
+        let mut rest = 0.;
+        let lines = |y| MouseScrollDelta::LineDelta(0., y);
+        let pixels = |y| MouseScrollDelta::PixelDelta(PhysicalPosition::new(0., y));
+        assert_eq!(wheel_steps(lines(1.), 1., &mut rest), 1);
+        assert_eq!(wheel_steps(lines(-2.), 1., &mut rest), -2);
+        // A touchpad steps every 24 pixels, keeping the rest.
+        assert_eq!(wheel_steps(pixels(20.), 1., &mut rest), 0);
+        assert_eq!(wheel_steps(pixels(20.), 1., &mut rest), 1);
+        assert_eq!(wheel_steps(pixels(5.), 1., &mut rest), 0);
+        // Turning back starts afresh.
+        assert_eq!(wheel_steps(pixels(-20.), 1., &mut rest), 0);
+        assert_eq!(wheel_steps(pixels(-5.), 1., &mut rest), -1);
+        assert_eq!(wheel_steps(lines(0.5), 1., &mut rest), 0);
+        assert_eq!(wheel_steps(lines(0.5), 1., &mut rest), 1);
+        // Logical pixels: twice as many on a screen of twice the scale.
+        assert_eq!(wheel_steps(pixels(30.), 2., &mut rest), 0);
+        assert_eq!(wheel_steps(pixels(20.), 2., &mut rest), 1);
     }
 
     #[test]
