@@ -113,7 +113,6 @@ pub struct Layout {
     pub panel: bool,
     pub height: f32,
     /// Distance between the left edges of neighbouring tabs.
-    #[allow(dead_code)] // Until tab entries slide between slots.
     step: f32,
     brand: Option<Rect>,
     mark: Rect,

@@ -1378,7 +1378,6 @@ fn open(
 
 /// Split the live pane, putting a new one with the same profile beside it, on `side` along
 /// `axis`, and focus the new pane. Returns whether there was room for it.
-#[allow(dead_code)] // Until the context menu offers it.
 pub fn split(
     ctx: &mut WindowContext,
     axis: Axis,

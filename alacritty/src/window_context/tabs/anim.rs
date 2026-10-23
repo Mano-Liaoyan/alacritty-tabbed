@@ -2,8 +2,6 @@
 //!
 //! Curves are CSS-style cubic Béziers, like Hyprland's, which this follows in feel.
 
-#![allow(dead_code)] // Until the panes, the bar and the context menu animate.
-
 use std::env;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
