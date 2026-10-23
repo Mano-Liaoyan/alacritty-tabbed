@@ -418,7 +418,6 @@ impl Layer {
         }
     }
 
-    /// Draw `image` fit in the `rect` square.
     /// Draw `image` fit in the `rect` square, in `tint` if it is a single-color image.
     pub fn image(&mut self, rect: Rect, image: &Image, tint: Rgb) {
         let runs = image.runs(rect.w.min(rect.h) as u32);
@@ -461,6 +460,50 @@ impl Layer {
             font.draw(renderer, window, layer.texts);
         }
     }
+}
+
+/// Rectangles whose alpha is how much of each pixel near the corners of `rect` lies inside it,
+/// once they are rounded by `radius`; they cut the corners out of what is drawn under them.
+pub fn mask(rect: Rect, radius: f32) -> Vec<RenderRect> {
+    let r = radius.round();
+    let mut rects = Vec::new();
+    for (cx, cy, x0, y0) in [
+        (rect.x + r, rect.y + r, rect.x, rect.y),
+        (rect.right() - r, rect.y + r, rect.right() - r, rect.y),
+        (rect.x + r, rect.bottom() - r, rect.x, rect.bottom() - r),
+        (rect.right() - r, rect.bottom() - r, rect.right() - r, rect.bottom() - r),
+    ] {
+        for y in 0..r as u32 {
+            // Pixels wholly outside, at either end of the row, are cut as one.
+            let mut outside: Option<(f32, f32)> = None;
+            for x in 0..r as u32 {
+                let (px, py) = (x0 + x as f32, y0 + y as f32);
+                let inside = (0..16)
+                    .filter(|s| {
+                        let sx = px + (s % 4) as f32 / 4. + 0.125;
+                        let sy = py + (s / 4) as f32 / 4. + 0.125;
+                        (sx - cx).hypot(sy - cy) <= r
+                    })
+                    .count() as f32
+                    / 16.;
+                if inside == 0. {
+                    let run = outside.get_or_insert((px, 0.));
+                    run.1 += 1.;
+                    continue;
+                }
+                if let Some((x, w)) = outside.take() {
+                    rects.push(RenderRect::new(x, py, w, 1., BLACK, 0.));
+                }
+                if inside < 1. {
+                    rects.push(RenderRect::new(px, py, 1., 1., BLACK, inside));
+                }
+            }
+            if let Some((x, w)) = outside {
+                rects.push(RenderRect::new(x, y0 + y as f32, w, 1., BLACK, 0.));
+            }
+        }
+    }
+    rects
 }
 
 /// Horizontal extent of a convex polygon at height `y`.

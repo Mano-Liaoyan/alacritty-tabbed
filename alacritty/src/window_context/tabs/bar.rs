@@ -1,7 +1,11 @@
-//! The caption: logo, tabs, buttons and window controls in one bar, above a rounded panel that
-//! holds the terminal.
+//! The caption: logo, tabs, buttons and window controls in one bar, above a panel that holds the
+//! terminal.
 //!
 //! The layout is the same on every platform; only the window controls follow the system's look.
+//!
+//! Corners are all round or all square. Round ones nest like Apple's: a surface inside another is
+//! rounded by the outer radius less the space between them, so their curves run parallel, from
+//! the window's corners to the panel, the tab track, the tabs and the buttons.
 
 use std::rc::Rc;
 use std::sync::Arc;
@@ -11,12 +15,13 @@ use winit::dpi::PhysicalPosition;
 use winit::window::ResizeDirection;
 
 use crate::config::UiConfig;
+use crate::config::window::Corners;
 use crate::display::SizeInfo;
 use crate::display::color::Rgb;
 use crate::display::window::Window;
 use crate::renderer::Renderer;
 
-use super::paint::{BLACK, Image, Layer, Palette, Rect, WHITE, mix};
+use super::paint::{self, BLACK, Image, Layer, Palette, Rect, WHITE, mix};
 use super::text::UiFont;
 use super::{Frame, Tabs, icons};
 
@@ -26,6 +31,28 @@ pub const BAR: f32 = 48.;
 pub const MARGIN: f32 = 8.;
 /// Space between the panel's edge and the terminal.
 pub const INSET: f32 = 4.;
+
+/// Radius of the window's corners, which the other radii follow.
+pub const RADIUS: f32 = 18.;
+/// Radius of the terminal's panel, and of the panels in the settings.
+pub const PANEL_RADIUS: f32 = RADIUS - MARGIN;
+/// Space between the top of the window and the tab track.
+const TRACK_TOP: f32 = 6.;
+/// Space between the tab track and its tabs.
+const TRACK_PAD: f32 = 3.;
+/// Height of the buttons in the bar.
+const CONTROL: f32 = 32.;
+/// Radius of the tab track, and of floating menus.
+pub const TRACK_RADIUS: f32 = RADIUS - TRACK_TOP;
+/// Radius of the tabs, and of rows like them.
+pub const TAB_RADIUS: f32 = TRACK_RADIUS - TRACK_PAD;
+/// Radius of the buttons in the bar.
+const BUTTON_RADIUS: f32 = RADIUS - (BAR - CONTROL) / 2.;
+/// Radius of rows inside a menu, set in from its edge.
+pub const ITEM_RADIUS: f32 = TRACK_RADIUS - 6.;
+
+/// Radius of GNOME's and KDE's round window buttons.
+const CONTROL_DOT: f32 = 12.;
 
 /// Last entry of the new-tab menu.
 const EDIT_PROFILES: &str = "Edit profiles…";
@@ -66,6 +93,8 @@ pub struct Layout {
     pub bar: f32,
     pub width: f32,
     pub first: usize,
+    /// Whether corners are round.
+    round: bool,
     border: f32,
     pub height: f32,
     /// Distance between the left edges of neighbouring tabs.
@@ -91,18 +120,34 @@ impl Layout {
         let (bar, count, fullscreen) = (px(BAR), tabs.len(), tabs.frame == Frame::Fullscreen);
         let mac = MAC;
         let border = if tabs.frame == Frame::Normal && !mac { px(4.) } else { 0. };
-        let (margin, control, chevron, pad, nav) = (px(MARGIN), px(32.), px(22.), px(3.), px(28.));
+        let (margin, control, chevron, pad, nav) =
+            (px(MARGIN), px(CONTROL), px(22.), px(TRACK_PAD), px(28.));
         let caption = px(if cfg!(windows) { 40. } else { 34. });
         let button =
             |x: f32, width: f32| Rect::new(x, ((bar - control) / 2.).round(), width, control);
 
         let lights = if mac { px(72.) } else { 0. };
-        let controls = width - margin - if mac { 0. } else { 3. * caption };
+        // GNOME's and KDE's round window buttons end as far from the window's edge as the logo
+        // begins, so the bar's two ends mirror each other.
+        let trailing = if mac || cfg!(windows) {
+            margin
+        } else {
+            px(MARGIN + INSET) - (caption / 2. - px(CONTROL_DOT))
+        };
+        let controls = width - trailing - if mac { 0. } else { 3. * caption };
         let settings = controls - px(4.) - control;
+
+        // The logo is set in from the window's edge as far as from its top, which keeps it clear
+        // of the rounded corner and lines it up with the terminal's text below. macOS puts it
+        // beside its window buttons instead.
+        let logo = px(24.);
+        let left = if mac { lights + px(7.) } else { px(MARGIN + INSET) };
+        let mark = Rect::new(left, 0., logo, bar).square(logo);
 
         // Fullscreen gives the label's space to the tabs; the logo stays.
         let label = !fullscreen && width >= px(780.);
-        let brand = lights + if label { px(160.) } else { px(52.) };
+        let label_width = px(114.);
+        let brand = mark.right() + if label { px(15.) + label_width } else { px(21.) };
         let min_tab = px(124.);
         let available = settings - px(48.) - brand - 2. * pad - px(6.) - control - chevron;
         let overflow = count as f32 > (available / min_tab).floor().max(1.);
@@ -116,7 +161,7 @@ impl Layout {
             .max((tabs.active + 1).saturating_sub(capacity))
             .min(count - shown);
 
-        let (top, bottom) = (px(6.), bar - px(6.));
+        let (top, bottom) = (px(TRACK_TOP), bar - px(TRACK_TOP));
         let tab_rects: Vec<_> = (0..shown)
             .map(|slot| {
                 let x = brand + pad + slot as f32 * step;
@@ -144,9 +189,7 @@ impl Layout {
             }
         }
 
-        let left = border.max(px(6.)) + lights;
-        let mark = Rect::new(left, 0., px(26.), bar).square(px(26.));
-        let brand = label.then(|| Rect::new(mark.right() + px(10.), 0., px(160.) - px(46.), bar));
+        let brand = label.then(|| Rect::new(mark.right() + px(11.), 0., label_width, bar));
 
         let card = if fullscreen {
             Rect::new(0., bar, width, height - bar)
@@ -174,6 +217,7 @@ impl Layout {
             bar,
             width,
             first,
+            round: tabs.corners.unwrap_or_default() == Corners::Round,
             border,
             height,
             step,
@@ -190,6 +234,22 @@ impl Layout {
 
     pub fn px(&self, value: f32) -> f32 {
         (value * self.scale).round()
+    }
+
+    /// A corner radius of `value` logical pixels, or none while corners are square.
+    pub fn radius(&self, value: f32) -> f32 {
+        self.curve(value * self.scale)
+    }
+
+    /// A corner radius of `pixels`, or none while corners are square.
+    pub fn curve(&self, pixels: f32) -> f32 {
+        if self.round { pixels } else { 0. }
+    }
+
+    /// A circle, or a square around it while corners are square.
+    pub fn dot(&self, layer: &mut Layer, (x, y): (f32, f32), radius: f32, color: Rgb) {
+        let rect = Rect::new(x - radius, y - radius, 2. * radius, 2. * radius);
+        layer.rounded(rect, if self.round { radius } else { 0. }, color);
     }
 
     pub fn hit(&self, point: PhysicalPosition<f64>) -> Hit {
@@ -272,8 +332,9 @@ impl Layout {
 }
 
 /// Draw an icon, or else a badge with text, in `rect`.
-fn badge(
+pub fn badge(
     layer: &mut Layer,
+    layout: &Layout,
     rect: Rect,
     image: Option<&Arc<Image>>,
     text: &str,
@@ -284,7 +345,7 @@ fn badge(
         Some(image) => layer.image(rect, image, colors.2),
         None => {
             let (surface, accent, _) = colors;
-            layer.rounded(rect, rect.w / 4., mix(surface, accent, 0.3));
+            layer.rounded(rect, layout.curve(rect.w / 4.), mix(surface, accent, 0.3));
             layer.label(rect, text, font, accent, true);
         },
     }
@@ -341,7 +402,7 @@ impl Tabs {
             base.rect(Rect::new(0., bar, card.x, card.h + px(MARGIN)), chrome);
             base.rect(Rect::new(card.right(), bar, card.x, card.h + px(MARGIN)), chrome);
             base.rect(Rect::new(card.x, card.bottom(), card.w, px(MARGIN)), chrome);
-            let radius = px(10.);
+            let radius = layout.radius(PANEL_RADIUS).round();
             base.corners(card, radius, chrome, palette.card_outline, line);
             let outline = palette.card_outline;
             let (w, h) = (card.w - 2. * radius, card.h - 2. * radius);
@@ -352,7 +413,7 @@ impl Tabs {
         }
 
         // Logo, with the application and computer name beside it.
-        base.image(layout.mark.square(px(24.)), &icons::logo(), palette.foreground);
+        base.image(layout.mark, &icons::logo(), palette.foreground);
         if let Some(brand) = layout.brand {
             let middle = (bar / 2.).round();
             let (label, host) = ("Alacritty", font.fit(&self.host, brand.w, false));
@@ -366,8 +427,8 @@ impl Tabs {
             }
         }
 
-        // Tabs on a rounded track, the active one raised from it.
-        let radius = layout.track.h / 2.8;
+        // Tabs on a track, the active one raised from it.
+        let radius = layout.radius(TRACK_RADIUS);
         let track = palette.track;
         if !layout.tabs.is_empty() {
             base.outlined(layout.track, radius, track, palette.track_outline, line);
@@ -395,13 +456,14 @@ impl Tabs {
                         (layout.tabs[0].1.x, layout.tabs[layout.tabs.len() - 1].1.x);
                     rect.x = ((self.pointer.x - drag.grab) as f32).clamp(first, last).round();
                     let shadow = Rect::new(rect.x, rect.y + px(1.), rect.w, rect.h + px(2.));
-                    top.rounded(shadow, rect.h / 3.2 + 1., mix(palette.chrome, BLACK, 0.5));
+                    let radius = layout.radius(TAB_RADIUS + 1.);
+                    top.rounded(shadow, radius, mix(palette.chrome, BLACK, 0.5));
                     &mut top
                 },
                 _ => &mut base,
             };
 
-            let radius = rect.h / 3.2;
+            let radius = layout.radius(TAB_RADIUS);
             let surface = if active {
                 layer.outlined(rect, radius, palette.raised, palette.raised_outline, line);
                 palette.raised
@@ -415,12 +477,14 @@ impl Tabs {
             let tab = &self.tabs[index];
             let title = if active { window.title() } else { &tab.title };
             let colors = (surface, palette.accent(title), palette.foreground);
-            badge(layer, layout.badge(rect), tab.icon.as_ref(), &tab.badge, font, colors);
+            let image = tab.icon.as_ref();
+            badge(layer, &layout, layout.badge(rect), image, &tab.badge, font, colors);
 
             let close = layout.close(rect);
             if lit(index) {
                 if self.hover == Hit::Close(index) {
-                    layer.rounded(close.square(px(20.)), px(6.), palette.pressed);
+                    let radius = layout.radius(TAB_RADIUS - 4.);
+                    layer.rounded(close.square(px(20.)), radius, palette.pressed);
                 }
                 let lines = [[-1., -1., 1., 1.], [-1., 1., 1., -1.]];
                 layer.icon(close.center(), px(4.), icon, &lines, palette.muted);
@@ -438,9 +502,9 @@ impl Tabs {
         }
 
         if let (Some(menu), Some((rect, row))) = (&self.menu, layout.menu) {
-            let radius = px(8.);
+            let radius = layout.radius(TRACK_RADIUS);
             let shadow = Rect::new(rect.x, rect.y + px(2.), rect.w, rect.h);
-            top.rounded_alpha(shadow, radius + px(2.), BLACK, 0.3);
+            top.rounded_alpha(shadow, radius + layout.radius(2.), BLACK, 0.3);
             top.outlined(rect, radius, palette.popup, palette.popup_outline, line);
             let highlighted = match self.hover {
                 Hit::Item(index) => index,
@@ -456,7 +520,7 @@ impl Tabs {
                 );
                 let surface = if index == highlighted { palette.hover } else { palette.popup };
                 if index == highlighted {
-                    top.rounded(item, px(6.), surface);
+                    top.rounded(item, layout.radius(ITEM_RADIUS), surface);
                 }
 
                 let icon_rect = Rect::new(item.x + px(8.), item.y, px(18.), row).square(px(18.));
@@ -464,7 +528,8 @@ impl Tabs {
                     Some(profile) => {
                         let image = profile.image(config);
                         let colors = (surface, palette.accent(name), palette.foreground);
-                        badge(&mut top, icon_rect, image.as_ref(), &profile.badge(), font, colors);
+                        let (image, text) = (image.as_ref(), &profile.badge());
+                        badge(&mut top, &layout, icon_rect, image, text, font, colors);
                     },
                     None => top.gear(icon_rect.center(), px(8.), palette.muted, surface),
                 }
@@ -482,6 +547,13 @@ impl Tabs {
         let height = size.height() + self.height as f32;
         let window = SizeInfo::new(size.width(), height, 1., 1., 0., 0., false);
         Layer::draw(layers, renderer, font, &window);
+
+        // Round the window by cutting its corners out of everything drawn there.
+        if self.cut {
+            let radius = layout.radius(RADIUS);
+            let mask = paint::mask(Rect::new(0., 0., width, layout.height), radius);
+            renderer.mask_rects(&window, &font.metrics, mask);
+        }
         renderer.resize(size);
     }
 
@@ -527,7 +599,7 @@ impl Tabs {
                 let danger = hovered && hit == Hit::CloseWindow;
                 if hovered {
                     let color = if danger { palette.danger } else { palette.hover };
-                    layer.rounded(rect, px(8.), color);
+                    layer.rounded(rect, layout.radius(BUTTON_RADIUS), color);
                 }
                 let color = if danger { WHITE } else { palette.muted };
                 window_icon(layer, px(5.), color);
@@ -540,12 +612,12 @@ impl Tabs {
                     (_, true) => mix(palette.chrome, palette.foreground, 0.2),
                     _ => mix(palette.chrome, palette.foreground, 0.1),
                 };
-                layer.circle(center, px(12.), background);
+                layout.dot(layer, center, px(CONTROL_DOT), background);
                 window_icon(layer, px(4.), if danger { WHITE } else { palette.foreground });
             },
             _ => {
                 if hovered {
-                    layer.rounded(rect, px(8.), palette.hover);
+                    layer.rounded(rect, layout.radius(BUTTON_RADIUS), palette.hover);
                 }
                 let color =
                     if hovered || hit == Hit::New { palette.foreground } else { palette.muted };

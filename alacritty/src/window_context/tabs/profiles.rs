@@ -52,20 +52,25 @@ pub struct Profiles {
     pub list: Vec<Profile>,
 }
 
+/// Directory of the configuration files.
+pub fn directory(config: &UiConfig) -> Option<PathBuf> {
+    let directory = match config.config_paths.first().and_then(|path| path.parent()) {
+        Some(directory) => directory.to_owned(),
+        #[cfg(windows)]
+        None => PathBuf::from(env::var_os("APPDATA")?).join("alacritty"),
+        #[cfg(not(windows))]
+        None => match env::var_os("XDG_CONFIG_HOME") {
+            Some(directory) => PathBuf::from(directory),
+            None => home::home_dir()?.join(".config"),
+        }
+        .join("alacritty"),
+    };
+    Some(directory)
+}
+
 impl Profiles {
     fn path(config: &UiConfig) -> Option<PathBuf> {
-        let directory = match config.config_paths.first().and_then(|path| path.parent()) {
-            Some(directory) => directory.to_owned(),
-            #[cfg(windows)]
-            None => PathBuf::from(env::var_os("APPDATA")?).join("alacritty"),
-            #[cfg(not(windows))]
-            None => match env::var_os("XDG_CONFIG_HOME") {
-                Some(directory) => PathBuf::from(directory),
-                None => home::home_dir()?.join(".config"),
-            }
-            .join("alacritty"),
-        };
-        Some(directory.join("profiles.toml"))
+        Some(directory(config)?.join("profiles.toml"))
     }
 
     /// Saved profiles, or the installed shells while none are saved.

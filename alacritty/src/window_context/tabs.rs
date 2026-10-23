@@ -8,6 +8,7 @@
 //! height, which places it below the bar, and its padding keeps it inside a rounded panel. Pointer
 //! events are moved up accordingly.
 
+mod app_settings;
 mod bar;
 mod fonts;
 mod icons;
@@ -62,7 +63,7 @@ use alacritty_terminal::vte::ansi::NamedColor;
 
 use crate::cli::{ParsedOptions, WindowOptions};
 use crate::clipboard::Clipboard;
-use crate::config::window::UiFont as UiFontConfig;
+use crate::config::window::{Corners, UiFont as UiFontConfig};
 use crate::config::{Action, BindingKey, BindingMode, UiConfig};
 use crate::event::{Event, EventProxy, EventType, InlineSearchState, SearchState};
 use crate::window_context::WindowContext;
@@ -70,7 +71,7 @@ use crate::window_context::WindowContext;
 use bar::{BAR, Hit, INSET, Layout, MARGIN};
 use paint::Image;
 use profiles::{Profile, Profiles};
-use settings::Settings;
+use settings::{Page, Settings};
 use text::UiFont;
 
 /// Ids for the terminals of new tabs, far from the platform's window ids.
@@ -121,6 +122,10 @@ pub struct Tabs {
     /// Font of the bar, menus and settings, and what it was last loaded for.
     font: Option<Rc<UiFont>>,
     font_source: Option<(UiFontConfig, f64)>,
+    /// Corners drawn, once they have been applied to the window.
+    corners: Option<Corners>,
+    /// Whether the window's corners are cut out of it, which needs a transparent window.
+    cut: bool,
 }
 
 struct Tab {
@@ -197,6 +202,11 @@ impl Tabs {
         if let Some(font) = &self.font {
             font.reset();
         }
+    }
+
+    /// Whether the window has transparent corners.
+    pub fn transparent(&self) -> bool {
+        self.cut
     }
 
     fn len(&self) -> usize {
@@ -346,7 +356,7 @@ pub fn window_event(
             if let Some(settings) = &mut tabs.settings {
                 let paste = || clipboard.load(ClipboardType::Clipboard);
                 let close = settings.key(key, tabs.modifiers, paste, config, &layout);
-                restyle(ctx, config);
+                restyle(ctx, config, proxy);
                 if close {
                     close_settings(ctx);
                 }
@@ -414,7 +424,7 @@ pub fn window_event(
             if let Some(settings) = &mut tabs.settings {
                 let wake = waker(tabs.tabs.get(tabs.active).map_or(window_id, |tab| tab.id), proxy);
                 let close = settings.press(&layout, pointer, button, config, wake);
-                restyle(ctx, config);
+                restyle(ctx, config, proxy);
                 if close {
                     close_settings(ctx);
                 }
@@ -603,6 +613,8 @@ fn sync(ctx: &mut WindowContext, config: &Rc<UiConfig>, resize: bool) {
         ctx.config = padded;
     }
 
+    shape(ctx, config, shown && frame == Frame::Normal);
+
     if offset != ctx.display.tabs.height || changed {
         ctx.display.tabs.height = offset;
         let size = ctx.display.window.inner_size();
@@ -613,6 +625,32 @@ fn sync(ctx: &mut WindowContext, config: &Rc<UiConfig>, resize: bool) {
         ctx.display.pending_update.dirty = true;
         redraw(ctx);
     }
+}
+
+/// Follow the interface's corners, which a configuration reload may have changed.
+///
+/// Systems that round windows themselves are told which corners to give the window; elsewhere
+/// the corners of a window that is not maximized are cut out, which makes it transparent there.
+fn shape(ctx: &mut WindowContext, config: &UiConfig, framed: bool) {
+    let corners = config.window.corners;
+    let round = corners == Corners::Round;
+    let cut = framed && round && cfg!(not(any(windows, target_os = "macos")));
+    let tabs = &mut ctx.display.tabs;
+    if tabs.corners == Some(corners) && tabs.cut == cut {
+        return;
+    }
+    if tabs.cut != cut {
+        tabs.cut = cut;
+        let window = &ctx.display.window;
+        window.set_transparent(cut || ctx.config.window_opacity() < 1.);
+    }
+    #[cfg(windows)]
+    if ctx.display.tabs.corners != Some(corners) {
+        platform::round(ctx.display.window.winit(), round);
+    }
+    ctx.display.tabs.corners = Some(corners);
+    ctx.display.damage_tracker.frame().mark_fully_damaged();
+    redraw(ctx);
 }
 
 fn redraw(ctx: &mut WindowContext) {
@@ -750,7 +788,7 @@ fn click(
             ctx.display.tabs.menu = Some(Menu { profiles, selected: 0 });
             redraw(ctx);
         },
-        (Hit::Settings, MouseButton::Left) => open_settings(ctx, config, proxy),
+        (Hit::Settings, MouseButton::Left) => open_settings(ctx, config, proxy, Page::Appearance),
         (Hit::Previous, MouseButton::Left) => run(ctx, Command::Previous, config, proxy),
         (Hit::Next, MouseButton::Left) => run(ctx, Command::Next, config, proxy),
         (Hit::Minimize, MouseButton::Left) => ctx.display.window.set_minimized(true),
@@ -831,7 +869,7 @@ fn choose(
     close_menu(ctx);
     match menu.profiles.get(index) {
         Some(profile) => open(ctx, config, proxy, Some(profile)),
-        None => open_settings(ctx, config, proxy),
+        None => open_settings(ctx, config, proxy, Page::Profile),
     }
 }
 
@@ -842,10 +880,15 @@ fn close_menu(ctx: &mut WindowContext) {
     redraw(ctx);
 }
 
-fn open_settings(ctx: &mut WindowContext, config: &UiConfig, proxy: &EventLoopProxy<Event>) {
+fn open_settings(
+    ctx: &mut WindowContext,
+    config: &UiConfig,
+    proxy: &EventLoopProxy<Event>,
+    page: Page,
+) {
     let tabs = &ctx.display.tabs;
     let wake = waker(tabs.tabs.get(tabs.active).map_or(ctx.id(), |tab| tab.id), proxy);
-    ctx.display.tabs.settings = Some(Settings::new(config, wake));
+    ctx.display.tabs.settings = Some(Settings::new(config, page, wake));
     redraw(ctx);
 }
 
@@ -857,8 +900,13 @@ fn waker(id: WindowId, proxy: &EventLoopProxy<Event>) -> impl Fn() + Send + 'sta
     }
 }
 
-/// Give the tabs opened with the profiles just saved their new look and configuration.
-fn restyle(ctx: &mut WindowContext, config: &Rc<UiConfig>) {
+/// Give the tabs opened with the profiles just saved their new look and configuration, and every
+/// window the application's settings just saved.
+fn restyle(ctx: &mut WindowContext, config: &Rc<UiConfig>, proxy: &EventLoopProxy<Event>) {
+    // Reloading here applies them whether or not the configuration file is watched.
+    if let Some(path) = ctx.display.tabs.settings.as_mut().and_then(Settings::take_reload) {
+        let _ = proxy.send_event(Event::new(EventType::ConfigReload(path), None));
+    }
     let saved = ctx.display.tabs.settings.as_mut().map(Settings::take_saved).unwrap_or_default();
     let mut active = false;
     for tab in &mut ctx.display.tabs.tabs {
