@@ -154,6 +154,8 @@ enum Target {
     Opacity,
     /// Slider of the space between panes.
     Gap,
+    /// Scrollbar of the card, by its thumb or its track.
+    Scrollbar,
     /// Well of the focused pane's highlight, which opens the color picker.
     Well,
     Picker(Part),
@@ -583,6 +585,29 @@ fn wrap(text: &str, width: f32, measure: impl Fn(&str) -> f32) -> Vec<String> {
     lines
 }
 
+/// How far along a track starting at `start`, `length` long, the pointer at `x` is, from 0 to 1.
+fn along(start: f32, length: f32, x: f32) -> f32 {
+    ((x - start) / length).clamp(0., 1.)
+}
+
+/// The thumb of a scrollbar along `track`, for a view `view` high scrolled by `scrolled` of at
+/// most `scroll_max`, and at least `least` high.
+fn thumb(track: Rect, view: f32, scrolled: f32, scroll_max: f32, least: f32) -> Rect {
+    let h = (track.h * view / (view + scroll_max)).max(least).min(track.h);
+    let fraction = if scroll_max > 0. { (scrolled / scroll_max).clamp(0., 1.) } else { 0. };
+    Rect { y: track.y + (track.h - h) * fraction, h, ..track }
+}
+
+/// How far to scroll, of at most `scroll_max`, for a thumb `height` high with its top at `top`
+/// along `track`.
+fn scrolled_to(track: Rect, height: f32, top: f32, scroll_max: f32) -> f32 {
+    let room = track.h - height;
+    if room <= 0. {
+        return 0.;
+    }
+    ((top - track.y) / room).clamp(0., 1.) * scroll_max
+}
+
 /// A sidebar row being dragged to a new position.
 struct Drag {
     /// Pointer offset from the row's top edge.
@@ -627,6 +652,9 @@ struct Panel {
     /// How far the fields are scrolled, and can be.
     scrolled: f32,
     scroll_max: f32,
+    /// The scrollbar's track and thumb, and the band along the card's edge that takes the
+    /// pointer for it, where the card scrolls.
+    scrollbar: Option<(Rect, Rect, Rect)>,
     tile: Rect,
     /// Geometry of the application's page shown.
     settings: Option<RowsPanel>,
@@ -715,8 +743,10 @@ pub struct Settings {
     /// their text until they are saved.
     edited: AppSettings,
     app_setting_texts: [String; 5],
-    /// Slider whose knob is being dragged.
+    /// Slider whose knob, or scrollbar whose thumb, is being dragged.
     sliding: Option<Target>,
+    /// Pointer offset from the top of the scrollbar's thumb while it is dragged.
+    thumb_grab: f32,
     /// The color picker of the focused pane's highlight, while it is open.
     picker: Option<ColorPicker>,
     /// The configuration file just saved, to reload.
@@ -771,6 +801,7 @@ impl Settings {
             ],
             edited: saved.clone(),
             sliding: None,
+            thumb_grab: 0.,
             picker: None,
             saved_app_settings: saved,
             reload: None,
@@ -1146,6 +1177,14 @@ impl Settings {
             ColorPicker::layout((x, y), layout.scale)
         });
 
+        // The fields scroll inside the card, above its buttons, with a scrollbar at its edge.
+        let scrollbar = (scroll_max > 0.).then(|| {
+            let track =
+                Rect::new(card.right() - px(7.), viewport.y + px(8.), px(3.), viewport.h - px(16.));
+            let band = Rect { x: card.right() - px(16.), w: px(16.), ..track };
+            (track, thumb(track, viewport.h, scrolled, scroll_max, px(16.)), band)
+        });
+
         Panel {
             dialog,
             close: buttons[0].1,
@@ -1158,6 +1197,7 @@ impl Settings {
             viewport,
             scrolled,
             scroll_max,
+            scrollbar,
             tile,
             settings,
             fields,
@@ -1189,6 +1229,9 @@ impl Settings {
                 return (rows.contains(point) && index < self.candidates().len())
                     .then_some(Target::Font(index));
             }
+        }
+        if panel.scrollbar.is_some_and(|(.., band)| band.contains(point)) {
+            return Some(Target::Scrollbar);
         }
         // What scrolls with the fields can only be reached where they show.
         let shown = |target: Target| !target.scrolls() || panel.viewport.contains(point);
@@ -1419,16 +1462,28 @@ impl Settings {
         }
     }
 
-    /// Set the value of the slider being dragged to where the pointer is along it.
+    /// Set the value of the slider being dragged to where the pointer is along it, or scroll
+    /// the card to where its scrollbar's thumb is dragged.
     fn slide(&mut self, panel: &Panel, layout: &Layout) {
+        let (x, y) = (self.pointer.x as f32, self.pointer.y as f32);
+        let row = match self.sliding {
+            Some(Target::Opacity) => Row::Opacity,
+            Some(Target::Gap) => Row::Gap,
+            Some(Target::Scrollbar) => {
+                if let Some((track, thumb, _)) = panel.scrollbar {
+                    let top = y - self.thumb_grab;
+                    self.card_scroll = scrolled_to(track, thumb.h, top, panel.scroll_max);
+                }
+                return;
+            },
+            _ => return,
+        };
         let Some(page) = &panel.settings else { return };
-        let gap = self.sliding == Some(Target::Gap);
-        let slider = page.control(if gap { Row::Gap } else { Row::Opacity });
-        let (start, length) = RowsPanel::track(slider, layout);
-        let fraction = (self.pointer.x as f32 - start) / length;
-        match gap {
-            true => self.set_gap(fraction * f32::from(MAX_PANE_GAP)),
-            false => self.set_opacity(fraction),
+        let (start, length) = RowsPanel::track(page.control(row), layout);
+        let fraction = along(start, length, x);
+        match row {
+            Row::Gap => self.set_gap(fraction * f32::from(MAX_PANE_GAP)),
+            _ => self.set_opacity(fraction),
         }
     }
 
@@ -1583,6 +1638,16 @@ impl Settings {
             Target::Brand if self.logos.is_some() => self.logos = None,
             Target::Brand => self.open_logos(Logos::Brand, layout),
             Target::Opacity | Target::Gap => {
+                self.sliding = Some(target);
+                self.slide(&panel, layout);
+            },
+            // The thumb is dragged from where it was pressed; a press on the track moves the
+            // thumb's middle there first.
+            Target::Scrollbar => {
+                let Some((_, thumb, _)) = panel.scrollbar else { return false };
+                let y = point.y as f32;
+                let on_thumb = (thumb.y..thumb.bottom()).contains(&y);
+                self.thumb_grab = if on_thumb { y - thumb.y } else { thumb.h / 2. };
                 self.sliding = Some(target);
                 self.slide(&panel, layout);
             },
@@ -2578,18 +2643,14 @@ impl Settings {
             center(layer, rect, text, color, bold);
         }
 
-        // The fields scroll inside the card, above its buttons.
-        if panel.scroll_max > 0. {
-            let viewport = panel.viewport;
-            let track = Rect::new(
-                panel.card.right() - px(7.),
-                viewport.y + px(8.),
-                px(3.),
-                viewport.h - px(16.),
-            );
-            let h = (track.h * viewport.h / (viewport.h + panel.scroll_max)).max(px(16.));
-            let y = track.y + (track.h - h) * panel.scrolled / panel.scroll_max;
-            content.rounded(Rect::new(track.x, y, track.w, h), layout.radius(1.5), palette.muted);
+        // The fields scroll inside the card, above its buttons; the thumb lights up under the
+        // pointer and while it is dragged.
+        if let Some((_, thumb, _)) = panel.scrollbar {
+            let lit =
+                self.hover == Some(Target::Scrollbar) || self.sliding == Some(Target::Scrollbar);
+            let color =
+                if lit { mix(palette.muted, palette.foreground, 0.5) } else { palette.muted };
+            content.rounded(thumb, layout.radius(1.5), color);
         }
         let viewport = panel.viewport;
         content.clip(
@@ -2872,6 +2933,105 @@ impl Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The layout of a window `width` by `height` pixels, unless the interface's font is missing.
+    fn layout(width: u32, height: u32) -> Option<Layout> {
+        let font = UiFont::new(&Default::default(), 1.).ok()?;
+        let tabs = super::super::Tabs {
+            font: Some(std::rc::Rc::new(font)),
+            window: winit::dpi::PhysicalSize::new(width, height),
+            scale: 1.,
+            ..Default::default()
+        };
+        Some(Layout::new(&tabs))
+    }
+
+    fn at(x: f32, y: f32) -> PhysicalPosition<f64> {
+        PhysicalPosition::new(f64::from(x), f64::from(y))
+    }
+
+    #[test]
+    fn tracks_and_thumbs_follow_the_pointer() {
+        assert_eq!(along(10., 100., 60.), 0.5);
+        assert_eq!((along(10., 100., -500.), along(10., 100., 500.)), (0., 1.));
+
+        let track = Rect::new(0., 100., 3., 400.);
+        let least = thumb(track, 50., 0., 10_000., 16.);
+        assert_eq!((least.y, least.h), (100., 16.));
+        // A thumb dragged to where it is drawn scrolls by as much as it shows.
+        for scrolled in [0., 150., 300.] {
+            let thumb = thumb(track, 300., scrolled, 300., 16.);
+            assert_eq!(thumb.h, 200.);
+            assert_eq!(scrolled_to(track, thumb.h, thumb.y, 300.), scrolled);
+        }
+        // Past either end of its track, it scrolls to that end.
+        assert_eq!(scrolled_to(track, 200., -1000., 300.), 0.);
+        assert_eq!(scrolled_to(track, 200., 1000., 300.), 300.);
+        assert_eq!(scrolled_to(track, 400., 200., 300.), 0.);
+    }
+
+    #[test]
+    fn sliders_follow_a_drag_until_released() {
+        let Some(layout) = layout(1200, 1000) else { return };
+        let config = UiConfig::default();
+        let mut settings = Settings::new(&config, Page::Appearance, || ());
+        let panel = settings.panel(&layout);
+        let page = panel.settings.as_ref().unwrap();
+        let (opacity, gap) = (page.control(Row::Opacity), page.control(Row::Gap));
+        let press = |settings: &mut Settings, point| {
+            settings.moved(&layout, point);
+            settings.press(&layout, point, MouseButton::Left, &config, || ());
+        };
+
+        // A press on the track moves the knob there.
+        let (start, length) = RowsPanel::track(opacity, &layout);
+        let y = opacity.center().1;
+        press(&mut settings, at(start + length / 4., y));
+        assert_eq!(settings.edited.opacity, 0.25);
+        // The drag goes on past the slider, the dialog and the window.
+        settings.moved(&layout, at(-100., y + 300.));
+        assert_eq!(settings.edited.opacity, 0.);
+        settings.moved(&layout, at(5000., -50.));
+        assert_eq!(settings.edited.opacity, 1.);
+        settings.release();
+        settings.moved(&layout, at(start, y));
+        assert_eq!(settings.edited.opacity, 1.);
+
+        let (start, length) = RowsPanel::track(gap, &layout);
+        press(&mut settings, at(start, gap.center().1));
+        assert_eq!(settings.edited.pane_gap, 0);
+        settings.moved(&layout, at(start + length, 0.));
+        assert_eq!(settings.edited.pane_gap, MAX_PANE_GAP);
+        settings.release();
+        assert!(settings.dirty);
+    }
+
+    #[test]
+    fn scrollbar_follows_a_drag_until_released() {
+        let Some(layout) = layout(1200, 500) else { return };
+        let config = UiConfig::default();
+        let mut settings = Settings::new(&config, Page::Appearance, || ());
+        let panel = settings.panel(&layout);
+        let (track, thumb, band) = panel.scrollbar.expect("the page scrolls in a short window");
+        let x = band.center().0;
+        assert_eq!(settings.target(&panel, at(x, thumb.center().1)), Some(Target::Scrollbar));
+
+        // The thumb keeps where it was grabbed, even dragged far off the scrollbar.
+        settings.press(&layout, at(x, thumb.y + 2.), MouseButton::Left, &config, || ());
+        assert_eq!(settings.card_scroll, 0.);
+        settings.moved(&layout, at(x - 600., thumb.y + 2. + (track.h - thumb.h) / 2.));
+        assert!((settings.card_scroll - panel.scroll_max / 2.).abs() < 0.01);
+        settings.moved(&layout, at(x, 10_000.));
+        assert_eq!(settings.card_scroll, panel.scroll_max);
+        settings.release();
+        settings.moved(&layout, at(x, track.y));
+        assert_eq!(settings.card_scroll, panel.scroll_max);
+
+        // A press on the track brings the thumb's middle there.
+        settings.press(&layout, at(x, track.y + 1.), MouseButton::Left, &config, || ());
+        settings.release();
+        assert_eq!(settings.card_scroll, 0.);
+    }
 
     #[test]
     fn copies_get_unique_names() {

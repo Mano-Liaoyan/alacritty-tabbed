@@ -1100,6 +1100,9 @@ pub fn window_event(
         // The release that would end a drag may never come once the window loses focus.
         WindowEvent::Focused(false) => {
             context::unfocused(ctx);
+            if let Some(settings) = &mut ctx.display.tabs.settings {
+                settings.release();
+            }
             dnd::cancel(ctx, config);
             divider::release(ctx);
             if ctx.display.tabs.press == Press::Divider {
@@ -1762,7 +1765,7 @@ fn click(
             ctx.display.tabs.menu = Some(Menu { profiles, selected: 0 });
             redraw(ctx);
         },
-        (Hit::Settings, MouseButton::Left) => open_settings(ctx, config, proxy, Page::Appearance),
+        (Hit::Settings, MouseButton::Left) => open_settings(ctx, config, proxy, Page::General),
         (Hit::Pin, MouseButton::Left) => toggle_pin(config, proxy),
         (Hit::Previous, MouseButton::Left) => run(ctx, Command::Previous, config, proxy),
         (Hit::Next, MouseButton::Left) => run(ctx, Command::Next, config, proxy),
