@@ -66,8 +66,6 @@ struct Scene {
     panes: Vec<(usize, Rect)>,
     /// Smallest size a pane may be split to.
     min: (f32, f32),
-    /// Whether the dragged tab has several panes.
-    grouped: bool,
 }
 
 impl Scene {
@@ -83,9 +81,7 @@ impl Scene {
             let &(index, rect) = self.panes.iter().find(|(_, rect)| rect.contains(pointer))?;
             let (axis, side) = split::drop_zone(rect, (x, y));
             return match pane {
-                // A whole group can only join another one as it is.
                 None if self.shown == from => None,
-                None if self.grouped => Some(Target::Merge(self.shown)),
                 Some(pane) if (self.shown, index) == (from, pane) => None,
                 _ if !split::fits(rect, axis, self.min) => None,
                 _ => Some(Target::Dock { pane: index, axis, side }),
@@ -151,7 +147,7 @@ pub fn moved(ctx: &mut WindowContext, layout: &Layout, config: &Rc<UiConfig>) {
         }
     }
 
-    let scene = scene(ctx, layout, source);
+    let scene = scene(ctx, layout);
     let tabs = &mut ctx.display.tabs;
     let target = scene.target(source, pointer);
     let Some(drag) = &mut tabs.drag else { return };
@@ -165,11 +161,10 @@ pub fn moved(ctx: &mut WindowContext, layout: &Layout, config: &Rc<UiConfig>) {
 }
 
 /// The places to drop onto, as the window is now.
-fn scene(ctx: &WindowContext, layout: &Layout, source: Source) -> Scene {
+fn scene(ctx: &WindowContext, layout: &Layout) -> Scene {
     let tabs = &ctx.display.tabs;
     let shown = (layout.first..).map_while(|index| Some((index, layout.tab(index)?)));
     let size = &ctx.display.size_info;
-    let (Source::Tab(from) | Source::Pane(from, _)) = source;
     Scene {
         bar: layout.bar,
         tabs: shown.collect(),
@@ -179,7 +174,6 @@ fn scene(ctx: &WindowContext, layout: &Layout, source: Source) -> Scene {
             split::MIN_COLUMNS * size.cell_width() + 2. * size.padding_x(),
             split::MIN_LINES * size.cell_height() + 2. * size.padding_y(),
         ),
-        grouped: tabs.tabs.get(from).is_some_and(|tab| tab.panes.len() > 1),
     }
 }
 
@@ -195,7 +189,14 @@ pub fn release(ctx: &mut WindowContext, config: &Rc<UiConfig>) {
         (Source::Tab(from), Some(Target::Reorder(to))) if tabs.active == from => {
             reorder(&mut tabs.tabs, &mut tabs.active, to)
         },
-        (Source::Tab(from), Some(Target::Merge(into))) => merge(ctx, from, into, config),
+        (Source::Tab(from), Some(Target::Merge(into))) => merge(ctx, from, into, None, config),
+        // A group docks beside the pane as it is.
+        (Source::Tab(from), Some(Target::Dock { pane, axis, side }))
+            if tabs.tabs.get(from).is_some_and(|tab| tab.panes.len() > 1) =>
+        {
+            let shown = tabs.active;
+            merge(ctx, from, shown, Some((pane, axis, side)), config)
+        },
         (Source::Tab(from), Some(target @ Target::Dock { .. })) => {
             move_pane(ctx, (from, 0), target, config)
         },
@@ -230,7 +231,7 @@ mod tests {
     use super::*;
 
     /// Three tabs of 100 px on a 40 px bar from x = 100, showing tab 1's two panes side by side.
-    fn scene(grouped: bool) -> Scene {
+    fn scene() -> Scene {
         let tab = |index: usize| (index, Rect::new(100. + 100. * index as f32, 5., 100., 30.));
         Scene {
             bar: 40.,
@@ -238,7 +239,6 @@ mod tests {
             shown: 1,
             panes: vec![(0, Rect::new(0., 40., 400., 300.)), (1, Rect::new(400., 40., 400., 300.))],
             min: (100., 50.),
-            grouped,
         }
     }
 
@@ -248,7 +248,7 @@ mod tests {
 
     #[test]
     fn tabs_on_the_bar() {
-        let scene = scene(false);
+        let scene = scene();
         let drop = |source, x| scene.target(source, at(x, 20.));
         // The middle half of another tab groups; its own does nothing.
         assert_eq!(drop(Source::Tab(0), 260.), Some(Target::Merge(1)));
@@ -267,7 +267,7 @@ mod tests {
 
     #[test]
     fn panes_on_the_bar() {
-        let scene = scene(true);
+        let scene = scene();
         let drop = |source, x| scene.target(source, at(x, 20.));
         // A pane joins another group, or leaves its own for a slot of its own.
         assert_eq!(drop(Source::Pane(1, 0), 150.), Some(Target::Merge(0)));
@@ -279,7 +279,7 @@ mod tests {
 
     #[test]
     fn docking_in_panes() {
-        let scene = scene(false);
+        let scene = scene();
         let dock = |pane, axis, side| Some(Target::Dock { pane, axis, side });
         let drop = |source, x, y| scene.target(source, at(x, y));
         // The pane's diagonals divide it between its four sides, whatever its shape.
@@ -299,12 +299,5 @@ mod tests {
             small.target(Source::Tab(0), at(200., 60.)),
             dock(0, Axis::Column, Side::Before)
         );
-    }
-
-    #[test]
-    fn groups_join_as_they_are() {
-        let scene = scene(true);
-        assert_eq!(scene.target(Source::Tab(0), at(30., 190.)), Some(Target::Merge(1)));
-        assert_eq!(scene.target(Source::Tab(1), at(30., 190.)), None);
     }
 }

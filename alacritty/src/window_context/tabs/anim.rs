@@ -2,15 +2,11 @@
 //!
 //! Curves are CSS-style cubic Béziers, like Hyprland's, which this follows in feel.
 
-#![allow(dead_code)] // Until the panes, the bar and the context menu animate.
-
 use std::env;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
-use crate::display::color::Rgb;
-
-use super::paint::{Rect, mix};
+use super::paint::Rect;
 
 /// A cubic Bézier from (0, 0) to (1, 1) through the control points (x1, y1) and (x2, y2).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -78,12 +74,6 @@ impl Lerp for Rect {
             self.w.lerp(to.w, t),
             self.h.lerp(to.h, t),
         )
-    }
-}
-
-impl Lerp for Rgb {
-    fn lerp(self, to: Self, t: f32) -> Self {
-        mix(self, to, t.clamp(0., 1.))
     }
 }
 
@@ -222,13 +212,5 @@ mod tests {
             Curve::SNAP,
         );
         assert_eq!(tween.get(middle), again.get(middle));
-    }
-
-    #[test]
-    fn colors_blend() {
-        let (black, white) = (Rgb::new(0, 0, 0), Rgb::new(255, 255, 255));
-        assert_eq!(black.lerp(white, 0.), black);
-        assert_eq!(black.lerp(white, 1.), white);
-        assert_eq!(black.lerp(white, 1.5), white);
     }
 }

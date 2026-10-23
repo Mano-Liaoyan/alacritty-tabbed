@@ -23,6 +23,34 @@ yellow and green lights on macOS.
 the tabs of a window share its renderer. Drag tabs to reorder them, close them
 with × or a middle click, and scroll over the bar to switch.
 
+**Tab groups.** A tab can hold several terminals, its panes, split side by side
+or stacked, like tmux's windows. Each pane is its own terminal with its own
+profile; panes in the background keep running and drawing. The focused pane has
+a lit border, and a grouped tab shows its panes' logos stacked like cards, the
+focused one in front.
+
+- **Group** tabs by dragging one onto the middle of another, or of a group.
+- **Split** by dragging a tab into the terminal: it docks beside the pane under
+  the pointer, on the side nearest it, which decides between side by side and
+  stacked; a preview shows where it will land. A group dragged there docks as it
+  is. The tab dragged is shown while it is pressed, so pick the tab to dock into
+  first.
+- **Rearrange** by dragging a pane's logo from its tab's stack: into the
+  terminal to dock it beside another pane, onto another tab to move it there,
+  or between tabs to make it a tab of its own again.
+- **Hover** a tab's stack to fan its logos out; the logo under the pointer grows
+  and its pane is highlighted. Click a logo to focus its pane.
+- **Right-click** a pane for its menu: Split Vertically (side by side), Split
+  Horizontally (stacked), Move Pane to New Tab and Close Pane. Arrow keys,
+  Enter and Escape work. When the program in the pane takes the mouse, hold
+  Shift; Ctrl+right-click still expands the selection.
+- Click a pane to focus it. Ctrl+Shift+W closes the focused pane; × and a
+  middle click close the whole tab.
+
+Panes slide and pop into place with Hyprland-like curves. Set
+`ALACRITTY_ANIMATION_SCALE` to slow them down (`4` is four times slower) or to
+`0` to turn them off.
+
 **Profiles with logos.** Tabs, the ⌄ menu beside + and the settings show each
 profile's logo, drawn sharp at the screen's scale: the executable's largest icon
 on Windows, with each WSL distribution's own artwork and Git Bash's logo; the
@@ -92,7 +120,9 @@ Restart Alacritty after changing `window.tabs`.
 | ⌄ beside + | ⌄ beside + | Choose a profile (arrow keys and Enter work) |
 | Ctrl+Tab / Ctrl+Shift+Tab | Cmd+Shift+] / Cmd+Shift+[ | Next / previous tab |
 | Ctrl+1 to Ctrl+8, Ctrl+9 | Cmd+1 to Cmd+8, Cmd+9 | Select a tab, or the last tab |
-| Ctrl+Shift+W, ×, middle click | Cmd+W, ×, middle click | Close a tab |
+| Ctrl+Shift+W | Cmd+W | Close the focused pane, or its tab when it is the only one |
+| ×, middle click | ×, middle click | Close a tab with all its panes |
+| Right click in a pane | Right click in a pane | Split, move or close the pane |
 | Ctrl+Shift+U (Windows) | | New tab with the default WSL distribution |
 | F11 | Ctrl+Cmd+F | Toggle fullscreen |
 

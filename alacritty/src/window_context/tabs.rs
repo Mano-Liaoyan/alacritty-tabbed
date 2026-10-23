@@ -377,11 +377,20 @@ impl<S> Tab<S> {
         self.position(id).unwrap_or_default()
     }
 
-    /// Put all the panes of `other` beside all of this tab's, keeping this tab's focus.
-    fn join(&mut self, other: Tab<S>, axis: Axis, side: Side) {
-        let focus = self.pane().id;
-        let layout = mem::replace(&mut self.layout, Split::Pane(focus));
-        self.layout = layout.join(other.layout, axis, side);
+    /// Put all the panes of `other` beside the pane `beside`, or else beside all of this tab's,
+    /// keeping this tab's focus.
+    fn join(&mut self, other: Tab<S>, beside: Option<WindowId>, axis: Axis, side: Side) {
+        match beside {
+            Some(target) => {
+                let placed = self.layout.insert(target, other.layout, axis, side);
+                debug_assert!(placed, "groups dock beside a pane of their tab");
+            },
+            None => {
+                let focus = self.pane().id;
+                let layout = mem::replace(&mut self.layout, Split::Pane(focus));
+                self.layout = layout.join(other.layout, axis, side);
+            },
+        }
         self.panes.extend(other.panes);
         self.order();
     }
@@ -473,7 +482,7 @@ fn place<S>(
     let (tab, index) = match target {
         Target::Merge(tab) => {
             let (tab, id) = (shift(tab), moved.id);
-            tabs[tab].join(Tab::new(moved), split::auto_axis(area), Side::After);
+            tabs[tab].join(Tab::new(moved), None, split::auto_axis(area), Side::After);
             (tab, tabs[tab].position(id).unwrap_or_default())
         },
         Target::Dock { axis, side, .. } => {
@@ -498,17 +507,31 @@ fn reorder<S>(tabs: &mut Vec<Tab<S>>, active: &mut usize, to: usize) {
     tabs.insert(*active, tab);
 }
 
-/// Group the active tab with the tab `into`, which takes its place and its focus. Returns whether
-/// they were grouped.
-fn group<S>(tabs: &mut Vec<Tab<S>>, active: &mut usize, into: usize, area: Rect) -> bool {
+/// Group the active tab with the tab `into`, which takes its place and its focus: docked beside
+/// the pane of `dock`, or else beside all of its panes. Returns whether they were grouped.
+fn group<S>(
+    tabs: &mut Vec<Tab<S>>,
+    active: &mut usize,
+    into: usize,
+    dock: Option<(usize, Axis, Side)>,
+    area: Rect,
+) -> bool {
     let from = *active;
     if into == from || into >= tabs.len() {
         return false;
     }
+    let beside = match dock {
+        Some((pane, ..)) => match tabs[into].panes.get(pane) {
+            Some(pane) => Some(pane.id),
+            None => return false,
+        },
+        None => None,
+    };
+    let (axis, side) = dock.map_or((split::auto_axis(area), Side::After), |(_, a, s)| (a, s));
     let tab = tabs.remove(from);
     let into = if into > from { into - 1 } else { into };
     let focus = tab.pane().id;
-    tabs[into].join(tab, split::auto_axis(area), Side::After);
+    tabs[into].join(tab, beside, axis, side);
     tabs[into].focus = tabs[into].position(focus).unwrap_or_default();
     *active = into;
     true
@@ -1378,7 +1401,6 @@ fn open(
 
 /// Split the live pane, putting a new one with the same profile beside it, on `side` along
 /// `axis`, and focus the new pane. Returns whether there was room for it.
-#[allow(dead_code)] // Until the context menu offers it.
 pub fn split(
     ctx: &mut WindowContext,
     axis: Axis,
@@ -1481,9 +1503,12 @@ pub fn move_pane(
     target: Target,
     config: &Rc<UiConfig>,
 ) {
-    // Docking refers to the panes shown before the moving one is focused.
+    // Docking refers to the panes shown before the moving one is focused, and so do the
+    // animations: those panes slide aside and only the moving one pops in.
     let shown = ctx.display.tabs.active;
+    let effects = mem::take(&mut ctx.display.tabs.pane_effects);
     focus_pane(ctx, tab, pane, config);
+    ctx.display.tabs.pane_effects = effects;
     let tabs = &mut ctx.display.tabs;
     let area = tabs.area();
     if tabs.tabs.is_empty() || tabs.live() != (tab, pane) {
@@ -1494,16 +1519,25 @@ pub fn move_pane(
     }
 }
 
-/// Group the tab `from` with the tab `into`: its panes join the others beside them, keeping the
-/// focus.
-pub fn merge(ctx: &mut WindowContext, from: usize, into: usize, config: &Rc<UiConfig>) {
+/// Group the tab `from` with the tab `into`: its panes join the others, beside the pane of `dock`
+/// or else beside them all, keeping the focus.
+pub fn merge(
+    ctx: &mut WindowContext,
+    from: usize,
+    into: usize,
+    dock: Option<(usize, Axis, Side)>,
+    config: &Rc<UiConfig>,
+) {
+    // The panes on screen slide aside and only the arriving ones pop in.
+    let effects = mem::take(&mut ctx.display.tabs.pane_effects);
     select(ctx, from, config);
+    ctx.display.tabs.pane_effects = effects;
     let tabs = &mut ctx.display.tabs;
     let area = tabs.area();
     if tabs.active != from || from >= tabs.tabs.len() {
         return;
     }
-    if group(&mut tabs.tabs, &mut tabs.active, into, area) {
+    if group(&mut tabs.tabs, &mut tabs.active, into, dock, area) {
         relayout(ctx);
     }
 }
@@ -1704,8 +1738,18 @@ mod tests {
         model.check();
 
         // Grouping whole tabs keeps the focus of the tab that moved.
-        assert!(group(&mut model.tabs, &mut model.active, 1, Rect::new(0., 0., 800., 600.)));
-        assert_eq!((model.tabs.len(), model.ids(0), model.live), (1, vec![1, 2, 5, 4, 3], 3));
+        let area = Rect::new(0., 0., 800., 600.);
+        model.tabs.push(Tab::new(pane(7, Some(7))));
+        assert!(group(&mut model.tabs, &mut model.active, 2, None, area));
+        assert_eq!((model.tabs.len(), model.ids(1), model.live), (2, vec![7, 3], 3));
+        model.check();
+
+        // A whole group docks as it is beside one pane of another, keeping the focus it had.
+        model.split(6, Axis::Column, Side::After);
+        let dock = |pane| Some((pane, Axis::Row, Side::After));
+        assert!(!group(&mut model.tabs, &mut model.active, 0, dock(9), area));
+        assert!(group(&mut model.tabs, &mut model.active, 0, dock(0), area));
+        assert_eq!((model.tabs.len(), model.ids(0), model.live), (1, vec![1, 7, 3, 6, 2, 5, 4], 6));
         model.check();
     }
 }
