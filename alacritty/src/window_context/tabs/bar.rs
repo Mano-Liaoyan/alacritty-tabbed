@@ -657,6 +657,8 @@ impl Tabs {
             };
             let colors = |pane| (surface, palette.accent(title(pane)), palette.foreground);
             let front = layout.badge(rect);
+            // The title fades out under a stack fanned over it.
+            let mut fade = 0.;
             if tab.panes.len() == 1 {
                 let pane = tab.pane();
                 badge(layer, &layout, front, pane.icon.as_ref(), &pane.badge, font, colors(0));
@@ -668,6 +670,7 @@ impl Tabs {
                 let icons = stack(front, tab.panes.len(), tab.focus, layout.scale, motion);
                 let fan = motion(tab.focus).0;
                 let fanned_out = fan > 0.001;
+                fade = fan.clamp(0., 1.);
                 let into = if fanned_out { &mut fanned } else { &mut *layer };
                 if fanned_out {
                     let left = icons.iter().map(|(_, icon)| icon.x).fold(f32::MAX, f32::min);
@@ -714,6 +717,7 @@ impl Tabs {
             let right = if lit(index) { close.x + px(2.) } else { rect.right() - px(10.) };
             let title = font.fit(title(tab.focus), (right - left).max(0.), active);
             let color = if lit(index) { palette.foreground } else { palette.muted };
+            let color = mix(color, surface, fade);
             layer.text(left, rect.center().1 - line_height / 2., title, color, active);
         }
 
