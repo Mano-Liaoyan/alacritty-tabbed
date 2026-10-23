@@ -177,7 +177,8 @@ pub fn draw(tabs: &Tabs, layout: &Layout, palette: &Palette, layer: &mut Layer, 
         }
     }
     let hovered = match tabs.hover {
-        Hit::Icon(tab, pane) if tab == tabs.active => Some(pane),
+        // A lone pane's icon is its tab's badge, which does not point at the pane.
+        Hit::Icon(tab, pane) if tab == tabs.active && grouped => Some(pane),
         _ => None,
     };
     let line = layout.px(1.).max(1.);
