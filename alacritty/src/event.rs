@@ -471,6 +471,7 @@ impl ApplicationHandler<Event> for Processor {
 
                     for window_context in self.windows.values_mut() {
                         window_context.update_config(self.config.clone());
+                        tabs::reconfigure(window_context, &self.config);
                     }
                 }
             },

@@ -882,6 +882,11 @@ pub fn launch(config: &UiConfig, options: &WindowOptions, pty: &mut PtyOptions, 
     *tabs.first_profile.borrow_mut() = Some(profile);
 }
 
+/// Pad the terminals again right after a new configuration replaced the padded one.
+pub fn reconfigure(ctx: &mut WindowContext, config: &Rc<UiConfig>) {
+    sync(ctx, config, false);
+}
+
 /// Handle a window event for the caption, returning the event the terminal should get.
 pub fn window_event(
     ctx: &mut WindowContext,
