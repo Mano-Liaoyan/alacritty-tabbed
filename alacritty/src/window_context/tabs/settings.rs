@@ -130,6 +130,8 @@ enum Target {
     Step(bool),
     /// Slider of the background's opacity.
     Opacity,
+    /// Switch of the terminal's panel, or of the tabs' track.
+    Backdrop(Backdrop),
     Row(usize),
     NewProfile,
     Duplicate,
@@ -147,6 +149,15 @@ enum Target {
     Delete,
     Cancel,
     Save,
+}
+
+/// A surface behind part of the interface, which can be left out.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Backdrop {
+    /// The panel holding the terminal, set in from the window's edges.
+    Panel,
+    /// The track behind the tabs.
+    TabTrack,
 }
 
 /// A profile being edited, kept as the text the user typed until it is saved.
@@ -257,6 +268,21 @@ fn home_relative(path: &Path) -> String {
     }
 }
 
+/// A switch on `track`, filled with the terminal's blue while it is `on`.
+fn switch(layer: &mut Layer, layout: &Layout, palette: &Palette, track: Rect, on: bool) {
+    let px = |value: f32| layout.px(value);
+    let knob = px(14.) / 2.;
+    let x = if on { track.right() - px(4.) - knob } else { track.x + px(4.) + knob };
+    let radius = layout.radius(11.);
+    if on {
+        layer.rounded(track, radius, palette.primary);
+        layout.dot(layer, (x, track.center().1), knob, super::paint::WHITE);
+    } else {
+        layer.outlined(track, radius, palette.field, palette.focus, px(1.).max(1.));
+        layout.dot(layer, (x, track.center().1), knob, palette.muted);
+    }
+}
+
 /// A sidebar row being dragged to a new position.
 struct Drag {
     /// Pointer offset from the row's top edge.
@@ -317,21 +343,25 @@ struct Panel {
 struct AppearancePanel {
     heading: Rect,
     group: Rect,
-    /// Rows for the corners, the font, its size and the opacity.
-    rows: [Rect; 4],
+    /// Rows for the corners, the font, its size, the opacity, the panel and the tabs' track.
+    rows: [Rect; 6],
     corner_choice: Rect,
     /// The buttons that end the font size's field.
     stepper: Rect,
     slider: Rect,
+    /// Switches of the panel and the tabs' track.
+    switches: [Rect; 2],
 }
 
 impl AppearancePanel {
     /// Names and descriptions of the rows.
-    const ROWS: [(&'static str, &'static str); 4] = [
+    const ROWS: [(&'static str, &'static str); 6] = [
         ("Corners", "Window, panels, tabs and buttons"),
         ("Interface font", "Tab bar, menus and settings"),
         ("Font size", "Interface text, in points"),
         ("Background opacity", "Behind the terminal's text"),
+        ("Terminal panel", "Set in from the window's edges"),
+        ("Tab track", "Behind the tabs"),
     ];
 
     /// Radius of the slider's knob.
@@ -355,6 +385,7 @@ impl Target {
                 | Target::Corners(_)
                 | Target::Step(_)
                 | Target::Opacity
+                | Target::Backdrop(_)
                 | Target::Field(_)
                 | Target::Browse(_)
                 | Target::Reset
@@ -369,11 +400,13 @@ pub struct Settings {
     page: Page,
     /// The application's settings as last saved.
     saved_app_settings: AppSettings,
-    /// The application's settings as edited: the text of their fields, the corners and the
-    /// opacity.
+    /// The application's settings as edited: the text of their fields, the corners, the opacity,
+    /// the panel and the tabs' track.
     app_setting_texts: [String; 2],
     edited_corners: Corners,
     edited_opacity: f32,
+    edited_panel: bool,
+    edited_tab_track: bool,
     /// Whether the opacity's knob is being dragged.
     sliding: bool,
     /// The configuration file just saved, to reload.
@@ -422,6 +455,8 @@ impl Settings {
             app_setting_texts: [saved.family.clone(), app_settings::format(saved.size)],
             edited_corners: saved.corners,
             edited_opacity: saved.opacity,
+            edited_panel: saved.panel,
+            edited_tab_track: saved.tab_track,
             sliding: false,
             saved_app_settings: saved,
             reload: None,
@@ -504,8 +539,9 @@ impl Settings {
         let (save, cancel) =
             (px(96.).min((width * 0.3).round()), px(92.).min((width * 0.28).round()));
         let gap = px(12.);
-        let delete = px(128.).min(width - save - cancel - gap - px(16.)).max(0.);
-        // The status starts the row where no Delete button does.
+        let delete = font.width("Delete profile", false).ceil();
+        let delete = delete.min(width - save - cancel - gap - px(16.)).max(0.);
+        // The status starts the row where no Delete link does.
         let before_status = if self.page == Page::Profile { delete + gap } else { 0. };
         let status_width = width - save - cancel - before_status - 2. * gap;
         let footer = card.bottom() - px(58.);
@@ -556,9 +592,9 @@ impl Settings {
         let place_appearance = |top: f32| {
             let heading = Rect::new(x0, top + px(24.), width, 2. * ch);
             let row = px(56.).max(2. * ch + px(16.));
-            let group = Rect::new(x0, heading.bottom() + px(20.), width, 4. * row);
-            let rows =
-                [0., 1., 2., 3.].map(|i| Rect::new(group.x, group.y + i * row, group.w, row));
+            let group = Rect::new(x0, heading.bottom() + px(20.), width, 6. * row);
+            let rows = [0., 1., 2., 3., 4., 5.]
+                .map(|i| Rect::new(group.x, group.y + i * row, group.w, row));
             let mut fields = [Rect::default(); FIELD_COUNT];
 
             // Controls keep their own widths, giving up room to the names only in narrow cards.
@@ -579,8 +615,10 @@ impl Settings {
             let value = font.width("100%", false).ceil();
             let slider = control_at(rows[3], px(200.) + px(12.) + value);
             let slider = Rect { w: (slider.w - px(12.) - value).max(px(40.)), ..slider };
+            let switches = [control_at(rows[4], px(40.)), control_at(rows[5], px(40.))];
 
-            let panel = AppearancePanel { heading, group, rows, corner_choice, stepper, slider };
+            let panel =
+                AppearancePanel { heading, group, rows, corner_choice, stepper, slider, switches };
             (panel, fields, group.bottom() + px(24.) - top)
         };
 
@@ -614,6 +652,8 @@ impl Settings {
                         ..stepper
                     }),
                     (Target::Opacity, page.slider),
+                    (Target::Backdrop(Backdrop::Panel), page.switches[0]),
+                    (Target::Backdrop(Backdrop::TabTrack), page.switches[1]),
                 ]);
                 appearance = Some(page);
             },
@@ -1049,6 +1089,14 @@ impl Settings {
                 }
             },
             Target::Step(larger) => self.step_font_size(larger),
+            Target::Backdrop(Backdrop::Panel) => {
+                self.edited_panel ^= true;
+                self.touched();
+            },
+            Target::Backdrop(Backdrop::TabTrack) => {
+                self.edited_tab_track ^= true;
+                self.touched();
+            },
             Target::Opacity => {
                 self.sliding = true;
                 self.slide(&panel, layout);
@@ -1462,6 +1510,8 @@ impl Settings {
             family: self.text(Field::UiFont).trim().into(),
             size: number(Field::UiFontSize, UI_FONT_SIZES.0..=UI_FONT_SIZES.1)?,
             opacity: self.edited_opacity,
+            panel: self.edited_panel,
+            tab_track: self.edited_tab_track,
         })
     }
 
@@ -1865,18 +1915,29 @@ impl Settings {
                 },
                 Target::Opacity => continue,
                 Target::Save => ("Save", palette.muted, true),
+                // Deleting is a link in dark red, starting where the fields do, underlined under
+                // the pointer.
                 Target::Delete if self.enabled(target) => {
+                    let (word, y) = ("Delete profile", rect.center().1 - ch / 2.);
+                    let color = if hovered {
+                        palette.caution
+                    } else {
+                        mix(palette.caution, palette.terminal, 0.25)
+                    };
+                    layer.text(rect.x, y, word.into(), color, false);
                     if hovered {
-                        let fill = mix(palette.terminal, palette.caution, 0.18);
-                        layer.rounded(rect, layout.radius(8.), fill);
+                        let underline = Rect::new(rect.x, y + ch, font.width(word, false), line);
+                        layer.rect(underline, color);
                     }
-                    center(
-                        layer,
-                        rect,
-                        "Delete profile",
-                        mix(palette.caution, palette.foreground, 0.35),
-                        false,
-                    );
+                    continue;
+                },
+                Target::Backdrop(backdrop) => {
+                    let on = match backdrop {
+                        Backdrop::Panel => self.edited_panel,
+                        Backdrop::TabTrack => self.edited_tab_track,
+                    };
+                    let track = Rect::new(rect.x, rect.center().1 - px(11.), px(40.), px(22.));
+                    switch(layer, layout, palette, track, on);
                     continue;
                 },
                 Target::AllFonts => {
@@ -1909,18 +1970,7 @@ impl Settings {
                         )
                     };
                     let track = Rect::new(rect.x, rect.center().1 - px(11.), px(40.), px(22.));
-                    let knob = px(14.) / 2.;
-                    let x =
-                        if on { track.right() - px(4.) - knob } else { track.x + px(4.) + knob };
-                    let radius = layout.radius(11.);
-                    if on {
-                        layer.rounded(track, radius, palette.primary);
-                        let knob_color = super::paint::WHITE;
-                        layout.dot(layer, (x, track.center().1), knob, knob_color);
-                    } else {
-                        layer.outlined(track, radius, palette.field, palette.focus, line);
-                        layout.dot(layer, (x, track.center().1), knob, palette.muted);
-                    }
+                    switch(layer, layout, palette, track, on);
                     let text =
                         Rect::new(track.right() + px(12.), rect.y - px(2.), rect.w - px(52.), ch);
                     layer.text(
@@ -2139,6 +2189,8 @@ impl Settings {
             panel.fields[Field::UiFont.index()].x,
             panel.fields[Field::UiFontSize.index()].x,
             page.slider.x,
+            page.switches[0].x,
+            page.switches[1].x,
         ];
         for (index, (row, (name, description))) in
             page.rows.iter().zip(AppearancePanel::ROWS).enumerate()

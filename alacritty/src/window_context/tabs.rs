@@ -128,6 +128,8 @@ pub struct Tabs {
     corners: Option<Corners>,
     /// Whether the window's corners are cut out of it, which needs a transparent window.
     cut: bool,
+    /// Whether the terminal is held in a panel, rather than filling the window.
+    panel: bool,
 }
 
 struct Tab {
@@ -601,9 +603,12 @@ fn sync(ctx: &mut WindowContext, config: &Rc<UiConfig>, resize: bool) {
         _ => Frame::Normal,
     };
     let px = |value: f32| (value * ctx.display.window.scale_factor as f32).round() as u32;
+    // Without its panel the terminal fills the window, its text still lined up with the logo.
+    ctx.display.tabs.panel = config.window.panel;
     let (offset, inset) = match (shown, frame) {
         (false, _) => (0, 0),
         (_, Frame::Fullscreen) => (px(BAR), 0),
+        _ if !config.window.panel => (px(BAR), (MARGIN + INSET) as u8),
         _ => (px(BAR) - px(MARGIN), (MARGIN + INSET) as u8),
     };
 

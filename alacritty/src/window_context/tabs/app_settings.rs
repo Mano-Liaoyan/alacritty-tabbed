@@ -22,6 +22,9 @@ pub struct AppSettings {
     pub size: f32,
     /// Opacity of the terminal's background, from 0 to 1.
     pub opacity: f32,
+    /// Whether the terminal is held in a panel, and the tabs set on a track.
+    pub panel: bool,
+    pub tab_track: bool,
 }
 
 impl AppSettings {
@@ -32,6 +35,8 @@ impl AppSettings {
             family: window.ui_font.family.clone(),
             size: window.ui_font.size,
             opacity: window.opacity.as_f32(),
+            panel: window.panel,
+            tab_track: window.tab_track,
         }
     }
 
@@ -71,6 +76,12 @@ impl AppSettings {
         if self.opacity != before.opacity {
             window["opacity"] = number(self.opacity);
         }
+        if self.panel != before.panel {
+            window["panel"] = value(self.panel);
+        }
+        if self.tab_track != before.tab_track {
+            window["tab_track"] = value(self.tab_track);
+        }
         Ok(document.to_string())
     }
 }
@@ -93,7 +104,14 @@ mod tests {
     use super::*;
 
     fn defaults() -> AppSettings {
-        AppSettings { corners: Corners::Round, family: String::new(), size: 10., opacity: 1. }
+        AppSettings {
+            corners: Corners::Round,
+            family: String::new(),
+            size: 10.,
+            opacity: 1.,
+            panel: true,
+            tab_track: true,
+        }
     }
 
     #[test]
@@ -110,6 +128,8 @@ mod tests {
             family: "Inter".into(),
             size: 11.5,
             opacity: 0.85,
+            panel: false,
+            tab_track: true,
         };
         let edited = changed.edit(&defaults(), text).unwrap();
         assert!(edited.starts_with("# Mine.\n[window]\n"));
@@ -120,6 +140,8 @@ mod tests {
         assert_eq!(window["opacity"].as_float(), Some(0.85));
         assert_eq!(window["ui_font"]["family"].as_str(), Some("Inter"));
         assert_eq!(window["ui_font"]["size"].as_float(), Some(11.5));
+        assert_eq!(window["panel"].as_bool(), Some(false));
+        assert!(window.get("tab_track").is_none());
     }
 
     #[test]
