@@ -646,6 +646,11 @@ impl<T> Term<T> {
         &self.grid
     }
 
+    /// The grid of the normal screen, also while a program shows the alternate screen.
+    pub fn primary_grid(&self) -> &Grid<Cell> {
+        if self.mode.contains(TermMode::ALT_SCREEN) { &self.inactive_grid } else { &self.grid }
+    }
+
     /// Mutable access to the raw grid data structure.
     pub fn grid_mut(&mut self) -> &mut Grid<Cell> {
         &mut self.grid

@@ -49,6 +49,7 @@ use crate::cli::{IpcConfig, ParsedOptions};
 use crate::cli::{Options as CliOptions, WindowOptions};
 use crate::clipboard::Clipboard;
 use crate::config::ui_config::{HintAction, HintInternalAction};
+use crate::config::window::RestoreSession;
 use crate::config::{self, UiConfig};
 #[cfg(not(windows))]
 use crate::daemon::foreground_process_path;
@@ -64,7 +65,7 @@ use crate::message_bar::{Message, MessageBuffer};
 use crate::polling::ipc::{self, SocketReply};
 use crate::scheduler::{Scheduler, TimerId, Topic};
 use crate::window_context::WindowContext;
-use crate::window_context::tabs::{self, Torn};
+use crate::window_context::tabs::{self, Torn, restore};
 
 /// Duration after the last user input until an unlimited search is performed.
 pub const TYPING_SEARCH_DELAY: Duration = Duration::from_millis(500);
@@ -99,6 +100,8 @@ pub struct Processor {
     global_ipc_options: ParsedOptions,
     cli_options: CliOptions,
     config: Rc<UiConfig>,
+    /// Windows closed as windows, and when, to save with the last one.
+    closed: Vec<(Instant, restore::Window)>,
 }
 
 impl Processor {
@@ -142,6 +145,7 @@ impl Processor {
             #[cfg(unix)]
             global_ipc_options: Default::default(),
             config_monitor,
+            closed: Default::default(),
         }
     }
 
@@ -153,12 +157,14 @@ impl Processor {
         &mut self,
         event_loop: &ActiveEventLoop,
         window_options: WindowOptions,
+        saved: Option<restore::Window>,
     ) -> Result<(), Box<dyn Error>> {
         let window_context = WindowContext::initial(
             event_loop,
             self.proxy.clone(),
             self.config.clone(),
             window_options,
+            saved,
         )?;
 
         self.gl_config = Some(window_context.display.gl_context().config());
@@ -167,11 +173,12 @@ impl Processor {
         Ok(())
     }
 
-    /// Create a new terminal window.
+    /// Create a new terminal window, or one like the window `saved` from a previous session.
     pub fn create_window(
         &mut self,
         event_loop: &ActiveEventLoop,
         options: WindowOptions,
+        saved: Option<restore::Window>,
     ) -> Result<(), Box<dyn Error>> {
         let gl_config = self.gl_config.as_ref().unwrap();
 
@@ -189,6 +196,7 @@ impl Processor {
             config,
             options,
             config_overrides,
+            saved,
         )?;
 
         self.windows.insert(window_context.id(), window_context);
@@ -227,6 +235,24 @@ impl Processor {
         }
     }
 
+    /// Keep the state of `window_context`, which is closing, for the session saved once the last
+    /// window closes: windows closed as windows within a moment are saved together, while a
+    /// session ended by closing its tabs or shells is forgotten.
+    fn remember(&mut self, window_context: &WindowContext) {
+        let level = self.config.window.restore_session;
+        let whole = window_context.display.tabs.closed_whole();
+        let now = Instant::now();
+        if level != RestoreSession::Off && whole {
+            self.closed.push((now, restore::capture(window_context, level)));
+        }
+        if self.windows.is_empty() {
+            let windows = restore::kept(mem::take(&mut self.closed), now, whole);
+            if let Err(err) = restore::save(windows) {
+                error!("Could not save the session: {err}");
+            }
+        }
+    }
+
     /// Check if an event is irrelevant and can be skipped.
     fn skip_window_event(event: &WindowEvent) -> bool {
         matches!(
@@ -258,10 +284,24 @@ impl ApplicationHandler<Event> for Processor {
         }
 
         if let Some(window_options) = self.initial_window_options.take() {
-            if let Err(err) = self.create_initial_window(event_loop, window_options) {
+            // The windows of the last session, when it is restored.
+            let mut saved = restore::take(&self.config, &self.cli_options).into_iter();
+            let first = saved.next();
+            if let Err(err) = self.create_initial_window(event_loop, window_options.clone(), first)
+            {
                 self.initial_window_error = Some(err);
                 event_loop.exit();
                 return;
+            }
+            for window in saved {
+                for window_context in self.windows.values_mut() {
+                    window_context.display.make_not_current();
+                }
+                if let Err(err) =
+                    self.create_window(event_loop, window_options.clone(), Some(window))
+                {
+                    error!("Could not restore a window: {err:?}");
+                }
             }
         }
 
@@ -415,11 +455,11 @@ impl ApplicationHandler<Event> for Processor {
 
                 if self.gl_config.is_none() {
                     // Handle initial window creation in daemon mode.
-                    if let Err(err) = self.create_initial_window(event_loop, options) {
+                    if let Err(err) = self.create_initial_window(event_loop, options, None) {
                         self.initial_window_error = Some(err);
                         event_loop.exit();
                     }
-                } else if let Err(err) = self.create_window(event_loop, options) {
+                } else if let Err(err) = self.create_window(event_loop, options, None) {
                     error!("Could not open window: {err:?}");
                 }
             },
@@ -462,6 +502,7 @@ impl ApplicationHandler<Event> for Processor {
 
                 // Unschedule pending events.
                 self.scheduler.unschedule_window(window_context.id());
+                self.remember(&window_context);
 
                 // Shutdown if no more terminals are open.
                 if self.windows.is_empty() && !self.cli_options.daemon {
@@ -526,6 +567,17 @@ impl ApplicationHandler<Event> for Processor {
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
         if self.config.debug.print_events {
             info!("Exiting the event loop");
+        }
+
+        // Quitting with windows open, as by `alacritty msg shutdown`, saves them all.
+        let level = self.config.window.restore_session;
+        if level != RestoreSession::Off && !self.windows.is_empty() {
+            let now = Instant::now();
+            let mut windows = restore::kept(mem::take(&mut self.closed), now, true);
+            windows.extend(self.windows.values().map(|ctx| restore::capture(ctx, level)));
+            if let Err(err) = restore::save(windows) {
+                error!("Could not save the session: {err}");
+            }
         }
 
         match self.gl_config.take().map(|config| config.display()) {

@@ -42,7 +42,6 @@ pub enum Split<P> {
 
 impl<P> Split<P> {
     /// The same tree, each pane given by `f`, in the order of the tree.
-    #[allow(dead_code, reason = "lane X saves and restores layouts by pane index")]
     pub fn map<Q>(self, f: &mut impl FnMut(P) -> Q) -> Split<Q> {
         match self {
             Split::Pane(pane) => Split::Pane(f(pane)),
