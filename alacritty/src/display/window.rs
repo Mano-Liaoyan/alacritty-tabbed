@@ -18,7 +18,6 @@ use {
     png::Decoder,
 };
 
-use std::cell::Cell;
 use std::fmt::{self, Display, Formatter};
 
 #[cfg(target_os = "macos")]
@@ -123,9 +122,8 @@ pub struct Window {
     current_mouse_cursor: CursorIcon,
     mouse_visible: bool,
     ime_inhibitor: ImeInhibitor,
-
-    /// The window was maximized before it went fullscreen, to maximize it again on leaving.
-    maximized_before_fullscreen: Cell<bool>,
+    // tabbed: what the window was before fullscreen, to switch in one step on Windows.
+    fullscreen: crate::window_context::tabs::FullscreenState,
 }
 
 impl Window {
@@ -219,7 +217,7 @@ impl Window {
             window,
             is_x11,
             ime_inhibitor: Default::default(),
-            maximized_before_fullscreen: Default::default(),
+            fullscreen: Default::default(),
         })
     }
 
@@ -387,19 +385,17 @@ impl Window {
         self.window.set_blur(blur);
     }
 
-    /// Maximize or restore the window; a fullscreen window keeps that for when it leaves
-    /// fullscreen, since a window maximized while fullscreen would not cover the taskbar.
     pub fn set_maximized(&self, maximized: bool) {
-        if cfg!(windows) && self.window.fullscreen().is_some() {
-            self.maximized_before_fullscreen.set(maximized);
-        } else {
-            self.window.set_maximized(maximized);
+        // tabbed: a fullscreen window on Windows keeps this for when it leaves fullscreen.
+        if self.fullscreen.set_maximized(&self.window, maximized) {
+            return;
         }
+        self.window.set_maximized(maximized);
     }
 
-    /// Whether the window is maximized, or will be again when it leaves fullscreen.
+    // tabbed: whether maximized, or to be when leaving fullscreen.
     pub fn is_maximized(&self) -> bool {
-        self.window.is_maximized() || self.maximized_before_fullscreen.get()
+        self.fullscreen.is_maximized(&self.window)
     }
 
     pub fn set_minimized(&self, minimized: bool) {
@@ -417,7 +413,7 @@ impl Window {
 
     /// Toggle the window's maximized state.
     pub fn toggle_maximized(&self) {
-        self.set_maximized(!self.is_maximized());
+        self.set_maximized(!self.is_maximized()); // tabbed: maximized when leaving fullscreen.
     }
 
     /// Inform windowing system about presenting to the window.
@@ -441,30 +437,15 @@ impl Window {
         self.window.set_option_as_alt(option_as_alt);
     }
 
-    /// Enter or leave borderless fullscreen.
-    ///
-    /// On Windows a window maximized there stays maximized in fullscreen, and winit then limits
-    /// an undecorated window's client area to the monitor's work area, leaving the taskbar
-    /// visible; it is restored before entering fullscreen and maximized again on leaving it.
     pub fn set_fullscreen(&self, fullscreen: bool) {
-        let steps = if cfg!(windows) {
-            let remembered = self.maximized_before_fullscreen.get();
-            fullscreen_steps(fullscreen, self.window.is_maximized(), remembered)
-        } else {
-            FullscreenSteps::default()
-        };
-        self.maximized_before_fullscreen.set(steps.remember);
-
-        if steps.unmaximize {
-            self.window.set_maximized(false);
+        // tabbed: on Windows, maximized windows switch in one step, without animations.
+        if self.fullscreen.set(&self.window, fullscreen) {
+            return;
         }
         if fullscreen {
             self.window.set_fullscreen(Some(Fullscreen::Borderless(None)));
         } else {
             self.window.set_fullscreen(None);
-        }
-        if steps.maximize {
-            self.window.set_maximized(true);
         }
     }
 
@@ -575,53 +556,4 @@ fn use_srgb_color_space(window: &WinitWindow) {
     };
 
     view.window().unwrap().setColorSpace(Some(&NSColorSpace::sRGBColorSpace()));
-}
-
-/// What to do around entering or leaving fullscreen, for a window that keeps its maximized state
-/// aside while fullscreen.
-#[derive(Debug, Default, PartialEq, Eq)]
-struct FullscreenSteps {
-    /// Restore the window before entering fullscreen.
-    unmaximize: bool,
-    /// Maximize the window after leaving fullscreen.
-    maximize: bool,
-    /// Whether the window is to be maximized when it leaves fullscreen.
-    remember: bool,
-}
-
-/// The steps to make a window `fullscreen` or not, which is `maximized` now or `remembered` to
-/// have been before it went fullscreen.
-fn fullscreen_steps(fullscreen: bool, maximized: bool, remembered: bool) -> FullscreenSteps {
-    if fullscreen {
-        let remember = maximized || remembered;
-        FullscreenSteps { unmaximize: maximized, maximize: false, remember }
-    } else {
-        FullscreenSteps { unmaximize: false, maximize: remembered, remember: false }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn fullscreen_from_maximized_restores_first_and_maximizes_after() {
-        let enter = fullscreen_steps(true, true, false);
-        assert_eq!(enter, FullscreenSteps { unmaximize: true, maximize: false, remember: true });
-        let leave = fullscreen_steps(false, false, enter.remember);
-        assert_eq!(leave, FullscreenSteps { unmaximize: false, maximize: true, remember: false });
-    }
-
-    #[test]
-    fn fullscreen_from_normal_leaves_maximized_alone() {
-        let enter = fullscreen_steps(true, false, false);
-        assert_eq!(enter, FullscreenSteps::default());
-        assert_eq!(fullscreen_steps(false, false, enter.remember), FullscreenSteps::default());
-    }
-
-    #[test]
-    fn fullscreen_again_keeps_remembered_maximized() {
-        assert!(fullscreen_steps(true, false, true).remember);
-        assert!(!fullscreen_steps(true, false, true).unmaximize);
-    }
 }
