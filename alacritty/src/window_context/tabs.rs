@@ -68,7 +68,7 @@ use winit::event::{
 };
 use winit::event_loop::EventLoopProxy;
 use winit::keyboard::{Key, ModifiersState, NamedKey};
-use winit::window::{CursorIcon, WindowAttributes, WindowId};
+use winit::window::{CursorIcon, Window as WinitWindow, WindowAttributes, WindowId};
 
 use alacritty_terminal::event::{Event as TerminalEvent, Notify, OnResize};
 use alacritty_terminal::event_loop::{EventLoop as PtyEventLoop, Msg, Notifier};
@@ -175,6 +175,10 @@ pub struct Tabs {
     first: usize,
     scale: f64,
     frame: Frame,
+    /// Where the window was in the normal frame, and its size there: before the last move or
+    /// resize, and after it, as a window manager may move it to the screen's corner just before
+    /// it makes it fullscreen. Once out of the normal frame, the first is where it was.
+    placed: [Option<(PhysicalPosition<i32>, PhysicalSize<u32>)>; 2],
     /// Computer name shown beside the logo.
     host: String,
     /// The configuration before the terminal was fit in the panel, and after.
@@ -882,6 +886,11 @@ pub fn launch(config: &UiConfig, options: &WindowOptions, pty: &mut PtyOptions, 
     *tabs.first_profile.borrow_mut() = Some(profile);
 }
 
+/// Pad the terminals again right after a new configuration replaced the padded one.
+pub fn reconfigure(ctx: &mut WindowContext, config: &Rc<UiConfig>) {
+    sync(ctx, config, false);
+}
+
 /// Handle a window event for the caption, returning the event the terminal should get.
 pub fn window_event(
     ctx: &mut WindowContext,
@@ -900,7 +909,30 @@ pub fn window_event(
     if let WindowEvent::CloseRequested = event {
         ctx.display.tabs.ending = Some(Ending::Window);
     }
-    sync(ctx, config, matches!(event, WindowEvent::Resized(_)));
+    // Only for window managers that make the window fill its screen without resizing it, as by
+    // moving it there.
+    let resize = match event {
+        WindowEvent::Resized(_) => true,
+        WindowEvent::Moved(_) | WindowEvent::ScaleFactorChanged { .. } => {
+            frame(ctx.display.window.winit()) != ctx.display.tabs.frame
+        },
+        _ => false,
+    };
+    sync(ctx, config, resize);
+    if matches!(event, WindowEvent::Resized(_) | WindowEvent::Moved(_)) {
+        let window = ctx.display.window.winit();
+        let (tabs, here) = (&mut ctx.display.tabs, window.outer_position().ok());
+        tabs.placed = match (tabs.frame, tabs.placed[1]) {
+            (Frame::Normal, _) => [tabs.placed[1], here.map(|at| (at, window.inner_size()))],
+            // Out of it, the last place, unless the window manager just moved it to where it is.
+            (_, Some(last)) if Some(last.0) != here => [Some(last), None],
+            _ => [tabs.placed[0], None],
+        };
+    }
+    // Only the caption follows the window's place.
+    if let WindowEvent::Moved(_) = event {
+        return None;
+    }
     let first = ctx.first;
     if !ctx.display.tabs.caption {
         return Some(event);
@@ -1317,6 +1349,55 @@ pub fn route<S: BuildHasher>(
     None
 }
 
+/// How `window` lies on its screen, to draw it. Fullscreen also when it covers its whole monitor
+/// unmaximized: X11 window managers make windows fullscreen without the application knowing,
+/// which Wayland tells it.
+fn frame(window: &WinitWindow) -> Frame {
+    let covering = || {
+        let monitor = window.current_monitor();
+        let screen = monitor.as_ref().map(|monitor| (monitor.position(), monitor.size()));
+        covers(window.outer_position().ok().map(|position| (position, window.outer_size())), screen)
+    };
+    frame_of(window.fullscreen().is_some(), window.is_maximized(), covering)
+}
+
+/// The frame of a window fullscreen or maximized as the platform knows, else fullscreen when it
+/// is `covering` its monitor; maximized windows cover it too where nothing else is on screen.
+fn frame_of(fullscreen: bool, maximized: bool, covering: impl FnOnce() -> bool) -> Frame {
+    match (fullscreen, maximized) {
+        (true, _) => Frame::Fullscreen,
+        (_, true) => Frame::Maximized,
+        _ if covering() => Frame::Fullscreen,
+        _ => Frame::Normal,
+    }
+}
+
+/// What the restore button of a window drawn in `frame` does, when the platform knows it to be
+/// `fullscreen` or not.
+#[derive(Debug, PartialEq, Eq)]
+enum Restore {
+    LeaveFullscreen,
+    /// Leave a fullscreen the window manager made, which the platform did not see.
+    LeaveOtherFullscreen,
+    ToggleMaximized,
+}
+
+fn restore(frame: Frame, fullscreen: bool) -> Restore {
+    match (fullscreen, frame) {
+        (true, _) => Restore::LeaveFullscreen,
+        (false, Frame::Fullscreen) => Restore::LeaveOtherFullscreen,
+        _ => Restore::ToggleMaximized,
+    }
+}
+
+/// Whether a window at `outer` is exactly the monitor at `screen`, both known.
+fn covers(
+    outer: Option<(PhysicalPosition<i32>, PhysicalSize<u32>)>,
+    screen: Option<(PhysicalPosition<i32>, PhysicalSize<u32>)>,
+) -> bool {
+    outer.is_some() && outer == screen
+}
+
 /// Show or hide the caption, and fit the terminals in their panels below the bar.
 ///
 /// The window's state is only queried on `resize`, since that is slow on some platforms.
@@ -1364,12 +1445,9 @@ fn sync(ctx: &mut WindowContext, config: &Rc<UiConfig>, resize: bool) {
         }
     }
 
-    let window = ctx.display.window.winit();
-    let frame = match (resize || ctx.display.tabs.configs.is_none(), window) {
-        (false, _) => ctx.display.tabs.frame,
-        (_, window) if window.fullscreen().is_some() => Frame::Fullscreen,
-        (_, window) if window.is_maximized() => Frame::Maximized,
-        _ => Frame::Normal,
+    let frame = match resize || ctx.display.tabs.configs.is_none() {
+        true => frame(ctx.display.window.winit()),
+        false => ctx.display.tabs.frame,
     };
     let px = |value: f32| (value * ctx.display.window.scale_factor as f32).round() as u32;
     // Without its panel the terminal fills the window, its text still lined up with the logo.
@@ -1689,11 +1767,24 @@ fn click(
         (Hit::Previous, MouseButton::Left) => run(ctx, Command::Previous, config, proxy),
         (Hit::Next, MouseButton::Left) => run(ctx, Command::Next, config, proxy),
         (Hit::Minimize, MouseButton::Left) => ctx.display.window.set_minimized(true),
-        // The restore button leaves fullscreen.
-        (Hit::Maximize, MouseButton::Left) if ctx.display.tabs.frame == Frame::Fullscreen => {
-            ctx.display.window.toggle_fullscreen()
+        // The restore button leaves fullscreen, else maximizes or restores.
+        (Hit::Maximize, MouseButton::Left) => {
+            let display = &ctx.display.window;
+            match restore(ctx.display.tabs.frame, window.fullscreen().is_some()) {
+                Restore::LeaveFullscreen => display.set_fullscreen(false),
+                // The platform leaves only a fullscreen it entered itself, and the window goes
+                // back to where it was before.
+                Restore::LeaveOtherFullscreen => {
+                    display.set_fullscreen(true);
+                    display.set_fullscreen(false);
+                    if let Some((position, size)) = ctx.display.tabs.placed[0] {
+                        let _ = window.request_inner_size(size);
+                        window.set_outer_position(position);
+                    }
+                },
+                Restore::ToggleMaximized => display.toggle_maximized(),
+            }
         },
-        (Hit::Maximize, MouseButton::Left) => ctx.display.window.toggle_maximized(),
         (Hit::CloseWindow, MouseButton::Left) => close(ctx, usize::MAX, config),
         (Hit::Resize(direction), MouseButton::Left) => {
             let _ = window.drag_resize_window(direction);
@@ -2400,6 +2491,39 @@ mod tests {
             assert_eq!(fullscreen.spacing(), maximized.spacing());
             assert_eq!(fullscreen.margin() > 0., panel);
         }
+    }
+
+    #[test]
+    fn a_window_covering_its_monitor_is_fullscreen() {
+        let at = |x, y, w, h| Some((PhysicalPosition::new(x, y), PhysicalSize::new(w, h)));
+        let screen = at(1920, 0, 2560, 1440);
+        assert!(covers(at(1920, 0, 2560, 1440), screen));
+        // Maximized below a panel, or the right size on another monitor, is not.
+        assert!(!covers(at(1920, 32, 2560, 1408), screen));
+        assert!(!covers(at(0, 0, 2560, 1440), screen));
+        // Unknown places, as on Wayland, which reports fullscreen itself.
+        assert!(!covers(None, None));
+        assert!(!covers(None, screen));
+    }
+
+    #[test]
+    fn frames_and_what_restore_does() {
+        use Frame::*;
+        // What the platform knows wins; covering the monitor counts only unmaximized.
+        for (fullscreen, maximized, covering, frame) in [
+            (true, false, true, Fullscreen),
+            (true, true, true, Fullscreen),
+            (false, true, true, Maximized),
+            (false, true, false, Maximized),
+            (false, false, true, Fullscreen),
+            (false, false, false, Normal),
+        ] {
+            assert_eq!(frame_of(fullscreen, maximized, || covering), frame);
+        }
+        assert_eq!(restore(Fullscreen, true), Restore::LeaveFullscreen);
+        assert_eq!(restore(Fullscreen, false), Restore::LeaveOtherFullscreen);
+        assert_eq!(restore(Maximized, false), Restore::ToggleMaximized);
+        assert_eq!(restore(Normal, false), Restore::ToggleMaximized);
     }
 
     #[test]

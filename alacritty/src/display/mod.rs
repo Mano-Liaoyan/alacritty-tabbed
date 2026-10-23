@@ -646,7 +646,6 @@ impl Display {
     }
 
     /// Cell width and height of `font`, with the cell offsets of `config`.
-    #[allow(dead_code, reason = "fits panes in their own font once tabs use it")]
     pub fn cell_size(&mut self, config: &UiConfig, font: &Font) -> (f32, f32) {
         self.with_font(font, |display| {
             compute_cell_size(config, &display.glyph_cache.font_metrics())

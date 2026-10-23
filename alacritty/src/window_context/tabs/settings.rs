@@ -5,7 +5,6 @@
 //! changes take effect when they are saved.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::mpsc::{Receiver, TryRecvError, channel};
 
 use winit::dpi::PhysicalPosition;
@@ -23,7 +22,7 @@ use crate::display::window::Window;
 use super::app_settings::{self, AppSettings};
 use super::bar::{ITEM_RADIUS, Layout, PANEL_RADIUS, RADIUS, TRACK_RADIUS};
 use super::fonts::{self, Family};
-use super::paint::{BLACK, Image, Layer, Palette, Rect, mix};
+use super::paint::{BLACK, Layer, Palette, Rect, mix};
 use super::profiles::{self, Profile, Profiles};
 use super::text::UiFont;
 use super::{icons, platform};
@@ -363,18 +362,6 @@ fn segments(track: Rect, widths: &[f32], inset: f32) -> Vec<Rect> {
             Rect { x, w: (inner.x + end * scale).round() - x, ..inner }
         })
         .collect()
-}
-
-/// The image an icon setting names: Alacritty's logo, a bundled logo or a file; none for empty.
-fn icon_image(icon: &str) -> Option<Arc<Image>> {
-    match icon.trim() {
-        "" => None,
-        "alacritty" => Some(icons::logo()),
-        icon => match icon.strip_prefix(icons::BUNDLED_PREFIX) {
-            Some(name) => icons::named(name),
-            None => icons::get(Some(Path::new(&profiles::expand(icon))), ""),
-        },
-    }
 }
 
 /// What the logo picker chooses an icon for.
@@ -2503,7 +2490,7 @@ impl Settings {
                     };
                     layer.outlined(rect, layout.radius(7.), palette.field, outline, line);
                     let (icon, opacity) = (rect.square(px(20.)), if enabled { 1. } else { 0.4 });
-                    match icon_image(&self.edited.brand.icon) {
+                    match icons::brand(&self.edited.brand.icon) {
                         Some(image) => layer.image_alpha(icon, &image, palette.foreground, opacity),
                         None => none_glyph(layer, icon, palette.muted, palette.field, line),
                     }
@@ -2718,7 +2705,7 @@ impl Settings {
                     popup.rounded(item, radius, surface);
                 }
                 let icon = item.square(px(26.));
-                match (kind, icon_image(&kind.icon(index))) {
+                match (kind, icons::brand(&kind.icon(index))) {
                     (_, Some(image)) => popup.image(icon, &image, palette.foreground),
                     (Logos::Profile, None) => {
                         let own = Profile { icon: String::new(), ..profile.clone() };

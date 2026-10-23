@@ -284,7 +284,6 @@ impl Processor {
                 | WindowEvent::Destroyed
                 | WindowEvent::ThemeChanged(_)
                 | WindowEvent::HoveredFile(_)
-                | WindowEvent::Moved(_)
         )
     }
 }
@@ -405,6 +404,7 @@ impl ApplicationHandler<Event> for Processor {
                     } else {
                         window_context.add_window_config(self.config.clone(), &options);
                     }
+                    tabs::reconfigure(window_context, &self.config);
                 }
 
                 // Persist global options for future windows.
@@ -471,6 +471,7 @@ impl ApplicationHandler<Event> for Processor {
 
                     for window_context in self.windows.values_mut() {
                         window_context.update_config(self.config.clone());
+                        tabs::reconfigure(window_context, &self.config);
                     }
                 }
             },

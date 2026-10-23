@@ -5,7 +5,7 @@ is a soft fork of [Alacritty](https://github.com/alacritty/alacritty) that adds
 tabs, shell profiles and a settings panel on Windows, Linux and macOS. It is not
 an official Alacritty release. Upstream's README follows the fork notes below.
 
-![Tabs in the caption, with the new-tab menu open](docs/tabs/tabs.png)
+![A tab group of three panes beside two tabs, one pane showing its controls](docs/tabs/tabs.png)
 
 ## Features
 
@@ -14,10 +14,11 @@ and computer name, the tabs on a rounded track, the + button with its profile
 menu, settings, and the window controls share one row, and the terminal sits in
 a rounded panel below it. Drag the empty bar to move the window, double-click it
 to maximize, right-click it for the system menu (Windows and Wayland), and drag
-the edges to resize. Fullscreen keeps the bar and fills the rest of the screen
-with the terminal. The layout is the same everywhere; the window controls take
-each system's look: flat buttons on Windows, round ones on Linux, and the red,
-yellow and green lights on macOS.
+the edges to resize. Fullscreen keeps the bar and lays out the panes as when
+maximized: the panel, the gap between panes and the rounded cards all stay.
+The layout is the same everywhere; the window controls take each system's look:
+flat buttons on Windows, round ones on Linux, and the red, yellow and green
+lights on macOS.
 
 **Tabs.** Each tab is a full Alacritty terminal with its own PTY and state;
 the tabs of a window share its renderer. Drag tabs to reorder them, close them
@@ -27,8 +28,8 @@ with × or a middle click, and scroll over the bar to switch.
 or stacked, like tmux's windows. Each pane is its own terminal with its own
 profile; panes in the background keep running and drawing. The focused pane has
 a lit border, and a grouped tab shows its panes' logos stacked like cards, the
-focused one in front. Groups have no size limit: past four panes the stack
-shows three cards and a "+N" count.
+focused one in front. Groups have no size limit: up to five panes show as
+cards, and past five the stack shows five cards and a "+N" count.
 
 - **Group** tabs by dragging one onto the middle of another, or of a group.
 - **Split** by dragging a tab into the terminal: it docks beside the pane under
@@ -36,8 +37,8 @@ shows three cards and a "+N" count.
   stacked; a preview shows where it will land. A group dragged there docks as it
   is. The tab dragged is shown while it is pressed, so pick the tab to dock into
   first.
-- **Rearrange** by dragging a pane's logo from its tab's stack, the ••• handle
-  on top of a pane, or anywhere on a pane with Ctrl+Alt held (⌘⌥ on macOS;
+- **Rearrange** by dragging a pane's logo from its tab's stack, the ••• grip
+  of its controls, or anywhere on a pane with Ctrl+Alt held (⌘⌥ on macOS;
   plain Ctrl+drag still selects a block): into the terminal to dock it beside
   another pane, onto another tab to move it there, or between tabs to make it a
   tab of its own again. Merging is refused when a pane would get too small.
@@ -45,16 +46,27 @@ shows three cards and a "+N" count.
   new window and keeps running. "Move … to New Window" in the menus does the
   same.
 - **Resize** by dragging the divider between two panes; double-click it to go
-  back to half and half. Ctrl+Shift+Z (Cmd+Shift+Enter on macOS) or "Zoom
-  Pane" zooms the focused pane to the whole tab and back.
+  back to half and half. Ctrl+Shift+Z (Cmd+Shift+Enter on macOS), "Zoom
+  Pane" or the zoom button of a pane's controls zooms the pane to the whole tab
+  and back.
+- **Pane controls** appear at the top of a pane, just inside it, when the
+  pointer comes near (and on every pane while Ctrl+Alt is held): the ••• grip
+  to drag it, and a zoom button, which turns into an unzoom button in the same
+  place while the pane is zoomed.
+- **Text size per pane:** Ctrl+mouse wheel over the focused pane, or Ctrl+= /
+  Ctrl+− / Ctrl+0 (⌘ instead of Ctrl on macOS), makes only that pane's text
+  larger or smaller, from half to four times its size, with a short "120 %"
+  sign. The size stays with the pane while it lives, also when torn off, but is
+  never saved to the profile or `alacritty.toml`. Ctrl+0 (⌘0) or "Reset Text
+  Size" in the pane's menu goes back.
 - **Hover** a tab's stack to fan its logos out; large groups wrap into a shelf
   below the bar. Resting on a logo shows its pane's own title, and for a pane
   that is not on screen a live preview of it. Click a logo to focus its pane.
 - **Right-click** a pane for its menu: Split Vertically (side by side), Split
-  Horizontally (stacked), Zoom Pane, Move Pane to New Tab, Move Pane to New
-  Window and Close Pane. Arrow keys, Enter and Escape work. When the program in
-  the pane takes the mouse, hold Shift; Ctrl+right-click still expands the
-  selection.
+  Horizontally (stacked), Zoom Pane, Reset Text Size (when its text is zoomed),
+  Move Pane to New Tab, Move Pane to New Window and Close Pane. Arrow keys,
+  Enter and Escape work. When the program in the pane takes the mouse, hold
+  Shift; Ctrl+right-click still expands the selection.
 - **Right-click** a tab for its menu: Rename Group… (or double-click the
   title), Reset Name, Ungroup, Move Tab to New Window and Close Tab.
 - Click a pane to focus it. Ctrl+Shift+W closes the focused pane; × and a
@@ -70,6 +82,45 @@ pane_gap = 16                # Logical pixels between panes, 0 to 48.
 pane_highlight = "#ff9500"   # Leave out for the terminal's blue.
 ```
 
+**Pin the tab bar.** The pin left of the settings gear keeps the bar shown.
+Unpinned, the panes take the whole window and the bar slides in over them when
+the pointer rests at the top edge, during a drag or a keyboard tab action, and
+slides away again once the pointer leaves it; the terminals are not resized as
+it comes and goes. The choice is saved to `alacritty.toml` for every window.
+
+**Logo.** Under Appearance, hide the logo and names at the top left, or pick
+another logo (Alacritty's, none, or a bundled one) and change the two names;
+`{host}` stands for the computer's name. An SVG or PNG file can be set in
+`alacritty.toml`.
+
+**Restore session.** Under General in the settings, choose whether Alacritty
+reopens its windows when it starts: **Off** (the default), **Layout** (windows,
+their size and place, tabs, names, splits, zoom, each pane's profile, directory
+and text size) or **Layout and text** (also the last 2,000 lines of each pane).
+The session is saved when the last window is closed as a window (with the other
+windows closed in the two seconds before it, as on logging out) and forgotten
+when the last tab or shell is closed instead. Programs are not resumed: each
+pane starts a new shell in its directory, below its restored text. Only a plain
+`alacritty` launch restores, without `-e`, `--working-directory`, `--hold` or
+daemon mode. The saved text may hold secrets you typed: it stays on this
+computer, readable only by you on Linux and macOS, in
+`$XDG_STATE_HOME/alacritty/session.json` (`~/.local/state/alacritty/` by
+default; `%LOCALAPPDATA%\alacritty\session.json` on Windows), and is deleted
+once restored.
+
+```toml
+[window]
+restore_session = "off"  # "off", "layout" or "text" (layout and text).
+pin_tab_bar = true       # false: the tab bar slides in at the top edge.
+wheel_zoom = true        # Ctrl+wheel (Cmd+wheel on macOS) zooms the focused pane's text.
+
+[window.brand]
+show = true              # The logo and names at the top left of the tab bar.
+icon = "alacritty"       # "alacritty", "" (none), "bundled:<name>" or an .svg/.png path.
+title = "Alacritty"      # "" hides the line.
+subtitle = "{host}"      # {host} is the computer's name; "" hides the line.
+```
+
 Panes slide and pop into place with Hyprland-like curves. Set
 `ALACRITTY_ANIMATION_SCALE` to slow them down (`4` is four times slower) or to
 `0` to turn them off.
@@ -82,11 +133,12 @@ About 40 common shells, tools, languages and WSL distributions have bundled logo
 where the system has none, and other programs get a terminal. A profile can set its own SVG or PNG, or an emoji.
 
 **Settings panel.** Like Windows Terminal's, the settings list the
-application's pages above the profiles. The gear opens **Appearance**: the
+application's pages above the profiles. **General** holds the session restore,
+the pinned tab bar and Ctrl+wheel text zoom. The gear opens **Appearance**: the
 corners, the interface font and its size, the background opacity, the
-terminal panel, the pane gap, the focus highlight and the tab track, saved to
-`alacritty.toml` (changing only those keys, and keeping its comments) and
-applied to every window. "Edit profiles…" in the ⌄ menu opens the profiles:
+terminal panel, the pane gap, the focus highlight, the tab track and the logo,
+saved to `alacritty.toml` (changing only those keys, and keeping its comments)
+and applied to every window. "Edit profiles…" in the ⌄ menu opens the profiles:
 name, icon, command line, starting directory, font, environment variables, configuration overrides,
 the default profile, and whether a profile shows in the menu. The font field
 lists the system's monospaced fonts as you type; "Show all fonts" lists every
@@ -96,7 +148,7 @@ system's file pickers. Profiles can be added, duplicated, deleted, and dragged
 to reorder them. They are saved to `profiles.toml` beside `alacritty.toml`,
 which can also be edited by hand.
 
-![Profile settings](docs/tabs/settings.png)
+![Settings, General page](docs/tabs/settings.png)
 
 **Interface font.** The bar, its menus and the settings use a proportional
 interface font of their own, apart from the terminal's font: the system's
