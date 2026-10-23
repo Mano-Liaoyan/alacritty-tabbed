@@ -32,7 +32,7 @@ use winit::platform::windows::{CornerPreference, WindowAttributesExtWindows, Win
 use winit::window::{Window, WindowAttributes};
 
 use super::paint::Image;
-use super::profiles::Profile;
+use super::profiles::{self, Profile};
 
 /// Draw the caption in the tab bar, keeping the system's shadow and rounded corners.
 pub fn attributes(attributes: WindowAttributes) -> WindowAttributes {
@@ -75,7 +75,7 @@ pub fn shells() -> Vec<Profile> {
         list.push(Profile::new("Git Bash", &format!("\"{git_bash}\" --login -i")));
     }
     for (name, ..) in distributions() {
-        list.push(Profile::new(&name, &format!("wsl.exe -d \"{name}\" --cd ~")));
+        list.push(Profile::new(&name, &profiles::wsl_command(&name)));
     }
     list
 }
