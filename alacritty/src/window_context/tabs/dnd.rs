@@ -10,14 +10,14 @@ use std::rc::Rc;
 use winit::dpi::PhysicalPosition;
 use winit::event::KeyEvent;
 use winit::keyboard::{Key, NamedKey};
-use winit::window::CursorIcon;
+use winit::window::{CursorIcon, WindowId};
 
 use crate::config::UiConfig;
 use crate::window_context::WindowContext;
 
 use super::bar::{Hit, Layout};
 use super::paint::Rect;
-use super::split::{self, Axis, Side};
+use super::split::{self, Axis, Side, Split};
 use super::{merge, move_pane, redraw, reorder, select};
 
 /// What is being dragged.
@@ -64,6 +64,8 @@ struct Scene {
     /// The tab whose panes are shown.
     shown: usize,
     panes: Vec<(usize, Rect)>,
+    /// The panes a dock would add, as they are laid out.
+    docked: Option<Split<WindowId>>,
     /// Smallest size a pane may be split to.
     min: (f32, f32),
 }
@@ -80,10 +82,14 @@ impl Scene {
         if y >= self.bar {
             let &(index, rect) = self.panes.iter().find(|(_, rect)| rect.contains(pointer))?;
             let (axis, side) = split::drop_zone(rect, (x, y));
+            let fits = self
+                .docked
+                .as_ref()
+                .is_some_and(|new| split::fits(rect, axis, side, new, self.min));
             return match pane {
                 None if self.shown == from => None,
                 Some(pane) if (self.shown, index) == (from, pane) => None,
-                _ if !split::fits(rect, axis, self.min) => None,
+                _ if !fits => None,
                 _ => Some(Target::Dock { pane: index, axis, side }),
             };
         }
@@ -147,7 +153,7 @@ pub fn moved(ctx: &mut WindowContext, layout: &Layout, config: &Rc<UiConfig>) {
         }
     }
 
-    let scene = scene(ctx, layout);
+    let scene = scene(ctx, layout, source);
     let tabs = &mut ctx.display.tabs;
     let target = scene.target(source, pointer);
     let Some(drag) = &mut tabs.drag else { return };
@@ -161,8 +167,14 @@ pub fn moved(ctx: &mut WindowContext, layout: &Layout, config: &Rc<UiConfig>) {
 }
 
 /// The places to drop onto, as the window is now.
-fn scene(ctx: &WindowContext, layout: &Layout) -> Scene {
+fn scene(ctx: &WindowContext, layout: &Layout, source: Source) -> Scene {
     let tabs = &ctx.display.tabs;
+    let docked = match source {
+        Source::Tab(tab) => tabs.tabs.get(tab).map(|tab| tab.layout.clone()),
+        Source::Pane(tab, pane) => {
+            tabs.tabs.get(tab).and_then(|tab| tab.panes.get(pane)).map(|pane| Split::Pane(pane.id))
+        },
+    };
     let shown = (layout.first..).map_while(|index| Some((index, layout.tab(index)?)));
     let size = &ctx.display.size_info;
     Scene {
@@ -170,6 +182,7 @@ fn scene(ctx: &WindowContext, layout: &Layout) -> Scene {
         tabs: shown.collect(),
         shown: tabs.active,
         panes: tabs.pane_rects(),
+        docked,
         min: (
             split::MIN_COLUMNS * size.cell_width() + 2. * size.padding_x(),
             split::MIN_LINES * size.cell_height() + 2. * size.padding_y(),
@@ -238,6 +251,7 @@ mod tests {
             tabs: (0..3).map(tab).collect(),
             shown: 1,
             panes: vec![(0, Rect::new(0., 40., 400., 300.)), (1, Rect::new(400., 40., 400., 300.))],
+            docked: Some(Split::Pane(WindowId::from(9))),
             min: (100., 50.),
         }
     }
@@ -297,6 +311,16 @@ mod tests {
         assert_eq!(small.target(Source::Tab(0), at(30., 190.)), None);
         assert_eq!(
             small.target(Source::Tab(0), at(200., 60.)),
+            dock(0, Axis::Column, Side::Before)
+        );
+        // A group docks only where each of its panes keeps the smallest size.
+        let pane = |id: u64| Split::Pane(WindowId::from(id));
+        let group = pane(8).join(pane(9), Axis::Row, Side::After);
+        let grouped = Scene { docked: Some(group), ..small };
+        assert_eq!(grouped.target(Source::Tab(0), at(200., 60.)), None);
+        let roomy = Scene { min: (100., 50.), ..grouped };
+        assert_eq!(
+            roomy.target(Source::Tab(0), at(200., 60.)),
             dock(0, Axis::Column, Side::Before)
         );
     }
