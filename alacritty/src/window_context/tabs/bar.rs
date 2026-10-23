@@ -18,7 +18,7 @@ use winit::dpi::PhysicalPosition;
 use winit::window::{ResizeDirection, WindowId};
 
 use crate::config::UiConfig;
-use crate::config::window::{Brand, Corners};
+use crate::config::window::tabbed::{Brand, Corners};
 use crate::display::SizeInfo;
 use crate::display::color::Rgb;
 use crate::display::window::Window;
@@ -174,9 +174,11 @@ impl Layout {
         // the edge of the panes' cards below, as the window's controls end at it on the right.
         // macOS puts it beside its window buttons instead.
         let left = if mac { lights + px(7.) } else { margin };
-        let on_track = tabs.configs.as_ref().is_none_or(|(config, _)| config.window.tab_track);
+        let on_track =
+            tabs.configs.as_ref().is_none_or(|(config, _)| config.window.tabbed.tab_track);
         let default = Brand::default();
-        let config = tabs.configs.as_ref().map_or(&default, |(config, _)| &config.window.brand);
+        let config =
+            tabs.configs.as_ref().map_or(&default, |(config, _)| &config.window.tabbed.brand);
         let image = config.show.then(|| icons::brand(&config.icon)).flatten();
         let names: Vec<_> = [(&config.title, true), (&config.subtitle, false)]
             .into_iter()
@@ -834,7 +836,7 @@ impl Tabs {
         let layout = Layout::new(self);
         self.first = layout.first;
         let mut palette = Palette::new(&config.colors);
-        palette.highlight = config.window.pane_highlight.unwrap_or(palette.primary);
+        palette.highlight = config.window.tabbed.pane_highlight.unwrap_or(palette.primary);
         let (font, line_height) = (&*layout.font, layout.line);
         let (bar, width) = (layout.bar, layout.width);
         let px = |value: f32| layout.px(value);
@@ -878,7 +880,7 @@ impl Tabs {
 
         // Tabs on a track, or on the bar itself, the active one raised from it.
         let radius = layout.radius(TRACK_RADIUS);
-        let (on_track, tiles) = (config.window.tab_track, config.window.icon_tiles);
+        let (on_track, tiles) = (config.window.tabbed.tab_track, config.window.tabbed.icon_tiles);
         let track = if on_track { palette.track } else { palette.chrome };
         if on_track && !layout.tabs.is_empty() {
             base.outlined(layout.track, radius, track, palette.track_outline, line);

@@ -14,7 +14,7 @@ use winit::keyboard::{Key, ModifiersState, NamedKey};
 use alacritty_terminal::index::{Column, Point};
 
 use crate::config::UiConfig;
-use crate::config::window::{Corners, MAX_PANE_GAP, RestoreSession};
+use crate::config::window::tabbed::{Corners, MAX_PANE_GAP, RestoreSession};
 use crate::display::SizeInfo;
 use crate::display::color::Rgb;
 use crate::display::window::Window;
@@ -3521,7 +3521,7 @@ mod tests {
         // Nor does saving a logo title with spaces around it, unedited.
         let spaced = "[window.brand]\ntitle = \" Work \"\n";
         std::fs::write(&path, spaced).unwrap();
-        config.window.brand.title = " Work ".into();
+        config.window.tabbed.brand.title = " Work ".into();
         Settings::new(&config, Page::Appearance, || ()).save(&config);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), spaced);
     }

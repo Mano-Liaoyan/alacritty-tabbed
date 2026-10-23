@@ -6,7 +6,7 @@ use syn::{
     Data, DataStruct, DeriveInput, Error, Field, Fields, Generics, Ident, parse_macro_input,
 };
 
-use crate::{Attr, GenericsStreams, MULTIPLE_FLATTEN_ERROR};
+use crate::{Attr, GenericsStreams};
 
 /// Error if the derive was used on an unsupported type.
 const UNSUPPORTED_ERROR: &str = "SerdeReplace must be used on a tuple struct";
@@ -96,7 +96,14 @@ fn match_arms<T>(fields: &Punctuated<Field, T>) -> Result<TokenStream2, syn::Err
             .any(|parsed| parsed.ident.as_str() == "flatten");
 
         if flatten && flattened_arm.is_some() {
-            return Err(Error::new(ident.span(), MULTIPLE_FLATTEN_ERROR));
+            // Flattened fields after the first only take their own keys.
+            let ty = &field.ty;
+            stream.extend(quote! {
+                key if <#ty>::CONFIG_KEYS.contains(&key) => {
+                    let table = toml::Table::from_iter([(field.clone(), next_value)]);
+                    alacritty_config::SerdeReplace::replace(&mut self.#ident, table.into())?
+                },
+            });
         } else if flatten {
             flattened_arm = Some(quote! {
                 _ => alacritty_config::SerdeReplace::replace(&mut self.#ident, value)?,
