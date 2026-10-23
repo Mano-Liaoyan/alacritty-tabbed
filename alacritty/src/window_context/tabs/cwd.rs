@@ -350,16 +350,17 @@ mod process {
     use std::{mem, ptr};
 
     use windows_sys::Wdk::System::Threading::{NtQueryInformationProcess, ProcessBasicInformation};
-    use windows_sys::Win32::Foundation::{CloseHandle, FILETIME, HANDLE, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Foundation::{CloseHandle, FILETIME, HANDLE};
     use windows_sys::Win32::System::Diagnostics::Debug::ReadProcessMemory;
-    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
-        CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
-        TH32CS_SNAPPROCESS,
-    };
     use windows_sys::Win32::System::Threading::{
         GetProcessTimes, IsWow64Process, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
         PROCESS_VM_READ,
     };
+
+    use crate::window_context::tabs::job;
+
+    /// Console hosts, which console programs started without a console have as children.
+    const HOSTS: [&str; 2] = ["conhost.exe", "openconsole.exe"];
 
     /// Deepest generation of processes followed below the shell.
     const MAX_DEPTH: usize = 8;
@@ -473,26 +474,13 @@ mod process {
     /// Process ids and their parents' ids, of every running process but console hosts, which
     /// console programs started without a console have as children.
     fn processes() -> Vec<(u32, u32)> {
-        let mut list = Vec::new();
-        unsafe {
-            let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-            if snapshot == INVALID_HANDLE_VALUE {
-                return list;
-            }
-            let mut entry: PROCESSENTRY32W = mem::zeroed();
-            entry.dwSize = mem::size_of::<PROCESSENTRY32W>() as u32;
-            let mut more = Process32FirstW(snapshot, &mut entry) != 0;
-            while more {
-                let len = entry.szExeFile.iter().position(|&c| c == 0).unwrap_or(260);
-                let name = String::from_utf16_lossy(&entry.szExeFile[..len]).to_lowercase();
-                if name != "conhost.exe" && name != "openconsole.exe" {
-                    list.push((entry.th32ProcessID, entry.th32ParentProcessID));
-                }
-                more = Process32NextW(snapshot, &mut entry) != 0;
-            }
-            CloseHandle(snapshot);
-        }
-        list
+        let host = |name: &str| HOSTS.iter().any(|host| host.eq_ignore_ascii_case(name));
+        let processes = job::processes().unwrap_or_default();
+        processes
+            .into_iter()
+            .filter(|(.., name)| !host(name))
+            .map(|(pid, parent, _)| (pid, parent))
+            .collect()
     }
 
     pub fn directory(pid: u32) -> Option<PathBuf> {

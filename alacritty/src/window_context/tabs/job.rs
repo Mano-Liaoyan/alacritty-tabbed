@@ -90,6 +90,9 @@ fn descendant(
 }
 
 #[cfg(windows)]
+pub use windows::processes;
+
+#[cfg(windows)]
 mod windows {
     use std::mem;
 
