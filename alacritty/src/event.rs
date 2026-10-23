@@ -63,7 +63,8 @@ use crate::message_bar::{Message, MessageBuffer};
 #[cfg(unix)]
 use crate::polling::ipc::{self, SocketReply};
 use crate::scheduler::{Scheduler, TimerId, Topic};
-use crate::window_context::{WindowContext, tabs};
+use crate::window_context::WindowContext;
+use crate::window_context::tabs::{self, Torn};
 
 /// Duration after the last user input until an unlimited search is performed.
 pub const TYPING_SEARCH_DELAY: Duration = Duration::from_millis(500);
@@ -194,6 +195,27 @@ impl Processor {
         Ok(())
     }
 
+    /// Create a window for the tab `torn` off the window `source`, which gets it back on failure.
+    fn create_torn_window(&mut self, event_loop: &ActiveEventLoop, source: WindowId, torn: Torn) {
+        // No context may be current while a window is created, as for `CreateWindow`.
+        for window_context in self.windows.values_mut() {
+            window_context.display.make_not_current();
+        }
+
+        let gl_config = self.gl_config.as_ref().expect("windows share the first one's config");
+        match WindowContext::torn(gl_config, event_loop, self.config.clone(), torn) {
+            Ok(window_context) => {
+                self.windows.insert(window_context.id(), window_context);
+            },
+            Err((err, torn)) => {
+                error!("Could not open a window for the tab: {err:?}");
+                if let Some(window_context) = self.windows.get_mut(&source) {
+                    torn.restore(window_context, &self.config);
+                }
+            },
+        }
+    }
+
     /// Run the event loop.
     ///
     /// The result is exit code generate from the loop.
@@ -248,7 +270,7 @@ impl ApplicationHandler<Event> for Processor {
 
     fn window_event(
         &mut self,
-        _event_loop: &ActiveEventLoop,
+        event_loop: &ActiveEventLoop,
         window_id: WindowId,
         event: WindowEvent,
     ) {
@@ -268,21 +290,26 @@ impl ApplicationHandler<Event> for Processor {
 
         let (config, proxy, clipboard) = (&self.config, &self.proxy, &mut self.clipboard);
         let event = tabs::window_event(window_context, event, config, proxy, clipboard);
-        let Some(event) = event else { return };
+        if let Some(event) = event {
+            let is_redraw = matches!(event, WindowEvent::RedrawRequested);
 
-        let is_redraw = matches!(event, WindowEvent::RedrawRequested);
+            window_context.handle_event(
+                #[cfg(target_os = "macos")]
+                event_loop,
+                &self.proxy,
+                &mut self.clipboard,
+                &mut self.scheduler,
+                WinitEvent::WindowEvent { window_id, event },
+            );
 
-        window_context.handle_event(
-            #[cfg(target_os = "macos")]
-            _event_loop,
-            &self.proxy,
-            &mut self.clipboard,
-            &mut self.scheduler,
-            WinitEvent::WindowEvent { window_id, event },
-        );
+            if is_redraw {
+                window_context.draw(&mut self.scheduler);
+            }
+        }
 
-        if is_redraw {
-            window_context.draw(&mut self.scheduler);
+        // A tab torn off the window, by a drag or a menu, gets a window of its own.
+        if let Some(torn) = tabs::take_torn(window_context) {
+            self.create_torn_window(event_loop, window_id, torn);
         }
     }
 

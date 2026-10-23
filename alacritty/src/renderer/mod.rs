@@ -122,6 +122,18 @@ impl Frame {
         Self { clip: frame.area(size), ..frame }
     }
 
+    /// This frame, drawing nothing outside `[x, y, width, height]` either, in window pixels from
+    /// the top left of a window `window_height` pixels tall.
+    pub fn clipped(self, [x, y, width, height]: [f32; 4], window_height: f32) -> Self {
+        let [left, bottom, clip_width, clip_height] = self.clip;
+        let (right, top) = (left + clip_width, bottom + clip_height);
+        let left = (x.round() as i32).max(left);
+        let bottom = ((window_height - y - height).round() as i32).max(bottom);
+        let right = ((x + width).round() as i32).min(right);
+        let top = ((window_height - y).round() as i32).min(top);
+        Self { clip: [left, bottom, (right - left).max(0), (top - bottom).max(0)], ..self }
+    }
+
     /// Viewport `[x, y, width, height]` of the whole of `size`, padding included, with its edges
     /// rounded to whole pixels.
     fn area(&self, size: &SizeInfo) -> [i32; 4] {
@@ -571,5 +583,23 @@ mod tests {
         assert_eq!(frame.area(&size), frame.clip);
         let next = Frame::new(&size, [21., 20., 10.5, 50.], 100.);
         assert_eq!(next.clip[0], frame.clip[0] + frame.clip[2]);
+    }
+
+    #[test]
+    fn clipped_to_card() {
+        // A pane at [100, 40, 400, 300] of a 400 pixels tall window, its card inset by 8.
+        let size = size();
+        let frame = Frame::new(&size, [100., 40., 400., 300.], 400.);
+        assert_eq!(frame.clip, [100, 60, 400, 300]);
+        let card = frame.clipped([108., 48., 384., 284.], 400.);
+        assert_eq!(card.clip, [108, 68, 384, 284]);
+        // Only the clip changes, not where the terminal is drawn.
+        assert_eq!(card.area(&size), frame.area(&size));
+
+        // A rect reaching past the frame clips only where it overlaps.
+        assert_eq!(frame.clipped([0., 0., 150., 100.], 400.).clip, [100, 300, 50, 60]);
+        // Disjoint, nothing is drawn.
+        assert_eq!(frame.clipped([600., 0., 50., 50.], 400.).clip[2], 0);
+        assert_eq!(frame.clipped([200., 360., 50., 40.], 400.).clip[3], 0);
     }
 }
