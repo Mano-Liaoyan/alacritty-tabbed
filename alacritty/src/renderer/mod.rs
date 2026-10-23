@@ -115,7 +115,6 @@ impl Frame {
 
     /// Frame stretching `size` over `[x, y, width, height]`, in window pixels from the top left
     /// of a window `window_height` pixels tall.
-    #[cfg_attr(not(test), expect(dead_code, reason = "split panes are not drawn yet"))]
     pub fn new(size: &SizeInfo, [x, y, width, height]: [f32; 4], window_height: f32) -> Self {
         let y_bottom = window_height - y - height;
         let (sx, sy) = (width / size.width(), height / size.height());

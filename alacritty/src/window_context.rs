@@ -41,7 +41,9 @@ use crate::event::{
 #[cfg(unix)]
 use crate::logging::LOG_TARGET_IPC_CONFIG;
 use crate::message_bar::MessageBuffer;
+use crate::renderer::Frame;
 use crate::scheduler::Scheduler;
+use crate::window_context::tabs::Rect;
 use crate::{input, renderer};
 
 pub mod tabs;
@@ -389,15 +391,55 @@ impl WindowContext {
             }
         }
 
-        // Redraw the window.
-        let terminal = self.terminal.lock();
-        self.display.draw(
-            terminal,
-            scheduler,
-            &self.message_buffer,
-            &self.config,
-            &mut self.search_state,
-        );
+        // Redraw the window, with the other panes of the active tab beside the live terminal.
+        let now = Instant::now();
+        let tabs = &self.display.tabs;
+        let panes = tabs.background_panes(now);
+        let rect = tabs.focused_frame(now);
+        let size = self.display.size_info;
+        // A lone terminal at rest fills the window below the bar, as without tabs.
+        if panes.is_empty()
+            && rect == Rect::new(0., tabs.height as f32, size.width(), size.height())
+        {
+            let terminal = self.terminal.lock();
+            self.display.draw(
+                terminal,
+                scheduler,
+                &self.message_buffer,
+                &self.config,
+                &mut self.search_state,
+            );
+        } else {
+            let height = self.display.window.inner_size().height as f32;
+            self.display.begin(&self.config);
+            for pane in panes {
+                let frame = pane.frame;
+                let frame = Frame::new(&pane.size, [frame.x, frame.y, frame.w, frame.h], height);
+                // Only the live terminal has the focus, so the others show a hollow cursor.
+                let mut terminal = pane.terminal.lock();
+                terminal.is_focused = false;
+                self.display.draw_pane(terminal, pane.size, &pane.config, frame);
+            }
+            let frame = Frame::new(&size, [rect.x, rect.y, rect.w, rect.h], height);
+            self.display.draw_terminal(
+                self.terminal.lock(),
+                &self.message_buffer,
+                &self.config,
+                &mut self.search_state,
+                Some(frame),
+            );
+            self.display.present(scheduler, &self.config);
+        }
+
+        // Keep drawing while the panes or the tabs move, which drawing may have started, until
+        // a frame is drawn at rest.
+        if self.display.tabs.animating(now) {
+            if self.display.window.has_frame {
+                self.display.window.request_redraw();
+            } else {
+                self.dirty = true;
+            }
+        }
     }
 
     /// Process events for this terminal window.

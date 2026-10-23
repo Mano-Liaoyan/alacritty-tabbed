@@ -805,7 +805,6 @@ impl Display {
     /// Start drawing a window of several terminals, clearing all of it.
     ///
     /// Not needed when the window's own terminal is drawn without a frame, which clears it.
-    #[expect(dead_code, reason = "split panes are not drawn yet")]
     pub fn begin(&mut self, config: &UiConfig) {
         // Make sure this window's OpenGL context is active.
         self.make_current();
@@ -1071,7 +1070,6 @@ impl Display {
     /// Draw a terminal other than the window's own, which is `size` large, into `frame`.
     ///
     /// Only its cells, lines and cursor are drawn, in the colors of `config`.
-    #[expect(dead_code, reason = "split panes are not drawn yet")]
     pub fn draw_pane<T: EventListener>(
         &mut self,
         terminal: MutexGuard<'_, Term<T>>,

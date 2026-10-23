@@ -183,7 +183,6 @@ struct Pane<S = Session> {
 }
 
 /// A pane that is not live, to be drawn beside the live one.
-#[allow(dead_code)] // Until the panes are drawn.
 pub struct PaneDraw {
     pub terminal: Arc<FairMutex<Term<EventProxy>>>,
     /// The pane's configuration, with its profile's overrides and padding.
@@ -314,15 +313,15 @@ impl Tabs {
     }
 
     /// Where to draw the live terminal at `now`.
-    #[allow(dead_code)] // Until the panes are drawn.
     pub fn focused_frame(&self, now: Instant) -> Rect {
+        // The panes' chrome is drawn for the same moment as their terminals.
+        self.pane_effects.hold(now);
         let rect = self.focused_rect();
         let id = self.tabs.get(self.active).map(|tab| tab.pane().id);
         id.map_or(rect, |id| self.pane_effects.frame(id, rect, now))
     }
 
     /// The panes of the active tab other than the live one, and where to draw them at `now`.
-    #[allow(dead_code)] // Until the panes are drawn.
     pub fn background_panes(&self, now: Instant) -> Vec<PaneDraw> {
         let Some(tab) = self.tabs.get(self.active) else { return Vec::new() };
         let rects = tab.layout.rects(self.area()).into_iter().zip(&tab.panes);
@@ -858,7 +857,7 @@ pub fn route<S: BuildHasher>(
         return Some(Event::new(event.into(), window));
     }
 
-    // Other panes only answer the terminal and keep their title.
+    // Other panes only answer the terminal, keep their title and are redrawn when shown.
     let pane = &mut ctx.display.tabs.tabs[tab].panes[index];
     let session = pane.session.as_ref()?;
     let write = |text: String| session.notifier.notify(text.into_bytes());
@@ -870,6 +869,8 @@ pub fn route<S: BuildHasher>(
         TerminalEvent::ResetTitle if !session.preserve_title && window_config.dynamic_title => {
             pane.title = pane.name.clone()
         },
+        // Panes beside the live one are drawn with it.
+        TerminalEvent::Wakeup if tab == ctx.display.tabs.active => (),
         TerminalEvent::PtyWrite(text) => write(text),
         TerminalEvent::TextAreaSizeRequest(format) => write(format(session.size.into())),
         TerminalEvent::ColorRequest(index, format) => {
