@@ -4,6 +4,7 @@
 //! the dragged tab, or a pane let out of its group, between tabs. Below the bar, dropping onto a
 //! pane docks beside it, on the side nearest the pointer.
 
+use std::mem;
 use std::rc::Rc;
 
 use winit::dpi::PhysicalPosition;
@@ -17,7 +18,7 @@ use crate::window_context::WindowContext;
 use super::bar::{Hit, Layout};
 use super::paint::Rect;
 use super::split::{self, Axis, Side};
-use super::{merge, move_pane, redraw, select};
+use super::{merge, move_pane, redraw, reorder, select};
 
 /// What is being dragged.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -153,12 +154,13 @@ pub fn moved(ctx: &mut WindowContext, layout: &Layout, config: &Rc<UiConfig>) {
     let scene = scene(ctx, layout, source);
     let tabs = &mut ctx.display.tabs;
     let target = scene.target(source, pointer);
-    if let Some(drag) = &mut tabs.drag {
-        drag.target = target;
-    }
+    let Some(drag) = &mut tabs.drag else { return };
+    let changed = mem::replace(&mut drag.target, target) != target;
     ctx.display.window.set_mouse_cursor(CursorIcon::Grabbing);
     // A drop preview over the terminal repaints more than the bar.
-    ctx.display.damage_tracker.frame().mark_fully_damaged();
+    if changed || pointer.y >= f64::from(layout.bar) {
+        ctx.display.damage_tracker.frame().mark_fully_damaged();
+    }
     redraw(ctx);
 }
 
@@ -184,12 +186,14 @@ fn scene(ctx: &WindowContext, layout: &Layout, source: Source) -> Scene {
 /// End the drag where the pointer was released.
 pub fn release(ctx: &mut WindowContext, config: &Rc<UiConfig>) {
     let Some(drag) = ctx.display.tabs.drag.take() else { return };
+    if drag.moving {
+        ctx.display.window.set_mouse_cursor(CursorIcon::Default);
+        ctx.display.damage_tracker.frame().mark_fully_damaged();
+    }
     let tabs = &mut ctx.display.tabs;
     match (drag.source, drag.target) {
         (Source::Tab(from), Some(Target::Reorder(to))) if tabs.active == from => {
-            let tab = tabs.tabs.remove(from);
-            tabs.tabs.insert(to, tab);
-            tabs.active = to;
+            reorder(&mut tabs.tabs, &mut tabs.active, to)
         },
         (Source::Tab(from), Some(Target::Merge(into))) => merge(ctx, from, into, config),
         (Source::Tab(from), Some(target @ Target::Dock { .. })) => {
@@ -203,16 +207,21 @@ pub fn release(ctx: &mut WindowContext, config: &Rc<UiConfig>) {
     redraw(ctx);
 }
 
+/// End the drag without dropping anything, leaving the pressed tab selected, as by a click.
+pub fn cancel(ctx: &mut WindowContext, config: &Rc<UiConfig>) {
+    if let Some(drag) = &mut ctx.display.tabs.drag {
+        drag.target = None;
+        release(ctx, config);
+    }
+}
+
 /// Handle a key while dragging, returning whether it was used: escape drops nothing.
-pub fn key(ctx: &mut WindowContext, key: &KeyEvent) -> bool {
-    let tabs = &mut ctx.display.tabs;
-    let dragging = tabs.drag.as_ref().is_some_and(|drag| drag.moving);
+pub fn key(ctx: &mut WindowContext, key: &KeyEvent, config: &Rc<UiConfig>) -> bool {
+    let dragging = ctx.display.tabs.drag.as_ref().is_some_and(|drag| drag.moving);
     if !dragging || key.logical_key != Key::Named(NamedKey::Escape) {
         return false;
     }
-    tabs.drag = None;
-    ctx.display.damage_tracker.frame().mark_fully_damaged();
-    redraw(ctx);
+    cancel(ctx, config);
     true
 }
 

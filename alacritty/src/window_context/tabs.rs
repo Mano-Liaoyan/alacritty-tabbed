@@ -491,6 +491,13 @@ fn place<S>(
     true
 }
 
+/// Move the active tab to `to`, or the end when past it.
+fn reorder<S>(tabs: &mut Vec<Tab<S>>, active: &mut usize, to: usize) {
+    let tab = tabs.remove(*active);
+    *active = to.min(tabs.len());
+    tabs.insert(*active, tab);
+}
+
 /// Group the active tab with the tab `into`, which takes its place and its focus. Returns whether
 /// they were grouped.
 fn group<S>(tabs: &mut Vec<Tab<S>>, active: &mut usize, into: usize, area: Rect) -> bool {
@@ -679,7 +686,7 @@ pub fn window_event(
                 redraw(ctx);
                 return None;
             }
-            if context::key(ctx, key, config, proxy) || dnd::key(ctx, key) {
+            if context::key(ctx, key, config, proxy) || dnd::key(ctx, key, config) {
                 return None;
             }
             if ctx.display.tabs.menu.is_some() {
@@ -733,7 +740,11 @@ pub fn window_event(
             return Some(WindowEvent::CursorLeft { device_id });
         },
         WindowEvent::CursorLeft { .. } => hover(ctx, Hit::None),
-        WindowEvent::Focused(false) => context::unfocused(ctx),
+        // The release that would end a drag may never come once the window loses focus.
+        WindowEvent::Focused(false) => {
+            context::unfocused(ctx);
+            dnd::cancel(ctx, config);
+        },
         WindowEvent::MouseInput { state: ElementState::Released, .. } => {
             if let Some(settings) = &mut tabs.settings {
                 settings.release();
@@ -750,6 +761,10 @@ pub fn window_event(
                 Press::Swallowed => return None,
                 _ => (),
             }
+        },
+        // Other buttons wait for the one that drags to be released.
+        WindowEvent::MouseInput { .. } if tabs.drag.as_ref().is_some_and(|drag| drag.moving) => {
+            return None;
         },
         WindowEvent::MouseInput { button, .. } => {
             let pointer = tabs.pointer;
@@ -1445,6 +1460,7 @@ pub fn focus_pane(ctx: &mut WindowContext, tab: usize, pane: usize, config: &Rc<
     ctx.display.damage_tracker.frame().mark_fully_damaged();
     relayout(ctx);
     // Input reads the terminal through the display's size before the queued resize reaches it.
+    // Only after `relayout`, which queues that resize by comparing with the old size.
     if size != ctx.display.size_info {
         ctx.display.size_info = size;
         ctx.display.damage_tracker.resize(size.screen_lines(), size.columns());
@@ -1487,6 +1503,8 @@ pub fn merge(ctx: &mut WindowContext, from: usize, into: usize, config: &Rc<UiCo
 
 /// Close the pane `pane` of the tab `tab`, or the whole tab when it is its only pane.
 pub fn close_pane(ctx: &mut WindowContext, tab: usize, pane: usize, config: &Rc<UiConfig>) {
+    // A drag refers to tabs and panes by their place, which closing changes.
+    ctx.display.tabs.drag = None;
     let tabs = &ctx.display.tabs;
     if tabs.tabs.get(tab).is_none_or(|t| t.panes.len() < 2) {
         return close(ctx, tab, config);
@@ -1502,6 +1520,7 @@ pub fn close_pane(ctx: &mut WindowContext, tab: usize, pane: usize, config: &Rc<
 
 /// Close the tab at `index`, or the window with its last tab or an index past the tabs.
 fn close(ctx: &mut WindowContext, index: usize, config: &Rc<UiConfig>) {
+    ctx.display.tabs.drag = None;
     let len = ctx.display.tabs.tabs.len();
     if len <= 1 || index >= len {
         ctx.display.tabs.closing = true;
@@ -1668,6 +1687,14 @@ mod tests {
         // Reordering a tab of one pane keeps it whole.
         assert!(model.place((1, 0), Target::Reorder(0)));
         assert_eq!((model.ids(0), model.ids(1), model.active), (vec![3], vec![1, 2, 5, 4], 0));
+
+        // A whole tab moves to another place, or the end when past it.
+        reorder(&mut model.tabs, &mut model.active, 1);
+        assert_eq!((model.active, model.ids(0), model.ids(1)), (1, vec![1, 2, 5, 4], vec![3]));
+        reorder(&mut model.tabs, &mut model.active, 5);
+        assert_eq!(model.active, 1);
+        reorder(&mut model.tabs, &mut model.active, 0);
+        model.check();
 
         // Grouping whole tabs keeps the focus of the tab that moved.
         assert!(group(&mut model.tabs, &mut model.active, 1, Rect::new(0., 0., 800., 600.)));
