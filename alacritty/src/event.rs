@@ -102,6 +102,8 @@ pub struct Processor {
     config: Rc<UiConfig>,
     /// Windows closed as windows, and when, to save with the last one.
     closed: Vec<(Instant, restore::Window)>,
+    /// Whether Alacritty was started plainly, which alone restores and saves sessions.
+    plain: bool,
 }
 
 impl Processor {
@@ -133,6 +135,7 @@ impl Processor {
         }
 
         Processor {
+            plain: restore::plain(&cli_options),
             initial_window_options,
             initial_window_error: None,
             cli_options,
@@ -237,19 +240,30 @@ impl Processor {
 
     /// Keep the state of `window_context`, which is closing, for the session saved once the last
     /// window closes: windows closed as windows within a moment are saved together, while a
-    /// session ended by closing its tabs or shells is forgotten.
+    /// session ended by closing its tabs or shells is not saved.
     fn remember(&mut self, window_context: &WindowContext) {
         let level = self.config.window.restore_session;
         let whole = window_context.display.tabs.closed_whole();
         let now = Instant::now();
-        if level != RestoreSession::Off && whole {
-            self.closed.push((now, restore::capture(window_context, level)));
-        }
+        let saved = self.plain && level != RestoreSession::Off && whole;
+        let window = saved.then(|| restore::capture(window_context, level));
+        restore::remember(&mut self.closed, now, window);
         if self.windows.is_empty() {
             let windows = restore::kept(mem::take(&mut self.closed), now, whole);
-            if let Err(err) = restore::save(windows) {
-                error!("Could not save the session: {err}");
-            }
+            self.quit(windows);
+        }
+    }
+
+    /// Save the session of `windows` as Alacritty quits, or forget it, as the setting asks.
+    fn quit(&self, windows: Vec<restore::Window>) {
+        match restore::quit(self.plain, self.config.window.restore_session, windows) {
+            restore::Quit::Save(windows) => {
+                if let Err(err) = restore::save(windows) {
+                    error!("Could not save the session: {err}");
+                }
+            },
+            restore::Quit::Forget => restore::forget(),
+            restore::Quit::Leave => (),
         }
     }
 
@@ -287,8 +301,15 @@ impl ApplicationHandler<Event> for Processor {
             // The windows of the last session, when it is restored.
             let mut saved = restore::take(&self.config, &self.cli_options).into_iter();
             let first = saved.next();
-            if let Err(err) = self.create_initial_window(event_loop, window_options.clone(), first)
-            {
+            let restoring = first.is_some();
+            let mut created = self.create_initial_window(event_loop, window_options.clone(), first);
+            // A saved window that cannot open, such as with a shell since removed, gives way to a
+            // window as without a saved session.
+            if let (Err(err), true) = (&created, restoring) {
+                warn!("Could not restore the first window: {err}");
+                created = self.create_initial_window(event_loop, window_options.clone(), None);
+            }
+            if let Err(err) = created {
                 self.initial_window_error = Some(err);
                 event_loop.exit();
                 return;
@@ -302,6 +323,10 @@ impl ApplicationHandler<Event> for Processor {
                 {
                     error!("Could not restore a window: {err:?}");
                 }
+            }
+            // Its text is no longer kept on disk once restored.
+            if restoring {
+                restore::restored();
             }
         }
 
@@ -426,6 +451,12 @@ impl ApplicationHandler<Event> for Processor {
                 // Load config and update each terminal.
                 if let Ok(config) = config::reload(&path, &mut self.cli_options) {
                     self.config = Rc::new(config);
+
+                    // Turning the setting off forgets the saved session at once.
+                    if self.plain && self.config.window.restore_session == RestoreSession::Off {
+                        self.closed.clear();
+                        restore::forget();
+                    }
 
                     // Restart config monitor if imports changed.
                     if let Some(monitor) = self.config_monitor.take() {
@@ -571,13 +602,11 @@ impl ApplicationHandler<Event> for Processor {
 
         // Quitting with windows open, as by `alacritty msg shutdown`, saves them all.
         let level = self.config.window.restore_session;
-        if level != RestoreSession::Off && !self.windows.is_empty() {
+        if self.plain && level != RestoreSession::Off && !self.windows.is_empty() {
             let now = Instant::now();
             let mut windows = restore::kept(mem::take(&mut self.closed), now, true);
             windows.extend(self.windows.values().map(|ctx| restore::capture(ctx, level)));
-            if let Err(err) = restore::save(windows) {
-                error!("Could not save the session: {err}");
-            }
+            self.quit(windows);
         }
 
         match self.gl_config.take().map(|config| config.display()) {

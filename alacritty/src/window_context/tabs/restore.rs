@@ -33,7 +33,9 @@ use crate::window_context::WindowContext;
 
 use super::profiles::{Profile, Profiles};
 use super::split::Split;
-use super::{Pane, Session, Tab, Tabs, next_id, platform, set_live_font, sync};
+use super::{
+    Pane, Session, Tab, Tabs, ZOOM_MIN_POINTS, ZOOM_RANGE, next_id, platform, set_live_font, sync,
+};
 
 /// Version of the file's format, which a file of another version is not restored from.
 const VERSION: u32 = 1;
@@ -41,6 +43,9 @@ const VERSION: u32 = 1;
 /// Lines of text kept of each pane, and the most bytes they take.
 const LINES: usize = 2_000;
 const BYTES: usize = 1 << 20;
+
+/// Largest session file read, far above what panes of [`BYTES`] make.
+const MAX_FILE: u64 = 64 << 20;
 
 /// How long before the last window windows closed with it are saved with it, as when logging out
 /// closes them one after another.
@@ -142,38 +147,55 @@ pub fn path() -> Option<PathBuf> {
     return Some(dirs::data_local_dir()?.join("alacritty").join("session.json"));
 }
 
-/// The windows to restore at startup, taken out of the saved session, which is moved aside.
-///
-/// None unless the setting is on and Alacritty was started plainly, without a command,
-/// directory or daemon of its own.
-pub fn take(config: &UiConfig, options: &CliOptions) -> Vec<Window> {
+/// Whether Alacritty was started plainly, without a command, directory, hold or daemon of its
+/// own: only such a process restores, saves or forgets the session.
+pub fn plain(options: &CliOptions) -> bool {
     let terminal = &options.window_options.terminal_options;
-    let plain = !options.daemon
+    !options.daemon
         && !terminal.hold
         && terminal.working_directory.is_none()
-        && terminal.command().is_none();
-    if config.window.restore_session == RestoreSession::Off || !plain {
+        && terminal.command().is_none()
+}
+
+/// The windows to restore at startup, taken out of the saved session, which is moved aside.
+///
+/// None unless the setting is on and Alacritty was started plainly; with the setting off, any
+/// saved session is forgotten.
+pub fn take(config: &UiConfig, options: &CliOptions) -> Vec<Window> {
+    if !plain(options) {
+        return Vec::new();
+    }
+    if config.window.restore_session == RestoreSession::Off {
+        forget();
         return Vec::new();
     }
     path().map_or_else(Vec::new, |path| load(&path))
 }
 
 /// The windows saved at `path`, which is moved aside first: a second Alacritty started meanwhile
-/// does not restore them again, nor does a restart after a crash while restoring.
+/// does not restore them again, nor does a restart after a crash while restoring. An invalid file
+/// stays aside.
 fn load(path: &Path) -> Vec<Window> {
-    let text = match fs::read_to_string(path) {
-        Ok(text) => text,
+    let aside = aside(path);
+    match fs::rename(path, &aside) {
         Err(err) if err.kind() == io::ErrorKind::NotFound => return Vec::new(),
         Err(err) => {
-            warn!("Could not read the saved session {path:?}: {err}");
-            String::new()
+            warn!("Not restoring the session, which could not be moved to {aside:?}: {err}");
+            return Vec::new();
         },
-    };
-    let aside = path.with_extension("json.prev");
-    if let Err(err) = fs::rename(path, &aside) {
-        warn!("Not restoring the session, which could not be moved to {aside:?}: {err}");
+        Ok(()) => (),
+    }
+    if fs::metadata(&aside).is_ok_and(|metadata| metadata.len() > MAX_FILE) {
+        warn!("Ignoring the saved session, which is too large, kept as {aside:?}");
         return Vec::new();
     }
+    let text = match fs::read_to_string(&aside) {
+        Ok(text) => text,
+        Err(err) => {
+            warn!("Ignoring the unreadable saved session, kept as {aside:?}: {err}");
+            return Vec::new();
+        },
+    };
     match serde_json::from_str::<File>(&text) {
         Ok(file) if file.version == VERSION && file.windows.iter().all(Window::valid) => {
             file.windows
@@ -189,19 +211,64 @@ fn load(path: &Path) -> Vec<Window> {
     }
 }
 
-/// Save `windows` as the session, or forget it without any.
+/// Where a session is moved aside to.
+fn aside(path: &Path) -> PathBuf {
+    path.with_extension("json.prev")
+}
+
+/// Forget the saved session, and the one set aside.
+pub fn forget() {
+    if let Some(path) = path() {
+        remove(&path);
+        remove(&aside(&path));
+    }
+}
+
+/// Forget the session set aside once it was restored, which may hold secrets typed in it.
+pub fn restored() {
+    if let Some(path) = path() {
+        remove(&aside(&path));
+    }
+}
+
+/// Remove the file at `path`, if any.
+fn remove(path: &Path) {
+    match fs::remove_file(path) {
+        Err(err) if err.kind() != io::ErrorKind::NotFound => {
+            warn!("Could not remove {path:?}: {err}");
+        },
+        _ => (),
+    }
+}
+
+/// What a quitting Alacritty does with the session file.
+#[derive(Debug, PartialEq)]
+pub enum Quit<W> {
+    Save(Vec<W>),
+    /// Remove it, and the one set aside.
+    Forget,
+    /// Leave it as it is, which may be another Alacritty's.
+    Leave,
+}
+
+/// What an Alacritty started plainly or not quits with: saving the `windows` saved at the
+/// `level` of the setting, forgetting the session when the setting is off, else leaving it.
+pub fn quit<W>(plain: bool, level: RestoreSession, windows: Vec<W>) -> Quit<W> {
+    match level {
+        _ if !plain => Quit::Leave,
+        RestoreSession::Off => Quit::Forget,
+        _ if windows.is_empty() => Quit::Leave,
+        _ => Quit::Save(windows),
+    }
+}
+
+/// Save `windows` as the session.
 pub fn save(windows: Vec<Window>) -> io::Result<()> {
     write(&path().ok_or(io::ErrorKind::NotFound)?, windows)
 }
 
-/// Write `windows` to `path` at once, readable only by the user, or remove it without any.
+/// Write `windows` to `path` at once, readable only by the user.
 fn write(path: &Path, windows: Vec<Window>) -> io::Result<()> {
-    if windows.is_empty() {
-        return match fs::remove_file(path) {
-            Err(err) if err.kind() != io::ErrorKind::NotFound => Err(err),
-            _ => Ok(()),
-        };
-    }
     let directory = path.parent().unwrap_or(Path::new("."));
     fs::create_dir_all(directory)?;
     // A temporary file is created readable only by its owner, and replaces the old one whole.
@@ -209,6 +276,13 @@ fn write(path: &Path, windows: Vec<Window>) -> io::Result<()> {
     serde_json::to_writer(&mut file, &File { version: VERSION, windows })?;
     file.persist(path).map_err(|err| err.error)?;
     Ok(())
+}
+
+/// Keep `window`, closed as a window at `now`, in `closed`, forgetting those closed too long
+/// before to be saved with the last window.
+pub fn remember<W>(closed: &mut Vec<(Instant, W)>, now: Instant, window: Option<W>) {
+    closed.retain(|(at, _)| now.duration_since(*at) <= BURST);
+    closed.extend(window.map(|window| (now, window)));
 }
 
 /// Of the windows `closed` as windows, with when, those saved once the last one is closed at
@@ -348,7 +422,9 @@ pub fn install(
                     let (directory, text) = (directory(&state), state.text.as_deref());
                     Session::spawn(ctx, config, proxy, profile, directory, text).map(
                         |(id, mut session)| {
-                            session.zoom = state.font.map(size);
+                            let configured = session.config.font.size().as_pt();
+                            session.zoom =
+                                state.font.and_then(|pt| zoomed(pt, configured)).map(size);
                             (id, Some(session))
                         },
                     )
@@ -397,7 +473,8 @@ pub fn install(
         info!("Restoring only the focused pane of each window, since tabs are off");
     }
 
-    if let Some(points) = live.font {
+    let configured = ctx.config.font.size().as_pt();
+    if let Some(points) = live.font.and_then(|points| zoomed(points, configured)) {
         set_live_font(ctx, size(points));
     }
     if config.window.tabs {
@@ -419,6 +496,14 @@ fn apply_geometry(window: &DisplayWindow, saved: &Window) {
     window.set_fullscreen(saved.fullscreen);
 }
 
+/// A saved text size of `points`, within the bounds of a zoom of text `configured` points large;
+/// none for a size that is no number.
+fn zoomed(points: f32, configured: f32) -> Option<f32> {
+    let (low, high) = (ZOOM_RANGE.0 * configured, ZOOM_RANGE.1 * configured);
+    let (low, high) = (low.max(ZOOM_MIN_POINTS), high.max(ZOOM_MIN_POINTS));
+    points.is_finite().then(|| points.clamp(low, high))
+}
+
 /// Whether `profile` is the one named `name`.
 fn is(profile: &Profile, name: &Option<String>) -> bool {
     Some(&profile.name) == name.as_ref()
@@ -436,8 +521,62 @@ pub fn replay<T: EventListener>(term: &mut Term<T>, text: &str) {
         return;
     }
     let mut parser = ansi::Processor::<StdSyncHandler>::new();
-    parser.advance(term, text.as_bytes());
+    parser.advance(term, inert(text).as_bytes());
     parser.advance(term, SEPARATOR.as_bytes());
+}
+
+/// `text` with nothing but what [`history`] writes: printable characters, line breaks, tabs and
+/// SGR sequences; any other control or escape sequence, which could ask the terminal to answer,
+/// set a title or the clipboard, is dropped.
+fn inert(text: &str) -> String {
+    let mut inert = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        // What follows an escape, or its single character form.
+        let kind = match c {
+            '\x1b' => chars.next(),
+            '\u{80}'..='\u{9f}' => char::from_u32(u32::from(c) - 0x40),
+            '\r' | '\n' | '\t' => {
+                inert.push(c);
+                continue;
+            },
+            c if !c.is_control() => {
+                inert.push(c);
+                continue;
+            },
+            _ => continue,
+        };
+        match kind {
+            // A control sequence: parameters, intermediates, then a final character.
+            Some('[') => {
+                let mut sequence = String::new();
+                while let Some(c) = chars.next_if(|c| ('\x20'..='\x3f').contains(c)) {
+                    sequence.push(c);
+                }
+                let last = chars.next_if(|c| ('\x40'..='\x7e').contains(c));
+                if last == Some('m') && sequence.chars().all(|c| c.is_ascii_digit() || c == ';') {
+                    let _ = write!(inert, "\x1b[{sequence}m");
+                }
+            },
+            // A string, such as a title, a clipboard or a device query, up to its terminator.
+            Some(']' | 'P' | 'X' | '^' | '_') => {
+                while let Some(c) = chars.next() {
+                    if c == '\x07'
+                        || c == '\u{9c}'
+                        || (c == '\x1b' && chars.next_if_eq(&'\\').is_some())
+                    {
+                        break;
+                    }
+                }
+            },
+            // Any other escape: intermediates, then a final character.
+            _ => {
+                while chars.next_if(|c| ('\x20'..='\x2f').contains(c)).is_some() {}
+                chars.next_if(|c| ('\x30'..='\x7e').contains(c));
+            },
+        }
+    }
+    inert
 }
 
 /// The text of `grid`, with escape sequences for its colours and attributes: its last [`LINES`]
@@ -662,6 +801,68 @@ mod tests {
         assert_eq!(target.grid().cursor.point.line, Line(4));
     }
 
+    /// Records the events a terminal sends, such as answers for its shell.
+    #[derive(Clone, Default)]
+    struct Recorder(std::rc::Rc<std::cell::RefCell<Vec<String>>>);
+
+    impl EventListener for Recorder {
+        fn send_event(&self, event: alacritty_terminal::event::Event) {
+            self.0.borrow_mut().push(format!("{event:?}"));
+        }
+    }
+
+    #[test]
+    fn replay_is_inert() {
+        let recorder = Recorder::default();
+        let mut term = Term::new(Config::default(), &TermSize::new(30, 5), recorder.clone());
+        // A title, the clipboard, a cursor report, a colour query, a DECRQSS request, a mode,
+        // a hyperlink and C1 controls.
+        let hostile = "a\x1b]0;t\x07\x1b]52;c;eA==\x07\x1b[6n\x1b]11;?\x07\x1bP$qm\x1b\\\
+                       \x1b[?1049h\x1b]8;;http://x\x1b\\\u{9b}6n\x1b[31mb\x1b[0m";
+        replay(&mut term, hostile);
+        assert_eq!(*recorder.0.borrow(), Vec::<String>::new());
+        let row = &term.grid()[Line(0)];
+        let text: String = row.into_iter().take(2).map(|cell| cell.c).collect();
+        assert_eq!(text, "ab");
+        assert_eq!(row[Column(1)].fg, Color::Named(NamedColor::Red));
+        assert!(!term.mode().contains(alacritty_terminal::term::TermMode::ALT_SCREEN));
+        assert_eq!(inert("x\x1b[1;38;5;20my\x1b[2Jz\r\n\tw"), "x\x1b[1;38;5;20myz\r\n\tw");
+    }
+
+    #[test]
+    fn restored_sizes_stay_in_bounds() {
+        assert_eq!(zoomed(13., 10.), Some(13.));
+        assert_eq!(zoomed(100_000., 10.), Some(40.));
+        assert_eq!(zoomed(0., 10.), Some(5.));
+        assert_eq!(zoomed(1., 6.), Some(4.));
+        assert_eq!(zoomed(f32::NAN, 10.), None);
+    }
+
+    #[test]
+    fn only_plain_launches_touch_the_file() {
+        use clap::Parser;
+        let parse = |args: &[&str]| CliOptions::parse_from(args);
+        assert!(plain(&parse(&["alacritty"])));
+        assert!(plain(&parse(&["alacritty", "-o", "font.size=12"])));
+        for args in [
+            &["alacritty", "-e", "true"][..],
+            &["alacritty", "--hold"],
+            &["alacritty", "--working-directory", "/"],
+            &["alacritty", "--daemon"],
+        ] {
+            assert!(!plain(&parse(args)), "{args:?}");
+        }
+
+        let (on, off) = (RestoreSession::Text, RestoreSession::Off);
+        assert_eq!(quit(false, on, vec![1]), Quit::Leave, "-e sh never overwrites it");
+        assert_eq!(quit(false, off, vec![1]), Quit::Leave);
+        assert_eq!(quit(false, on, Vec::<i32>::new()), Quit::Leave, "-e true never removes it");
+        assert_eq!(quit(true, on, vec![1]), Quit::Save(vec![1]));
+        assert_eq!(quit(true, RestoreSession::Layout, vec![1]), Quit::Save(vec![1]));
+        assert_eq!(quit(true, on, Vec::<i32>::new()), Quit::Leave, "ended by its tabs");
+        assert_eq!(quit(true, off, vec![1]), Quit::Forget);
+    }
+
     #[test]
     fn alternate_screen_keeps_the_normal_text() {
         let term = written(term(10, 3), "shell\x1b[?1049hfull screen");
@@ -711,8 +912,6 @@ mod tests {
     #[test]
     fn take_rules() {
         let mut config = UiConfig::default();
-        let options = CliOptions::default();
-        assert!(take(&config, &options).is_empty(), "off by default");
         config.window.restore_session = RestoreSession::Text;
         for args in [&["alacritty", "-e", "true"][..], &["alacritty", "--hold"], &[
             "alacritty",
@@ -740,11 +939,14 @@ mod tests {
         assert!(!path.exists() && aside.exists());
         assert!(load(&path).is_empty(), "restored only once");
 
-        for text in ["{not json", r#"{"version":2,"windows":[]}"#] {
+        for text in ["{not json", r#"{"version":2,"windows":[]}"#, "\u{0}\u{ff}"] {
             fs::write(&path, text).unwrap();
             assert!(load(&path).is_empty());
             assert_eq!(fs::read_to_string(&aside).unwrap(), text);
         }
+        fs::write(&path, [0xff, 0xfe]).unwrap();
+        assert!(load(&path).is_empty(), "not UTF-8");
+        assert!(!path.exists() && aside.exists());
     }
 
     #[test]
@@ -760,11 +962,11 @@ mod tests {
             let mode = fs::metadata(&path).unwrap().permissions().mode();
             assert_eq!(mode & 0o777, 0o600);
         }
-        // Only the session is left in the directory, and no windows forget it.
+        // Only the session is left in the directory.
         assert_eq!(fs::read_dir(path.parent().unwrap()).unwrap().count(), 1);
-        write(&path, Vec::new()).unwrap();
+        remove(&path);
         assert!(!path.exists());
-        write(&path, Vec::new()).unwrap();
+        remove(&path);
     }
 
     #[test]
@@ -774,5 +976,12 @@ mod tests {
         assert_eq!(kept(closed(), now, true), vec![2]);
         assert_eq!(kept(closed(), now, false), Vec::<i32>::new());
         assert_eq!(kept(vec![(now, 3)], now, true), vec![3]);
+
+        // Windows closed long before the next are forgotten at once.
+        let mut closed = closed();
+        remember(&mut closed, now, Some(3));
+        assert_eq!(closed.iter().map(|(_, w)| *w).collect::<Vec<_>>(), vec![2, 3]);
+        remember(&mut closed, now + Duration::from_secs(10), None);
+        assert!(closed.is_empty());
     }
 }
