@@ -9,7 +9,7 @@ use std::{fs, io};
 use toml_edit::{DocumentMut, Item, Table, value};
 
 use crate::config::UiConfig;
-use crate::config::window::{Brand, Corners, MAX_PANE_GAP, RestoreSession};
+use crate::config::window::tabbed::{Brand, Corners, MAX_PANE_GAP, RestoreSession};
 use crate::display::color::Rgb;
 
 use super::profiles;
@@ -43,12 +43,12 @@ pub struct AppSettings {
 
 impl AppSettings {
     pub fn new(config: &UiConfig) -> Self {
-        let window = &config.window;
+        let window = &config.window.tabbed;
         Self {
             corners: window.corners,
             family: window.ui_font.family.clone(),
             size: window.ui_font.size,
-            opacity: window.opacity.as_f32(),
+            opacity: config.window.opacity.as_f32(),
             panel: window.panel,
             tab_track: window.tab_track,
             icon_tiles: window.icon_tiles,
@@ -241,7 +241,7 @@ mod tests {
     #[test]
     fn too_wide_gaps_are_narrowed_without_being_rewritten() {
         let mut config = UiConfig::default();
-        config.window.pane_gap = 60;
+        config.window.tabbed.pane_gap = 60;
         let settings = AppSettings::new(&config);
         assert_eq!(settings.pane_gap, MAX_PANE_GAP);
         let text = "[window]\npane_gap = 60 # Big.\n";
@@ -298,7 +298,7 @@ mod tests {
             let edited = after.edit(&before, "").unwrap();
             let config: toml::Table = toml::from_str(&edited).unwrap();
             let window = WindowConfig::deserialize(config["window"].clone()).unwrap();
-            assert_eq!(window.restore_session, restore);
+            assert_eq!(window.tabbed.restore_session, restore);
         }
         // Back to the defaults: each changed key is written again, and nothing else is touched.
         let text = "# Mine.\n[window.brand]\ntitle = \"Work\" # Kept.\n";

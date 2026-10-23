@@ -33,6 +33,8 @@ struct Test {
     nesting: Test2<usize>,
     #[config(flatten)]
     flatten: Test3,
+    #[config(flatten)]
+    flatten2: Test4,
     enom_small: TestEnum,
     enom_big: TestEnum,
     #[config(deprecated)]
@@ -52,6 +54,7 @@ impl Default for Test {
             field3: Some(23),
             nesting: Test2::default(),
             flatten: Test3::default(),
+            flatten2: Test4::default(),
             enom_small: TestEnum::default(),
             enom_big: TestEnum::default(),
             enom_error: TestEnum::default(),
@@ -78,6 +81,12 @@ struct Test3 {
     flatty: usize,
 }
 
+#[derive(ConfigDeserialize, Default)]
+struct Test4 {
+    #[config(alias = "flatty2_alias")]
+    flatty2: usize,
+}
+
 #[derive(SerdeReplace, Deserialize, Default, PartialEq, Eq, Debug)]
 struct NewType(usize);
 
@@ -95,6 +104,7 @@ fn config_deserialize() {
         field3 = 32
 
         flatty = 123
+        flatty2_alias = 321
         enom_small = "one"
         enom_big = "THREE"
         enom_error = "HugaBuga"
@@ -122,6 +132,7 @@ fn config_deserialize() {
     assert_eq!(test.nesting.field3, Test::default().nesting.field3);
     assert_eq!(test.nesting.field4, 8);
     assert_eq!(test.flatten.flatty, 123);
+    assert_eq!(test.flatten2.flatty2, 321);
 
     // Verify all log messages are correct.
     let mut error_logs = logger.error_logs.lock().unwrap();
@@ -242,4 +253,15 @@ fn replace_flatten_using_alias() {
     test.replace(value).unwrap();
 
     assert_eq!(test.flatten.flatty, 7);
+}
+
+#[test]
+fn replace_second_flatten() {
+    let mut test = Test::default();
+
+    let value = toml::from_str("flatty2=7").unwrap();
+    test.replace(value).unwrap();
+
+    assert_eq!(test.flatten2.flatty2, 7);
+    assert_ne!(test.flatten.flatty, 7);
 }

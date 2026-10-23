@@ -152,9 +152,7 @@ where
 
             // Parse the incoming bytes.
             state.parser.advance(&mut **terminal, &buf[..unprocessed]);
-            if let Some(directory) = state.directory.scan(&buf[..unprocessed]) {
-                terminal.reported_directory = Some(directory);
-            }
+            terminal.tabbed.scan(&buf[..unprocessed]); // tabbed: find working directory reports.
 
             processed += unprocessed;
             unprocessed = 0;
@@ -405,7 +403,6 @@ pub struct State {
     write_list: VecDeque<Cow<'static, [u8]>>,
     writing: Option<Writing>,
     parser: ansi::Processor,
-    directory: crate::cwd::Scanner,
 }
 
 impl State {

@@ -11,10 +11,6 @@ use syn::{GenericParam, Ident, LitStr, Token, TypeParam};
 mod config_deserialize;
 mod serde_replace;
 
-/// Error message when attempting to flatten multiple fields.
-pub(crate) const MULTIPLE_FLATTEN_ERROR: &str =
-    "At most one instance of #[config(flatten)] is supported";
-
 #[proc_macro_derive(ConfigDeserialize, attributes(config))]
 pub fn derive_config_deserialize(input: TokenStream) -> TokenStream {
     config_deserialize::derive(input)

@@ -49,7 +49,7 @@ use crate::cli::{IpcConfig, ParsedOptions};
 use crate::cli::{Options as CliOptions, WindowOptions};
 use crate::clipboard::Clipboard;
 use crate::config::ui_config::{HintAction, HintInternalAction};
-use crate::config::window::RestoreSession;
+use crate::config::window::tabbed::RestoreSession;
 use crate::config::{self, UiConfig};
 #[cfg(not(windows))]
 use crate::daemon::foreground_process_path;
@@ -242,7 +242,7 @@ impl Processor {
     /// window closes: windows closed as windows within a moment are saved together, while a
     /// session ended by closing its tabs or shells is not saved.
     fn remember(&mut self, window_context: &WindowContext) {
-        let level = self.config.window.restore_session;
+        let level = self.config.window.tabbed.restore_session;
         let whole = window_context.display.tabs.closed_whole();
         let now = Instant::now();
         let saved = self.plain && level != RestoreSession::Off && whole;
@@ -256,7 +256,7 @@ impl Processor {
 
     /// Save the session of `windows` as Alacritty quits, or forget it, as the setting asks.
     fn quit(&self, windows: Vec<restore::Window>) {
-        match restore::quit(self.plain, self.config.window.restore_session, windows) {
+        match restore::quit(self.plain, self.config.window.tabbed.restore_session, windows) {
             restore::Quit::Save(windows) => {
                 if let Err(err) = restore::save(windows) {
                     error!("Could not save the session: {err}");
@@ -453,7 +453,9 @@ impl ApplicationHandler<Event> for Processor {
                     self.config = Rc::new(config);
 
                     // Turning the setting off forgets the saved session at once.
-                    if self.plain && self.config.window.restore_session == RestoreSession::Off {
+                    if self.plain
+                        && self.config.window.tabbed.restore_session == RestoreSession::Off
+                    {
                         self.closed.clear();
                         restore::forget();
                     }
@@ -602,7 +604,7 @@ impl ApplicationHandler<Event> for Processor {
         }
 
         // Quitting with windows open, as by `alacritty msg shutdown`, saves them all.
-        let level = self.config.window.restore_session;
+        let level = self.config.window.tabbed.restore_session;
         if self.plain && level != RestoreSession::Off && !self.windows.is_empty() {
             let now = Instant::now();
             let mut windows = restore::kept(mem::take(&mut self.closed), now, true);

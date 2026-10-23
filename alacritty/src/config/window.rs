@@ -1,3 +1,5 @@
+pub mod tabbed; // tabbed: the fork's own `[window]` keys.
+
 use std::fmt::{self, Formatter};
 
 use log::{error, warn};
@@ -12,13 +14,9 @@ use alacritty_config_derive::{ConfigDeserialize, SerdeReplace};
 
 use crate::config::LOG_TARGET_CONFIG;
 use crate::config::ui_config::{Delta, Percentage};
-use crate::display::color::Rgb;
 
 /// Default Alacritty name, used for window title and class.
 pub const DEFAULT_NAME: &str = "Alacritty";
-
-/// Widest space between a tab's panes, in logical pixels; wider gaps are narrowed to it.
-pub const MAX_PANE_GAP: u8 = 48;
 
 #[derive(ConfigDeserialize, Serialize, Debug, Clone, PartialEq)]
 pub struct WindowConfig {
@@ -30,42 +28,6 @@ pub struct WindowConfig {
 
     /// Startup mode.
     pub startup_mode: StartupMode,
-
-    /// Show a tab bar and group terminals of a window in tabs.
-    pub tabs: bool,
-
-    /// Font of the tab bar, its menus and the settings, apart from the terminal's.
-    pub ui_font: UiFont,
-
-    /// Corners of the window, the terminal's panel, the tabs and the controls, all alike.
-    pub corners: Corners,
-
-    /// Hold the terminal in a panel set in from the window's edges, instead of filling the window.
-    pub panel: bool,
-
-    /// Set the tabs on a track, instead of on the bar itself.
-    pub tab_track: bool,
-
-    /// Draw the icons of a tab's panes on tiles, instead of bare and as large as the tiles.
-    pub icon_tiles: bool,
-
-    /// Space between the panes of a tab, in logical pixels, up to [`MAX_PANE_GAP`].
-    pub pane_gap: u8,
-
-    /// Border of the focused pane; none uses the terminal's blue.
-    pub pane_highlight: Option<Rgb>,
-
-    /// Keep the tab bar shown, instead of sliding it in as the pointer reaches the top edge.
-    pub pin_tab_bar: bool,
-
-    /// Zoom the focused pane's text with Control and the mouse wheel.
-    pub wheel_zoom: bool,
-
-    /// Reopen the windows and tabs open when Alacritty last quit.
-    pub restore_session: RestoreSession,
-
-    /// The logo and names at the left of the tab bar.
-    pub brand: Brand,
 
     /// XEmbed parent.
     #[config(skip)]
@@ -105,6 +67,11 @@ pub struct WindowConfig {
 
     /// Window level.
     pub level: WindowLevel,
+
+    // tabbed: the fork's own keys, flattened beside the upstream ones.
+    #[config(flatten)]
+    #[serde(flatten)]
+    pub tabbed: tabbed::TabbedConfig,
 }
 
 impl Default for WindowConfig {
@@ -120,23 +87,12 @@ impl Default for WindowConfig {
             dimensions: Default::default(),
             decorations: Default::default(),
             startup_mode: Default::default(),
-            tabs: true,
-            ui_font: Default::default(),
-            corners: Default::default(),
-            panel: true,
-            tab_track: true,
-            icon_tiles: true,
-            pane_gap: 16,
-            pane_highlight: None,
-            pin_tab_bar: true,
-            wheel_zoom: true,
-            restore_session: Default::default(),
-            brand: Default::default(),
             dynamic_padding: Default::default(),
             resize_increments: Default::default(),
             decorations_theme_variant: Default::default(),
             option_as_alt: Default::default(),
             level: Default::default(),
+            tabbed: Default::default(),
         }
     }
 }
@@ -207,24 +163,6 @@ impl WindowConfig {
     }
 }
 
-/// Font of the interface around the terminal.
-#[derive(ConfigDeserialize, Serialize, Debug, Clone, PartialEq)]
-pub struct UiFont {
-    /// Font family; empty picks the system's interface font.
-    pub family: String,
-
-    /// Font size in points.
-    pub size: f32,
-}
-
-impl Default for UiFont {
-    fn default() -> Self {
-        // macOS sizes fonts in pixels, other systems in points of 4/3 pixels.
-        let size = if cfg!(target_os = "macos") { 13. } else { 10. };
-        Self { family: String::new(), size }
-    }
-}
-
 #[derive(ConfigDeserialize, Serialize, Debug, Clone, PartialEq, Eq)]
 pub struct Identity {
     /// Window title.
@@ -237,46 +175,6 @@ pub struct Identity {
 impl Default for Identity {
     fn default() -> Self {
         Self { title: DEFAULT_NAME.into(), class: Default::default() }
-    }
-}
-
-#[derive(ConfigDeserialize, Serialize, Default, Debug, Copy, Clone, PartialEq, Eq)]
-pub enum Corners {
-    #[default]
-    Round,
-    Square,
-}
-
-/// What of the windows open when Alacritty quits is reopened when it starts.
-#[derive(ConfigDeserialize, Serialize, Default, Debug, Copy, Clone, PartialEq, Eq)]
-pub enum RestoreSession {
-    #[default]
-    Off,
-    /// Windows, tabs, panes and their places, directories and text sizes.
-    Layout,
-    /// The layout and the text last shown in each pane.
-    Text,
-}
-
-/// The logo and names at the left of the tab bar.
-#[derive(ConfigDeserialize, Serialize, Debug, Clone, PartialEq, Eq)]
-pub struct Brand {
-    pub show: bool,
-    /// `alacritty`, `bundled:<name>` for a bundled logo, a path to an image, or empty for none.
-    pub icon: String,
-    /// Names beside the icon, where `{host}` stands for the computer's; empty hides a line.
-    pub title: String,
-    pub subtitle: String,
-}
-
-impl Default for Brand {
-    fn default() -> Self {
-        Self {
-            show: true,
-            icon: "alacritty".into(),
-            title: DEFAULT_NAME.into(),
-            subtitle: "{host}".into(),
-        }
     }
 }
 
@@ -432,60 +330,5 @@ impl From<WindowLevel> for WinitWindowLevel {
             WindowLevel::Normal => WinitWindowLevel::Normal,
             WindowLevel::AlwaysOnTop => WinitWindowLevel::AlwaysOnTop,
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn panes_keep_their_gap_and_highlight_by_default() {
-        let window = WindowConfig::default();
-        assert_eq!(window.pane_gap, 16);
-        assert_eq!(window.pane_highlight, None);
-    }
-
-    #[test]
-    fn pane_gap_and_highlight_are_read() {
-        let value: toml::Value =
-            toml::from_str("pane_gap = 4\npane_highlight = \"#FF9500\"").unwrap();
-        let window = WindowConfig::deserialize(value).unwrap();
-        assert_eq!(window.pane_gap, 4);
-        assert_eq!(window.pane_highlight, Some(Rgb::new(0xff, 0x95, 0x00)));
-    }
-
-    #[test]
-    fn round_three_keys_default() {
-        let window = WindowConfig::default();
-        assert!(window.pin_tab_bar && window.wheel_zoom && window.icon_tiles);
-        assert_eq!(window.restore_session, RestoreSession::Off);
-        let brand = &window.brand;
-        assert!(brand.show);
-        assert_eq!(
-            (&*brand.icon, &*brand.title, &*brand.subtitle),
-            ("alacritty", "Alacritty", "{host}")
-        );
-    }
-
-    #[test]
-    fn round_three_keys_are_read() {
-        for (text, restore) in [
-            ("off", RestoreSession::Off),
-            ("layout", RestoreSession::Layout),
-            ("text", RestoreSession::Text),
-        ] {
-            let value: toml::Value =
-                toml::from_str(&format!("restore_session = \"{text}\"")).unwrap();
-            assert_eq!(WindowConfig::deserialize(value).unwrap().restore_session, restore);
-        }
-        let text = "pin_tab_bar = false\nwheel_zoom = false\n[brand]\nshow = false\nicon = \
-                    \"bundled:opensuse\"\ntitle = \"\"\n";
-        let window =
-            WindowConfig::deserialize(toml::from_str::<toml::Value>(text).unwrap()).unwrap();
-        assert!(!window.pin_tab_bar && !window.wheel_zoom && !window.brand.show);
-        assert_eq!((&*window.brand.icon, &*window.brand.title), ("bundled:opensuse", ""));
-        // Keys left out keep their defaults.
-        assert_eq!(window.brand.subtitle, "{host}");
     }
 }
