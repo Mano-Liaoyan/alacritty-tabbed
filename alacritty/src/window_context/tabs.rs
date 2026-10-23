@@ -154,7 +154,6 @@ pub enum FontChange {
     /// Larger or smaller by steps.
     By(i32),
     /// Back to the size of its configuration.
-    #[allow(dead_code, reason = "lane P resets the text size from the pane menu")]
     Reset,
 }
 
@@ -220,7 +219,6 @@ pub struct Tabs {
     autohide: autohide::State,
     /// The live pane whose text size last changed, the size relative to its configuration in
     /// percent, and when, for the size to show over it.
-    #[allow(dead_code, reason = "lane P shows the text size over the pane")]
     font_hud: Option<(WindowId, u16, Instant)>,
     /// The live pane and its text size relative to its configuration, as last seen.
     live_font: Option<(WindowId, u16)>,

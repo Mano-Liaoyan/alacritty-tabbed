@@ -6,7 +6,9 @@
 //! terminals are resized once. Panes no longer shown, as a zoomed pane grows over them, stay
 //! drawn under it until it covers them.
 //!
-//! Each pane of a group has controls at the top of its card: a grip, which drags it.
+//! Each pane of a group has controls at the top of its card, shown as the pointer nears them: a
+//! grip, which drags it, and a button that zooms it or back. The live pane's text size shows over
+//! it as it changes.
 
 use std::cell::Cell;
 use std::mem;
@@ -16,11 +18,11 @@ use winit::dpi::PhysicalPosition;
 use winit::window::WindowId;
 
 use super::anim::{Curve, Tween, scale};
-use super::bar::{BAR, Hit, Layout, MARGIN, PANEL_RADIUS};
+use super::bar::{BAR, Hit, Layout, MARGIN, PANEL_RADIUS, RADIUS};
 use super::dnd::{Source, Target};
-use super::paint::{Layer, Palette, Rect, mix};
+use super::paint::{BLACK, Layer, Palette, Rect, UNZOOM_GLYPH, ZOOM_GLYPH, mix};
 use super::split::{Axis, Side, Split};
-use super::{Tabs, divider};
+use super::{Press, Tabs, divider};
 
 /// How long panes take to slide to their places, or to pop in, in milliseconds.
 const MOVE_MS: u64 = 260;
@@ -35,14 +37,30 @@ const TINT: f32 = 0.06;
 const DROP: f32 = 0.22;
 /// Opacity of the chrome over a pane being dragged.
 const VEIL: f32 = 0.4;
-/// Size of a drag handle's plate, and of the zone around it that grabs it, in logical pixels.
-const HANDLE: (f32, f32) = (32., 10.);
-const HANDLE_ZONE: (f32, f32) = (48., 18.);
-/// Size of the dots on a handle, and the distance between their centres.
+/// Size of a pane's controls, how far below the top of its card, and the width of their grip, in
+/// logical pixels.
+const CLUSTER: (f32, f32) = (58., 22.);
+const CLUSTER_TOP: f32 = 6.;
+const GRIP: f32 = 30.;
+/// Size of the grip's dots, and the distance between their centres.
 const DOT: f32 = 3.;
 const DOT_STEP: f32 = 5.;
-/// How long a handle takes to light up as it is hovered.
-const HANDLE_MS: u64 = 120;
+/// How far beside and below the controls the pointer shows them, in logical pixels.
+const REVEAL_SIDE: f32 = 56.;
+const REVEAL_BELOW: f32 = 28.;
+/// Room the controls need beside them in their card, in logical pixels, and above, in rows.
+const CLUSTER_ROOM: f32 = 16.;
+const CLUSTER_ROWS: f32 = 3.;
+/// How long the controls take to appear, stay once the pointer left them, and fade.
+const REVEAL_MS: u64 = 140;
+const LINGER_MS: u64 = 350;
+const HIDE_MS: u64 = 180;
+/// How long a control takes to light up as it is hovered.
+const HOVER_MS: u64 = 120;
+/// How long the text size takes to show over the pane, stays after the last change, and fades.
+const HUD_IN_MS: u64 = 120;
+const HUD_HOLD_MS: u64 = 700;
+const HUD_OUT_MS: u64 = 240;
 
 /// Where the panes are drawn while they move to their places, and how lit their borders are.
 #[derive(Default)]
@@ -57,6 +75,8 @@ pub struct Effects {
     drop: Cell<Option<(Tween<Rect>, Tween<f32>)>>,
     /// The moment the terminals are drawn for, which their chrome is drawn for too.
     clock: Cell<Option<Instant>>,
+    /// How visible the live pane's text size is, and until when it stays.
+    hud: Cell<Option<(Tween<f32>, Instant)>>,
 }
 
 struct Motion {
@@ -65,8 +85,53 @@ struct Motion {
     /// How lit the border is, from 0 to 1, and how tinted the pane; updated as it is drawn.
     light: Cell<Tween<f32>>,
     tint: Cell<Tween<f32>>,
-    /// How lit the drag handle is.
-    handle: Cell<Tween<f32>>,
+    /// How visible the controls are.
+    reveal: Cell<Reveal>,
+    /// How lit the grip and the zoom button are.
+    hover: Cell<[Tween<f32>; 2]>,
+}
+
+/// How visible a pane's controls are: they appear as the pointer nears them, and stay a moment
+/// after it left before they fade.
+#[derive(Clone, Copy)]
+struct Reveal {
+    level: Tween<f32>,
+    /// When the pointer left them.
+    left_at: Option<Instant>,
+}
+
+impl Default for Reveal {
+    fn default() -> Self {
+        Self { level: Tween::new(0.), left_at: None }
+    }
+}
+
+impl Reveal {
+    /// How visible the controls are at `now`, moving to whether the pointer is `near`.
+    fn level(&mut self, near: bool, now: Instant) -> f32 {
+        if near {
+            self.left_at = None;
+            self.level.to(1., now, REVEAL_MS, Curve::EASE_OUT);
+        } else if self.left_at.is_none() && self.level.get(now) > 0. {
+            self.left_at = Some(now);
+        }
+        if let Some(left) = self.left_at.map(|left| left + linger()) {
+            if now >= left {
+                self.level.to(0., left, HIDE_MS, Curve::EASE_OUT);
+            }
+        }
+        self.level.get(now)
+    }
+
+    fn running(&self, now: Instant) -> bool {
+        self.level.running(now) || self.left_at.is_some_and(|left| now < left + linger())
+    }
+}
+
+/// How long the controls stay once the pointer left them: a wait, not a motion, so it is not
+/// slowed down nor skipped with the animations.
+fn linger() -> Duration {
+    Duration::from_millis(LINGER_MS)
 }
 
 impl Effects {
@@ -95,7 +160,8 @@ impl Effects {
                     frame: Tween::new(if animate { popped(rect) } else { rect }),
                     light: Cell::new(Tween::new(0.)),
                     tint: Cell::new(Tween::new(0.)),
-                    handle: Cell::new(Tween::new(0.)),
+                    reveal: Cell::default(),
+                    hover: Cell::new([Tween::new(0.); 2]),
                 });
                 if animate {
                     motion.frame.to(rect, now, MOVE_MS, Curve::SNAP);
@@ -129,12 +195,15 @@ impl Effects {
         let drop =
             self.drop.get().is_some_and(|(rect, alpha)| rect.running(now) || alpha.running(now));
         let leaving = self.leaving.iter().any(|&(_, until)| until > now);
+        let hud = self.hud.get().is_some_and(|(hud, until)| hud.running(now) || now < until);
         drop || leaving
+            || hud
             || self.panes.iter().any(|motion| {
                 motion.frame.running(now)
                     || motion.light.get().running(now)
                     || motion.tint.get().running(now)
-                    || motion.handle.get().running(now)
+                    || motion.reveal.get().running(now)
+                    || motion.hover.get().iter().any(|hover| hover.running(now))
             })
     }
 
@@ -154,9 +223,42 @@ impl Effects {
         (level(&motion.light, lit, LIGHT_MS, now), level(&motion.tint, tinted, LIGHT_MS, now))
     }
 
-    /// How lit the drag handle of the pane `id` is at `now`, moving to whether it is `hovered`.
-    fn handle(&self, id: WindowId, hovered: bool, now: Instant) -> f32 {
-        self.motion(id).map_or(0., |motion| level(&motion.handle, hovered, HANDLE_MS, now))
+    /// How visible the controls of the pane `id` are at `now`, moving to whether they are `near`
+    /// the pointer, or at once hidden while they are `quiet`.
+    fn reveal(&self, id: WindowId, near: bool, quiet: bool, now: Instant) -> f32 {
+        let Some(motion) = self.motion(id) else { return 0. };
+        if quiet {
+            motion.reveal.set(Reveal::default());
+            return 0.;
+        }
+        let mut reveal = motion.reveal.get();
+        let level = reveal.level(near, now);
+        motion.reveal.set(reveal);
+        level
+    }
+
+    /// How lit the grip and the zoom button of the pane `id` are at `now`, moving to whether the
+    /// pointer is on `hovered`.
+    fn hover(&self, id: WindowId, hovered: Option<Control>, now: Instant) -> [f32; 2] {
+        let Some(motion) = self.motion(id) else { return [0.; 2] };
+        let mut tweens = motion.hover.get();
+        let levels = [Control::Grip, Control::Zoom].map(|control| {
+            let tween = &mut tweens[control as usize];
+            let target = if hovered == Some(control) { 1. } else { 0. };
+            tween.to(target, now, HOVER_MS, Curve::EASE_OUT);
+            tween.get(now)
+        });
+        motion.hover.set(tweens);
+        levels
+    }
+
+    /// How visible the text size is at `now`, shown while it is `until` then.
+    fn hud(&self, until: Instant, now: Instant) -> f32 {
+        let mut tween = self.hud.get().map_or(Tween::new(0.), |(tween, _)| tween);
+        let (target, ms) = if now < until { (1., HUD_IN_MS) } else { (0., HUD_OUT_MS) };
+        tween.to(target, now, ms, Curve::EASE_OUT);
+        self.hud.set(Some((tween, until)));
+        tween.get(now)
     }
 
     /// Where to draw the drop preview at `now`, and how visible it is, moving to `target`.
@@ -197,8 +299,76 @@ pub enum Control {
     /// Drags the pane.
     Grip,
     /// Zooms the pane, or unzooms it.
-    #[allow(dead_code, reason = "lane P adds the zoom control beside the grip")]
     Zoom,
+}
+
+/// The controls of a pane: a capsule holding the grip, then the zoom button.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Cluster {
+    capsule: Rect,
+    grip: Rect,
+    zoom: Rect,
+}
+
+impl Cluster {
+    /// The control at `point`.
+    fn at(&self, point: PhysicalPosition<f64>) -> Option<Control> {
+        if self.grip.contains(point) {
+            Some(Control::Grip)
+        } else {
+            self.zoom.contains(point).then_some(Control::Zoom)
+        }
+    }
+}
+
+/// The controls of the pane in `card`, at `scale`: centred at its top, a little inside it, so they
+/// never sit on its border.
+fn cluster(card: Rect, scale: f32) -> Cluster {
+    let px = |value: f32| (value * scale).round();
+    let (w, h) = (px(CLUSTER.0), px(CLUSTER.1));
+    let capsule = Rect::new((card.x + (card.w - w) / 2.).round(), card.y + px(CLUSTER_TOP), w, h);
+    let grip = Rect { w: px(GRIP), ..capsule };
+    let zoom = Rect::new(grip.right(), capsule.y, w - grip.w, h);
+    Cluster { capsule, grip, zoom }
+}
+
+/// Where the pointer shows the controls of the pane in `card`, at `scale`: around them, from
+/// `reach` above the card, the middle of the gap there, to a couple of rows below them.
+fn reveal_zone(card: Rect, reach: f32, scale: f32) -> Rect {
+    let capsule = cluster(card, scale).capsule;
+    let (side, below) = ((REVEAL_SIDE * scale).round(), (REVEAL_BELOW * scale).round());
+    let top = card.y - reach;
+    Rect::new(capsule.x - side, top, capsule.w + 2. * side, capsule.bottom() + below - top)
+}
+
+/// Whether `card` has room for its controls, at `scale`, with rows of `row` pixels.
+fn fits(card: Rect, row: f32, scale: f32) -> bool {
+    card.w >= ((CLUSTER.0 + CLUSTER_ROOM) * scale).round() && card.h >= CLUSTER_ROWS * row
+}
+
+/// Whether the controls stay hidden: while something is dragged, a selection made, or a menu,
+/// a name or the settings edited.
+fn quiet(tabs: &Tabs) -> bool {
+    tabs.drag.as_ref().is_some_and(|drag| drag.moving)
+        || matches!(tabs.press, Press::Divider | Press::Terminal)
+        || tabs.menu.is_some()
+        || tabs.context.is_some()
+        || tabs.rename.is_some()
+        || tabs.settings.is_some()
+}
+
+/// The cards of the active tab's shown panes that have controls, by index, at `scale`, and the
+/// height above which the pointer is not theirs: those of a tab of several panes, a zoomed one too.
+fn with_controls(tabs: &Tabs, scale: f32) -> (Vec<(usize, Rect)>, f32) {
+    let grouped = tabs.tabs.get(tabs.active).is_some_and(|tab| tab.panes.len() > 1);
+    // A bar shown over the panes keeps the pointer from the controls under it.
+    let overlay = !tabs.autohide.pinned && tabs.autohide.live();
+    let top = if overlay { (BAR * scale).round() } else { tabs.area().y };
+    if !grouped || quiet(tabs) {
+        return (Vec::new(), top);
+    }
+    let cards = tabs.pane_rects().into_iter().map(|(index, rect)| (index, tabs.card(rect)));
+    (cards.filter(|&(_, card)| fits(card, tabs.cells.1, scale)).collect(), top)
 }
 
 /// The pane of the active tab whose control is at `point`, and which control.
@@ -210,60 +380,61 @@ pub fn control_at(
     control(tabs, point, layout.scale)
 }
 
-/// The pane of the active tab whose control is at `point`, at `scale`, and which control: the
-/// shown panes of a tab of several have them, a zoomed one too.
+/// The pane of the active tab whose control is at `point`, at `scale`, and which control.
 pub fn control(tabs: &Tabs, point: PhysicalPosition<f64>, scale: f32) -> Option<(usize, Control)> {
-    let grouped = tabs.tabs.get(tabs.active).is_some_and(|tab| tab.panes.len() > 1);
-    if !grouped || tabs.drag.is_some() {
+    let (cards, top) = with_controls(tabs, scale);
+    hit(&cards, top, point, scale)
+}
+
+/// The pane of `cards`, by index, whose control is at `point`, below `top`, and which control.
+fn hit(
+    cards: &[(usize, Rect)],
+    top: f32,
+    point: PhysicalPosition<f64>,
+    scale: f32,
+) -> Option<(usize, Control)> {
+    if (point.y as f32) < top {
         return None;
     }
-    let rects = tabs.pane_rects();
-    let cards: Vec<_> = rects.into_iter().map(|(index, rect)| (index, tabs.card(rect))).collect();
-    // The zone stops at the middle of the gap above, where a divider takes the pointer.
-    let reach = (tabs.spacing() / 2. + tabs.margin()).max(0.);
-    // A bar shown over the panes keeps the pointer from the controls under it.
-    let overlay = !tabs.autohide.pinned && tabs.autohide.live();
-    let top = if overlay { (BAR * scale).round() } else { tabs.area().y };
-    let pane = grabbed(&cards, top, reach, point, scale)?;
-    Some((pane, Control::Grip))
+    cards.iter().find_map(|&(index, card)| Some((index, cluster(card, scale).at(point)?)))
 }
 
 /// The pane of the active tab whose controls the pointer at `point` is near enough to show.
 pub fn near(tabs: &Tabs, point: PhysicalPosition<f64>) -> Option<usize> {
-    control(tabs, point, tabs.scale as f32).map(|(pane, _)| pane)
+    let scale = tabs.scale as f32;
+    let (cards, top) = with_controls(tabs, scale);
+    // The zone stops at the middle of the gap above, where a divider takes the pointer.
+    let reach = (tabs.spacing() / 2. + tabs.margin()).max(0.);
+    nearby(&cards, top, reach, point, scale)
 }
 
-/// The pane of `cards`, by index, whose handle's zone holds `point`, below `top` and at most
-/// `reach` above its card.
-fn grabbed(
+/// The pane of `cards`, by index, whose controls' zone holds `point`, below `top`, reaching
+/// `reach` above its card: the one whose card holds it, if the zones of several do.
+fn nearby(
     cards: &[(usize, Rect)],
     top: f32,
     reach: f32,
     point: PhysicalPosition<f64>,
     scale: f32,
 ) -> Option<usize> {
-    let hit = cards.iter().find(|&&(_, card)| {
-        let (_, zone) = handle_rects(card, top, scale);
-        zone.contains(point) && point.y as f32 >= card.y - reach
-    });
-    hit.map(|&(index, _)| index)
+    if (point.y as f32) < top {
+        return None;
+    }
+    let near: Vec<_> =
+        cards.iter().filter(|(_, card)| reveal_zone(*card, reach, scale).contains(point)).collect();
+    let held = near.iter().find(|(_, card)| card.contains(point)).or(near.first());
+    held.map(|(index, _)| *index)
 }
 
-/// The plate of the drag handle on the top edge of `card`, at `scale`, and the zone around it
-/// that grabs it; neither reaches above `top`.
-fn handle_rects(card: Rect, top: f32, scale: f32) -> (Rect, Rect) {
-    let px = |value: f32| (value * scale).round();
-    let center = |w: f32, h: f32, y: f32| {
-        let rect = Rect::new((card.x + (card.w - w) / 2.).round(), (y - h / 2.).round(), w, h);
-        // Cut off above the top, so the bar keeps the pointer.
-        let cut = (top - rect.y).max(0.);
-        Rect::new(rect.x, rect.y + cut, rect.w, (rect.h - cut).max(0.))
-    };
-    let (w, h) = (px(HANDLE.0), px(HANDLE.1));
-    // The plate sits on the edge, or just below the top where the card has no margin.
-    let plate = center(w, h, card.y.max(top + h / 2.));
-    let zone = center(px(HANDLE_ZONE.0), px(HANDLE_ZONE.1), plate.y + h / 2.);
-    (plate, zone)
+/// The radii of the corners of `card`, from the top left to the bottom right, rounded by
+/// `panel` unless it sits in a corner of the `window`, whose corners are rounded by `window_radius`
+/// if they are `cut`: it follows the window's curve there.
+fn corner_radii(card: Rect, window: Rect, cut: bool, panel: f32, window_radius: f32) -> [f32; 4] {
+    let near = |a: f32, b: f32| (a - b).abs() <= 1.;
+    let (left, right) = (near(card.x, window.x), near(card.right(), window.right()));
+    let (top, bottom) = (near(card.y, window.y), near(card.bottom(), window.bottom()));
+    [(top, left), (top, right), (bottom, left), (bottom, right)]
+        .map(|(a, b)| if cut && a && b { window_radius } else { panel })
 }
 
 /// Draw the panel of each pane of the active tab, with the chrome around it, the focused pane's
@@ -278,6 +449,8 @@ pub fn draw(tabs: &Tabs, layout: &Layout, palette: &Palette, layer: &mut Layer, 
         true => (layout.px(MARGIN), layout.radius(PANEL_RADIUS).round()),
         false => (0., 0.),
     };
+    let window = Rect::new(0., 0., layout.width, layout.height);
+    let radii = |card| corner_radii(card, window, tabs.cut, radius, layout.radius(RADIUS));
     let cards: Vec<_> = tabs
         .pane_rects()
         .into_iter()
@@ -318,6 +491,7 @@ pub fn draw(tabs: &Tabs, layout: &Layout, palette: &Palette, layer: &mut Layer, 
         if !layout.panel && !grouped {
             continue;
         }
+        let radii = radii(card);
         if tint > 0. {
             layer.rounded_alpha(card, radius, palette.highlight, TINT * tint);
         }
@@ -325,23 +499,28 @@ pub fn draw(tabs: &Tabs, layout: &Layout, palette: &Palette, layer: &mut Layer, 
             layer.rounded_alpha(card, radius, palette.chrome, VEIL);
         }
         let above = focused.filter(|_| index != tab.focus);
-        border(layer, card, radius, palette, light, widths, above);
+        border(layer, card, radii, palette, light, widths, above);
     }
 
-    // A handle on each shown pane's top edge, while the tab has several.
+    // The controls of each shown pane, while the tab has several, as the pointer nears them;
+    // holding the modifiers that drag a pane shows them all.
     if grouped {
-        let top = tabs.area().y;
+        let quiet = quiet(tabs);
         let rests = tabs.pane_rects();
         let resting =
             rests.into_iter().find(|&(index, _)| index == tab.focus).map(|(_, r)| r.inset(margin));
         for &(index, card) in &cards {
-            let hovered = tabs.control.is_some_and(|(pane, _)| pane == index);
-            let level = effects.handle(tab.panes[index].id, hovered, now);
-            let (plate, _) = handle_rects(card, top, layout.scale);
-            if index != tab.focus && hidden(plate, focused, resting) {
+            let id = tab.panes[index].id;
+            let near = tabs.near == Some(index) || tabs.pane_drag();
+            let near = near && fits(card, tabs.cells.1, layout.scale);
+            let shown = effects.reveal(id, near, quiet, now);
+            let hovered = tabs.control.filter(|&(pane, _)| pane == index).map(|(_, c)| c);
+            let hover = effects.hover(id, hovered, now);
+            let cluster = cluster(card, layout.scale);
+            if shown <= 0. || index != tab.focus && hidden(cluster.capsule, focused, resting) {
                 continue;
             }
-            draw_handle(layer, layout, palette, card, top, level);
+            draw_cluster(layer, layout, palette, cluster, shown, hover, tab.zoom);
         }
     }
     divider::draw(tabs, layout, palette, layer, now);
@@ -365,27 +544,80 @@ pub fn draw(tabs: &Tabs, layout: &Layout, palette: &Palette, layer: &mut Layer, 
         layer.rounded_alpha(rect, radius, palette.highlight, DROP * alpha);
         layer.rounded_alpha(rect.inset(-line), radius + line, palette.highlight, DROP * alpha / 2.);
     }
+
+    // The live pane's text size, as it changes.
+    if let Some((id, percent, at)) = tabs.font_hud {
+        // Like the controls' linger, how long it stays is not an animation.
+        let until = at + Duration::from_millis(HUD_IN_MS + HUD_HOLD_MS);
+        let shown = effects.hud(until, now);
+        let card = cards.iter().find(|&&(index, _)| tab.panes[index].id == id);
+        if let Some(&(_, card)) = card.filter(|_| shown > 0.) {
+            draw_hud(layer, layout, palette, card, &format!("{percent} %"), shown);
+        }
+    }
 }
 
-/// Draw the drag handle on the top edge of `card`, below `top`, lit by `level` as it is hovered:
-/// a notch of chrome holding three dots.
-fn draw_handle(
+/// Draw a pane's `cluster` of controls, `shown` that far, and each lit by its `hover` level: a
+/// floating capsule holding the grip's dots, then the button that zooms the pane or, while it is
+/// `zoomed`, back.
+fn draw_cluster(
+    layer: &mut Layer,
+    layout: &Layout,
+    palette: &Palette,
+    cluster: Cluster,
+    shown: f32,
+    hover: [f32; 2],
+    zoomed: bool,
+) {
+    // It drops into place as it appears.
+    let dy = ((shown - 1.) * layout.px(4.)).round();
+    let lower = |rect: Rect| Rect { y: rect.y + dy, ..rect };
+    let (capsule, line) = (lower(cluster.capsule), layout.px(1.).max(1.));
+    let radius = layout.curve(capsule.h / 2.);
+    let shadow = Rect { y: capsule.y + line, ..capsule };
+    layer.rounded_alpha(shadow, radius, BLACK, 0.18 * shown);
+    layer.rounded_alpha(capsule, radius, palette.popup_outline, 0.92 * shown);
+    layer.rounded_alpha(capsule.inset(line), radius - line, palette.popup, 0.92 * shown);
+
+    let (grip, zoom) = (lower(cluster.grip), lower(cluster.zoom));
+    let (x, y) = (grip.right(), capsule.center().1 - layout.px(6.));
+    layer.rect(
+        Rect::new(x, y.round(), line, layout.px(12.)),
+        mix(palette.popup, palette.separator, shown),
+    );
+    for (segment, level) in [grip, zoom].into_iter().zip(hover) {
+        let lit = segment.inset(layout.px(2.));
+        layer.rounded_alpha(lit, layout.radius(9.), palette.hover, level * shown);
+    }
+
+    let color = |level| mix(palette.popup, mix(palette.muted, palette.foreground, level), shown);
+    let (radius, step) = (layout.px(DOT) / 2., layout.px(DOT_STEP));
+    let (x, y) = grip.center();
+    for offset in [-step, 0., step] {
+        layout.dot(layer, (x + offset, y), radius, color(hover[0]));
+    }
+    let glyph = if zoomed { UNZOOM_GLYPH } else { ZOOM_GLYPH };
+    let width = (1.3 * layout.scale).max(1.);
+    layer.icon(zoom.center(), layout.px(5.), width, glyph, color(hover[1]));
+}
+
+/// Draw `text`, the live pane's text size, centred over its `card`, `shown` that far.
+fn draw_hud(
     layer: &mut Layer,
     layout: &Layout,
     palette: &Palette,
     card: Rect,
-    top: f32,
-    level: f32,
+    text: &str,
+    shown: f32,
 ) {
-    let (plate, _) = handle_rects(card, top, layout.scale);
-    let fill = mix(palette.chrome, palette.hover, level);
-    layer.rounded(plate, layout.curve(plate.h / 2.), fill);
-    let dots = mix(mix(fill, palette.muted, 0.7), palette.foreground, level);
-    let (x, y) = plate.center();
-    let (radius, step) = (layout.px(DOT) / 2., layout.px(DOT_STEP));
-    for offset in [-step, 0., step] {
-        layout.dot(layer, (x + offset, y), radius, dots);
-    }
+    let font = &layout.font;
+    let (w, h) = (font.width(text, true) + layout.px(28.), layout.line + layout.px(14.));
+    let (x, y) = card.center();
+    let capsule = Rect::new((x - w / 2.).round(), (y - h / 2.).round(), w, h);
+    let (radius, line) = (layout.curve(h / 2.), layout.px(1.).max(1.));
+    layer.rounded_alpha(capsule, radius, palette.popup_outline, 0.92 * shown);
+    layer.rounded_alpha(capsule.inset(line), radius - line, palette.popup, 0.92 * shown);
+    layer.label(capsule, text, font, mix(palette.popup, palette.foreground, shown), true);
 }
 
 /// The border of a pane's `card`, from the panel's outline to the accent and from the `widths`'
@@ -393,7 +625,7 @@ fn draw_handle(
 fn border(
     layer: &mut Layer,
     card: Rect,
-    radius: f32,
+    radii: [f32; 4],
     palette: &Palette,
     light: f32,
     (thin, thick): (f32, f32),
@@ -403,14 +635,15 @@ fn border(
     // A lit border grows by whole pixels.
     let width = if light > 0. { (thin + (thick - thin) * light).round() } else { thin };
     if above.is_none_or(|above| !overlap(card, above)) {
-        layer.corners(card, [radius; 4], palette.chrome, color, width);
+        layer.corners(card, radii, palette.chrome, color, width);
     }
-    let (w, h) = (card.w - 2. * radius, card.h - 2. * radius);
+    // The straight edges, between the corners' curves.
+    let [tl, tr, bl, br] = radii.map(f32::round);
     let edges = [
-        Rect::new(card.x + radius, card.y, w, width),
-        Rect::new(card.x + radius, card.bottom() - width, w, width),
-        Rect::new(card.x, card.y + radius, width, h),
-        Rect::new(card.right() - width, card.y + radius, width, h),
+        Rect::new(card.x + tl, card.y, card.w - tl - tr, width),
+        Rect::new(card.x + bl, card.bottom() - width, card.w - bl - br, width),
+        Rect::new(card.x, card.y + tl, width, card.h - tl - bl),
+        Rect::new(card.right() - width, card.y + tr, width, card.h - tr - br),
     ];
     let above: Vec<_> = above.into_iter().collect();
     for edge in edges {
@@ -420,10 +653,10 @@ fn border(
     }
 }
 
-/// Whether a handle's `plate` is under the focused pane's card while it moves: drawn at
-/// `focused`, away from its place `resting`. At rest, handles in narrow gaps stay shown.
-fn hidden(plate: Rect, focused: Option<Rect>, resting: Option<Rect>) -> bool {
-    focused.is_some_and(|focused| Some(focused) != resting && overlap(plate, focused))
+/// Whether controls at `rect` are under the focused pane's card while it moves: drawn at
+/// `focused`, away from its place `resting`.
+fn hidden(rect: Rect, focused: Option<Rect>, resting: Option<Rect>) -> bool {
+    focused.is_some_and(|focused| Some(focused) != resting && overlap(rect, focused))
 }
 
 fn overlap(a: Rect, b: Rect) -> bool {
@@ -701,39 +934,122 @@ mod tests {
     }
 
     #[test]
-    fn handles_sit_on_the_top_edge() {
+    fn controls_sit_inside_the_top_of_the_card() {
         let card = Rect::new(100., 48., 300., 200.);
-        let (plate, zone) = handle_rects(card, 40., 1.);
-        assert_eq!(plate, Rect::new(234., 43., 32., 10.));
-        assert_eq!(zone, Rect::new(226., 40., 48., 17.));
-        assert_eq!(plate.center(), (250., 48.));
+        let cluster = cluster(card, 1.);
+        assert_eq!(cluster.capsule, Rect::new(221., 54., 58., 22.));
+        assert_eq!(cluster.grip, Rect::new(221., 54., 30., 22.));
+        assert_eq!(cluster.zoom, Rect::new(251., 54., 28., 22.));
+        assert_eq!(cluster.capsule.center().0, card.center().0);
         // At twice the scale.
-        let (plate, zone) = handle_rects(Rect::new(0., 96., 600., 400.), 60., 2.);
-        assert_eq!((plate.w, plate.h, zone.w, zone.h), (64., 20., 96., 36.));
-        // A card without a margin keeps its handle below the bar.
-        let (plate, zone) = handle_rects(Rect::new(0., 40., 300., 200.), 40., 1.);
-        assert_eq!((plate.y, zone.y), (40., 40.));
+        let cluster = super::cluster(Rect::new(0., 96., 600., 400.), 2.);
+        assert_eq!(cluster.capsule, Rect::new(242., 108., 116., 44.));
+        assert_eq!((cluster.grip.w, cluster.zoom.x), (60., 302.));
     }
 
     #[test]
-    fn handles_grab_within_their_zone() {
+    fn controls_are_hit_by_part() {
         let cards = [(0, Rect::new(8., 48., 384., 584.)), (1, Rect::new(408., 48., 384., 584.))];
-        let at = |x: f64, y: f64| grabbed(&cards, 40., 8., PhysicalPosition::new(x, y), 1.);
-        assert_eq!(at(200., 48.), Some(0));
-        assert_eq!(at(600., 56.), Some(1));
-        assert_eq!(at(600. + 23., 48.), Some(1));
-        assert_eq!(at(600. + 25., 48.), None);
-        assert_eq!(at(600., 58.), None);
-        assert_eq!(at(600., 39.), None, "the bar keeps the pointer");
-        assert_eq!(at(400., 48.), None);
-        // Above the middle of the gap, the divider there has the pointer.
-        let stacked = [(0, Rect::new(8., 48., 784., 284.)), (1, Rect::new(8., 348., 784., 284.))];
-        let at =
-            |y: f64, reach: f32| grabbed(&stacked, 40., reach, PhysicalPosition::new(400., y), 1.);
-        assert_eq!(at(340., 8.), Some(1));
-        assert_eq!(at(339., 8.), None);
-        assert_eq!(at(347., 0.), None, "without a gap, only below the edge");
-        assert_eq!(at(348., 0.), Some(1));
+        let at = |x: f64, y: f64| hit(&cards, 40., PhysicalPosition::new(x, y), 1.);
+        // The capsule of the second card spans 571..629, its grip 571..601.
+        assert_eq!(at(580., 60.), Some((1, Control::Grip)));
+        assert_eq!(at(610., 60.), Some((1, Control::Zoom)));
+        assert_eq!(at(200., 70.), Some((0, Control::Grip)));
+        assert_eq!(at(570., 60.), None);
+        assert_eq!(at(629., 60.), None);
+        assert_eq!(at(600., 53.), None, "the border above is not a control");
+        assert_eq!(at(600., 76.), None);
+        // A bar over the panes keeps the pointer.
+        assert_eq!(hit(&cards, 80., PhysicalPosition::new(600., 60.), 1.), None);
+    }
+
+    #[test]
+    fn controls_show_near_them() {
+        let cards = [(0, Rect::new(8., 48., 784., 284.)), (1, Rect::new(8., 348., 784., 284.))];
+        let zone = reveal_zone(cards[1].1, 8., 1.);
+        assert_eq!(zone, Rect::new(315., 340., 170., 64.));
+        let cluster = cluster(cards[1].1, 1.).capsule;
+        assert!(zone.contains(PhysicalPosition::new(cluster.x.into(), cluster.y.into())));
+        assert!(zone.contains(PhysicalPosition::new(cluster.right() as f64 - 1., 375.)));
+
+        let at = |x: f64, y: f64| nearby(&cards, 40., 8., PhysicalPosition::new(x, y), 1.);
+        assert_eq!(at(400., 360.), Some(1));
+        assert_eq!(at(316., 393.), Some(1));
+        assert_eq!(at(314., 360.), None);
+        assert_eq!(at(400., 404.), None, "far below them");
+        // Up to the middle of the gap above, where the divider takes over.
+        assert_eq!(at(400., 340.), Some(1));
+        assert_eq!(at(400., 339.), None);
+        assert_eq!(at(400., 48.), Some(0));
+        assert_eq!(nearby(&cards, 60., 8., PhysicalPosition::new(400., 50.), 1.), None);
+
+        // Zones reaching over a narrow neighbour show the controls of the pane under the pointer.
+        let narrow = [(0, Rect::new(0., 48., 100., 300.)), (1, Rect::new(100., 48., 100., 300.))];
+        let at = |x: f64| nearby(&narrow, 40., 0., PhysicalPosition::new(x, 60.), 1.);
+        assert_eq!((at(90.), at(110.)), (Some(0), Some(1)));
+    }
+
+    #[test]
+    fn controls_need_room() {
+        let row = 17.;
+        assert!(fits(Rect::new(0., 0., 74., 51.), row, 1.));
+        assert!(!fits(Rect::new(0., 0., 73., 51.), row, 1.));
+        assert!(!fits(Rect::new(0., 0., 74., 50.), row, 1.));
+        assert!(fits(Rect::new(0., 0., 148., 51.), row, 2.));
+        assert!(!fits(Rect::new(0., 0., 147., 51.), row, 2.));
+    }
+
+    #[test]
+    fn controls_appear_and_linger() {
+        let now = Instant::now();
+        let ms = |ms: u64| Duration::from_millis(ms);
+        let mut reveal = Reveal::default();
+        assert_eq!(reveal.level(false, now), 0.);
+        assert!(!reveal.running(now));
+
+        reveal.level(true, now);
+        let shown = after(now, REVEAL_MS);
+        assert_eq!(reveal.level(true, shown), 1.);
+        // The pointer leaves: they stay a while, then fade.
+        assert_eq!(reveal.level(false, shown), 1.);
+        assert!(reveal.running(shown));
+        let lingering = shown + ms(LINGER_MS - 1);
+        assert_eq!(reveal.level(false, lingering), 1.);
+        assert!(reveal.running(lingering));
+        if scale() > 0. {
+            let fading = reveal.level(false, after(shown + ms(LINGER_MS), HIDE_MS / 2));
+            assert!(fading > 0. && fading < 1., "{fading}");
+        }
+        let gone = after(shown + ms(LINGER_MS), HIDE_MS) + ms(1);
+        assert_eq!(reveal.level(false, gone), 0.);
+        assert!(!reveal.running(gone));
+
+        // Coming back while they linger keeps them.
+        let mut reveal = Reveal::default();
+        reveal.level(true, now);
+        reveal.level(false, after(now, REVEAL_MS));
+        let back = after(now, REVEAL_MS) + ms(LINGER_MS / 2);
+        assert_eq!(reveal.level(true, back), 1.);
+        assert_eq!(reveal.level(true, after(back + ms(LINGER_MS), HIDE_MS)), 1.);
+    }
+
+    #[test]
+    fn corners_follow_the_window_where_they_meet_it() {
+        let window = Rect::new(0., 0., 800., 600.);
+        let (panel, round) = (10., 18.);
+        // Without a panel, cards touch the window: those in its corners follow its curve.
+        let left = Rect::new(0., 48., 400., 552.);
+        assert_eq!(corner_radii(left, window, true, 0., round), [0., 0., round, 0.]);
+        let right = Rect::new(400., 48., 400., 552.);
+        assert_eq!(corner_radii(right, window, true, 0., round), [0., 0., 0., round]);
+        // Unless the window is not cut, maximized or with square corners.
+        assert_eq!(corner_radii(left, window, false, 0., round), [0.; 4]);
+        // A bar that is not pinned leaves the top corners to the cards too.
+        let whole = Rect::new(0.5, 0., 799., 600.);
+        assert_eq!(corner_radii(whole, window, true, 0., round), [round; 4]);
+        // With a panel, cards are set in from the window's corners.
+        let card = window.inset(8.);
+        assert_eq!(corner_radii(card, window, true, panel, round), [panel; 4]);
     }
 
     #[test]
