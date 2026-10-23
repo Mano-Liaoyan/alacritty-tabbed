@@ -3,20 +3,24 @@
 //! edges. The focused pane of a grouped tab has a lit border, like Hyprland's active window.
 //!
 //! Panes slide to their new places and new ones pop in; only where they are drawn moves, their
-//! terminals are resized once.
+//! terminals are resized once. Panes no longer shown, as a zoomed pane grows over them, stay
+//! drawn under it until it covers them.
+//!
+//! Each pane of a group has a handle on the top edge of its card, which drags it.
 
 use std::cell::Cell;
-use std::time::Instant;
+use std::mem;
+use std::time::{Duration, Instant};
 
 use winit::dpi::PhysicalPosition;
 use winit::window::WindowId;
 
-use super::Tabs;
-use super::anim::{Curve, Tween};
+use super::anim::{Curve, Tween, scale};
 use super::bar::{Hit, Layout, MARGIN, PANEL_RADIUS};
-use super::dnd::Target;
+use super::dnd::{Source, Target};
 use super::paint::{Layer, Palette, Rect, mix};
-use super::split::{Axis, Side};
+use super::split::{Axis, Side, Split};
+use super::{Tabs, divider};
 
 /// How long panes take to slide to their places, or to pop in, in milliseconds.
 const MOVE_MS: u64 = 260;
@@ -29,12 +33,24 @@ const POP: f32 = 0.85;
 /// Opacity of the tint over a pane whose icon is hovered, and of the drop preview.
 const TINT: f32 = 0.06;
 const DROP: f32 = 0.22;
+/// Opacity of the chrome over a pane being dragged.
+const VEIL: f32 = 0.4;
+/// Size of a drag handle's plate, and of the zone around it that grabs it, in logical pixels.
+const HANDLE: (f32, f32) = (32., 10.);
+const HANDLE_ZONE: (f32, f32) = (48., 18.);
+/// Size of the dots on a handle, and the distance between their centres.
+const DOT: f32 = 3.;
+const DOT_STEP: f32 = 5.;
+/// How long a handle takes to light up as it is hovered.
+const HANDLE_MS: u64 = 120;
 
 /// Where the panes are drawn while they move to their places, and how lit their borders are.
 #[derive(Default)]
 pub struct Effects {
     /// The panes of the active tab.
     panes: Vec<Motion>,
+    /// Panes no longer shown, drawn under the others until the moment they are covered.
+    leaving: Vec<(Motion, Instant)>,
     /// What the panes were last placed in.
     area: Option<Rect>,
     /// Where a dragged pane would drop, and how visible that is; updated as it is drawn.
@@ -49,30 +65,37 @@ struct Motion {
     /// How lit the border is, from 0 to 1, and how tinted the pane; updated as it is drawn.
     light: Cell<Tween<f32>>,
     tint: Cell<Tween<f32>>,
+    /// How lit the drag handle is.
+    handle: Cell<Tween<f32>>,
 }
 
 impl Effects {
     /// Follow the panes of the active tab to their new places `rects`, at `now`.
     ///
-    /// Panes that were shown slide to their place, new ones pop in beside them, when they
-    /// `animate`; everything jumps into place when the window changes size or another tab's
-    /// panes are shown.
+    /// Panes that were shown slide to their place, new ones pop in beside them, and the ones no
+    /// longer placed stay under them while they move, when they `animate`; everything jumps into
+    /// place when the window changes size or another tab's panes are shown.
     pub fn place(&mut self, rects: &[(WindowId, Rect)], now: Instant, animate: bool) {
         let area = rects.iter().map(|&(_, rect)| rect).reduce(union);
         let shown = rects.iter().any(|&(id, _)| self.motion(id).is_some());
         let animate = animate && shown && area == self.area;
         self.area = area;
 
-        let mut old = std::mem::take(&mut self.panes);
+        // Panes still leaving keep the moment they are covered; covered ones are gone.
+        let leaving = mem::take(&mut self.leaving).into_iter().filter(|&(_, until)| until > now);
+        let leaving = leaving.map(|(motion, until)| (motion, Some(until)));
+        let mut old: Vec<_> = mem::take(&mut self.panes).into_iter().map(|m| (m, None)).collect();
+        old.extend(leaving);
         self.panes = rects
             .iter()
             .map(|&(id, rect)| {
-                let motion = old.iter().position(|motion| motion.id == id).map(|i| old.remove(i));
-                let mut motion = motion.unwrap_or_else(|| Motion {
+                let motion = old.iter().position(|(motion, _)| motion.id == id);
+                let mut motion = motion.map(|i| old.remove(i).0).unwrap_or_else(|| Motion {
                     id,
                     frame: Tween::new(if animate { popped(rect) } else { rect }),
                     light: Cell::new(Tween::new(0.)),
                     tint: Cell::new(Tween::new(0.)),
+                    handle: Cell::new(Tween::new(0.)),
                 });
                 if animate {
                     motion.frame.to(rect, now, MOVE_MS, Curve::SNAP);
@@ -82,6 +105,18 @@ impl Effects {
                 motion
             })
             .collect();
+
+        if animate {
+            let until = now + Duration::from_millis(MOVE_MS).mul_f32(scale());
+            let old = old.into_iter().map(|(motion, since)| (motion, since.unwrap_or(until)));
+            self.leaving = old.filter(|&(_, until)| until > now).collect();
+        }
+    }
+
+    /// The panes no longer shown that are still drawn at `now`, under the others, and where.
+    pub fn leaving(&self, now: Instant) -> Vec<(WindowId, Rect)> {
+        let leaving = self.leaving.iter().filter(|&&(_, until)| until > now);
+        leaving.map(|(motion, _)| (motion.id, motion.frame.get(now))).collect()
     }
 
     /// Where to draw the pane `id`, whose place is `rect`, at `now`.
@@ -93,11 +128,14 @@ impl Effects {
     pub fn running(&self, now: Instant) -> bool {
         let drop =
             self.drop.get().is_some_and(|(rect, alpha)| rect.running(now) || alpha.running(now));
-        drop || self.panes.iter().any(|motion| {
-            motion.frame.running(now)
-                || motion.light.get().running(now)
-                || motion.tint.get().running(now)
-        })
+        let leaving = self.leaving.iter().any(|&(_, until)| until > now);
+        drop || leaving
+            || self.panes.iter().any(|motion| {
+                motion.frame.running(now)
+                    || motion.light.get().running(now)
+                    || motion.tint.get().running(now)
+                    || motion.handle.get().running(now)
+            })
     }
 
     /// Draw the chrome for `now`, the moment the terminals of the next frame are drawn for.
@@ -113,13 +151,12 @@ impl Effects {
     /// whether it is `lit` and `tinted`.
     fn light(&self, id: WindowId, lit: bool, tinted: bool, now: Instant) -> (f32, f32) {
         let Some(motion) = self.motion(id) else { return (0., 0.) };
-        let level = |cell: &Cell<Tween<f32>>, on: bool| {
-            let mut tween = cell.get();
-            tween.to(if on { 1. } else { 0. }, now, LIGHT_MS, Curve::EASE_OUT);
-            cell.set(tween);
-            tween.get(now)
-        };
-        (level(&motion.light, lit), level(&motion.tint, tinted))
+        (level(&motion.light, lit, LIGHT_MS, now), level(&motion.tint, tinted, LIGHT_MS, now))
+    }
+
+    /// How lit the drag handle of the pane `id` is at `now`, moving to whether it is `hovered`.
+    fn handle(&self, id: WindowId, hovered: bool, now: Instant) -> f32 {
+        self.motion(id).map_or(0., |motion| level(&motion.handle, hovered, HANDLE_MS, now))
     }
 
     /// Where to draw the drop preview at `now`, and how visible it is, moving to `target`.
@@ -146,10 +183,56 @@ impl Effects {
     }
 }
 
+/// The level of `cell` at `now`, moving to 1 when `on` and to 0 otherwise in `ms`.
+fn level(cell: &Cell<Tween<f32>>, on: bool, ms: u64, now: Instant) -> f32 {
+    let mut tween = cell.get();
+    tween.to(if on { 1. } else { 0. }, now, ms, Curve::EASE_OUT);
+    cell.set(tween);
+    tween.get(now)
+}
+
 /// The pane of the active tab whose drag handle is at `point`.
 pub fn handle_at(tabs: &Tabs, layout: &Layout, point: PhysicalPosition<f64>) -> Option<usize> {
-    let _ = (tabs, layout, point);
-    None
+    handle(tabs, point, layout.scale)
+}
+
+/// The pane of the active tab whose drag handle is at `point`, at `scale`: panes have handles
+/// while several are shown.
+pub fn handle(tabs: &Tabs, point: PhysicalPosition<f64>, scale: f32) -> Option<usize> {
+    let rects = tabs.pane_rects();
+    if rects.len() < 2 || tabs.drag.is_some() {
+        return None;
+    }
+    let cards: Vec<_> = rects.into_iter().map(|(index, rect)| (index, tabs.card(rect))).collect();
+    grabbed(&cards, tabs.area().y, point, scale)
+}
+
+/// The pane of `cards`, by index, whose handle's zone holds `point`, below `top`.
+fn grabbed(
+    cards: &[(usize, Rect)],
+    top: f32,
+    point: PhysicalPosition<f64>,
+    scale: f32,
+) -> Option<usize> {
+    let hit = cards.iter().find(|&&(_, card)| handle_rects(card, top, scale).1.contains(point));
+    hit.map(|&(index, _)| index)
+}
+
+/// The plate of the drag handle on the top edge of `card`, at `scale`, and the zone around it
+/// that grabs it; neither reaches above `top`.
+fn handle_rects(card: Rect, top: f32, scale: f32) -> (Rect, Rect) {
+    let px = |value: f32| (value * scale).round();
+    let center = |w: f32, h: f32, y: f32| {
+        let rect = Rect::new((card.x + (card.w - w) / 2.).round(), (y - h / 2.).round(), w, h);
+        // Cut off above the top, so the bar keeps the pointer.
+        let cut = (top - rect.y).max(0.);
+        Rect::new(rect.x, rect.y + cut, rect.w, (rect.h - cut).max(0.))
+    };
+    let (w, h) = (px(HANDLE.0), px(HANDLE.1));
+    // The plate sits on the edge, or just below the top where the card has no margin.
+    let plate = center(w, h, card.y.max(top + h / 2.));
+    let zone = center(px(HANDLE_ZONE.0), px(HANDLE_ZONE.1), plate.y + h / 2.);
+    (plate, zone)
 }
 
 /// Draw the panel of each pane of the active tab, with the chrome around it, the focused pane's
@@ -169,9 +252,15 @@ pub fn draw(tabs: &Tabs, layout: &Layout, palette: &Palette, layer: &mut Layer, 
         .into_iter()
         .map(|(index, rect)| (index, effects.frame(tab.panes[index].id, rect, now).inset(margin)))
         .collect();
+    // Panes no longer shown, under the others until they are covered.
+    let leaving: Vec<_> = effects
+        .leaving(now)
+        .into_iter()
+        .filter_map(|(id, frame)| Some((tab.position(id)?, frame.inset(margin))))
+        .collect();
 
     if layout.panel {
-        let holes: Vec<_> = cards.iter().map(|&(_, card)| card).collect();
+        let holes: Vec<_> = leaving.iter().chain(&cards).map(|&(_, card)| card).collect();
         for rect in around(tabs.area(), &holes) {
             layer.rect(rect, palette.chrome);
         }
@@ -186,31 +275,76 @@ pub fn draw(tabs: &Tabs, layout: &Layout, palette: &Palette, layer: &mut Layer, 
     // The focused pane is drawn last, over the others that may slide under it.
     let focused = cards.iter().find(|&&(index, _)| index == tab.focus).map(|&(_, card)| card);
     let (front, back): (Vec<_>, Vec<_>) = cards.iter().partition(|&&(index, _)| index == tab.focus);
-    for &(index, card) in back.into_iter().chain(front) {
+    // The pane being dragged is veiled, as lifted out of its place.
+    let dragged =
+        tabs.drag.as_ref().filter(|drag| drag.moving).and_then(|drag| match drag.source {
+            Source::Pane(from, pane) if from == tabs.active => Some(pane),
+            _ => None,
+        });
+    for &(index, card) in leaving.iter().chain(back).chain(front) {
         let lit = grouped && (index == tab.focus || hovered == Some(index));
         let (light, tint) = effects.light(tab.panes[index].id, lit, hovered == Some(index), now);
         if !layout.panel && !grouped {
             continue;
         }
         if tint > 0. {
-            layer.rounded_alpha(card, radius, palette.primary, TINT * tint);
+            layer.rounded_alpha(card, radius, palette.highlight, TINT * tint);
+        }
+        if dragged == Some(index) {
+            layer.rounded_alpha(card, radius, palette.chrome, VEIL);
         }
         let above = focused.filter(|_| index != tab.focus);
         border(layer, card, radius, palette, light, widths, above);
     }
 
-    // Where the dragged pane would go, beside one of the panes.
+    // A handle on each shown pane's top edge, while there are several.
+    if cards.len() > 1 {
+        for &(index, card) in &cards {
+            let level = effects.handle(tab.panes[index].id, tabs.handle == Some(index), now);
+            draw_handle(layer, layout, palette, card, tabs.area().y, level);
+        }
+    }
+    divider::draw(tabs, layout, palette, layer, now);
+
+    // Where the dragged pane would go, beside one of the panes, once it has left its place.
     let target = tabs.drag.as_ref().filter(|drag| drag.moving).and_then(|drag| match drag.target {
         Some(Target::Dock { pane, axis, side }) => {
-            let card = cards.iter().find(|&&(index, _)| index == pane)?.1;
-            Some(half(card, axis, side).inset(layout.px(MARGIN / 2.)))
+            let moving = match drag.source {
+                Source::Pane(from, index) => Split::Pane(tabs.tabs.get(from)?.panes[index].id),
+                Source::Tab(from) => tabs.tabs.get(from)?.layout.clone(),
+            };
+            let beside = tab.panes.get(pane)?.id;
+            let (area, spacing) = (tabs.area(), tabs.spacing());
+            let rect = docked(&tab.layout, moving, beside, (axis, side), area, spacing)?;
+            Some(rect.inset(margin + layout.px(MARGIN / 2.)))
         },
         _ => None,
     });
     if let Some((rect, alpha)) = effects.preview(target, now) {
         let radius = layout.radius(PANEL_RADIUS);
-        layer.rounded_alpha(rect, radius, palette.primary, DROP * alpha);
-        layer.rounded_alpha(rect.inset(-line), radius + line, palette.primary, DROP * alpha / 2.);
+        layer.rounded_alpha(rect, radius, palette.highlight, DROP * alpha);
+        layer.rounded_alpha(rect.inset(-line), radius + line, palette.highlight, DROP * alpha / 2.);
+    }
+}
+
+/// Draw the drag handle on the top edge of `card`, below `top`, lit by `level` as it is hovered:
+/// a notch of chrome holding three dots.
+fn draw_handle(
+    layer: &mut Layer,
+    layout: &Layout,
+    palette: &Palette,
+    card: Rect,
+    top: f32,
+    level: f32,
+) {
+    let (plate, _) = handle_rects(card, top, layout.scale);
+    let fill = mix(palette.chrome, palette.hover, level);
+    layer.rounded(plate, layout.curve(plate.h / 2.), fill);
+    let dots = mix(mix(fill, palette.muted, 0.7), palette.foreground, level);
+    let (x, y) = plate.center();
+    let (radius, step) = (layout.px(DOT) / 2., layout.px(DOT_STEP));
+    for offset in [-step, 0., step] {
+        layout.dot(layer, (x + offset, y), radius, dots);
     }
 }
 
@@ -225,7 +359,7 @@ fn border(
     (thin, thick): (f32, f32),
     above: Option<Rect>,
 ) {
-    let color = mix(palette.card_outline, palette.primary, light);
+    let color = mix(palette.card_outline, palette.highlight, light);
     // A lit border grows by whole pixels.
     let width = if light > 0. { (thin + (thick - thin) * light).round() } else { thin };
     if above.is_none_or(|above| !overlap(card, above)) {
@@ -262,16 +396,23 @@ fn popped(rect: Rect) -> Rect {
     Rect::new(rect.x + (rect.w - w) / 2., rect.y + (rect.h - h) / 2., w, h)
 }
 
-/// The half of `rect` on `side` along `axis`.
-fn half(rect: Rect, axis: Axis, side: Side) -> Rect {
-    let (w, h) = match axis {
-        Axis::Row => (rect.w / 2., rect.h),
-        Axis::Column => (rect.w, rect.h / 2.),
-    };
-    match side {
-        Side::Before => Rect::new(rect.x, rect.y, w, h),
-        Side::After => Rect::new(rect.right() - w, rect.bottom() - h, w, h),
+/// Where the panes of `moving` are placed in `area` once docked beside the pane `beside` of
+/// `layout`, on `side` along `axis`, having left their places in it first, as a drop does.
+fn docked<P: Copy + PartialEq>(
+    layout: &Split<P>,
+    moving: Split<P>,
+    beside: P,
+    (axis, side): (Axis, Side),
+    area: Rect,
+    spacing: f32,
+) -> Option<Rect> {
+    let ids = moving.panes();
+    let mut rest = ids.iter().try_fold(layout.clone(), |rest, &id| rest.remove(id))?;
+    if !rest.insert(beside, moving, axis, side) {
+        return None;
     }
+    let rects = rest.rects(area, spacing).into_iter().filter(|(id, _)| ids.contains(id));
+    rects.map(|(_, rect)| rect).reduce(union)
 }
 
 /// Rectangles covering `area` wherever none of `holes` is, in bands from the top.
@@ -379,12 +520,31 @@ mod tests {
     }
 
     #[test]
-    fn halves() {
-        let rect = Rect::new(10., 20., 100., 50.);
-        assert_eq!(half(rect, Axis::Row, Side::Before), Rect::new(10., 20., 50., 50.));
-        assert_eq!(half(rect, Axis::Row, Side::After), Rect::new(60., 20., 50., 50.));
-        assert_eq!(half(rect, Axis::Column, Side::Before), Rect::new(10., 20., 100., 25.));
-        assert_eq!(half(rect, Axis::Column, Side::After), Rect::new(10., 45., 100., 25.));
+    fn docking_previews_where_the_panes_end_up() {
+        let pair = Split::Pane(1).join(Split::Pane(2), Axis::Row, Side::After);
+        let below = (Axis::Column, Side::After);
+        // A pane from elsewhere takes half of the one it docks beside.
+        assert_eq!(
+            docked(&pair, Split::Pane(3), 2, below, WHOLE, 0.),
+            Some(Rect::new(400., 340., 400., 300.))
+        );
+        // A pane of the group leaves its place first: its neighbour has the whole area to share.
+        assert_eq!(
+            docked(&pair, Split::Pane(1), 2, below, WHOLE, 0.),
+            Some(Rect { y: 340., h: 300., ..WHOLE })
+        );
+        assert_eq!(
+            docked(&pair, Split::Pane(1), 2, (Axis::Row, Side::After), WHOLE, 0.),
+            Some(RIGHT)
+        );
+        // A group docks as a whole, and only beside a pane that stays.
+        let group = Split::Pane(3).join(Split::Pane(4), Axis::Column, Side::After);
+        assert_eq!(
+            docked(&pair, group, 1, (Axis::Row, Side::Before), WHOLE, 0.),
+            Some(Rect { w: 200., ..WHOLE })
+        );
+        assert_eq!(docked(&pair, Split::Pane(1), 1, below, WHOLE, 0.), None);
+        assert_eq!(docked(&Split::Pane(1), Split::Pane(1), 1, below, WHOLE, 0.), None);
     }
 
     #[test]
@@ -446,5 +606,87 @@ mod tests {
         let holes_area = 30 * 30 * 2 - 10 * 20 + 10 * 10;
         assert_eq!(covered(area, &rects), 100 * 60 - holes_area);
         assert_eq!(around(area, &[]), vec![area]);
+    }
+
+    #[test]
+    fn zoom_keeps_leaving_panes_until_covered() {
+        let now = Instant::now();
+        let mut effects = Effects::default();
+        effects.place(&[(id(1), LEFT), (id(2), RIGHT)], now, true);
+        // Zooming the first pane: it grows over the second, which stays drawn until then.
+        effects.place(&[(id(1), WHOLE)], now, true);
+        if scale() > 0. {
+            assert_eq!(effects.leaving(now), vec![(id(2), RIGHT)]);
+            assert!(effects.running(after(now, MOVE_MS) - Duration::from_millis(1)));
+            // Placing again before then keeps the moment it is covered.
+            let later = after(now, MOVE_MS / 2);
+            effects.place(&[(id(1), WHOLE)], later, true);
+            assert_eq!(effects.leaving(later), vec![(id(2), RIGHT)]);
+        }
+        let end = after(now, MOVE_MS);
+        assert_eq!(effects.leaving(end), vec![]);
+        assert!(!effects.running(end));
+
+        // Unzooming: the second pane pops in again.
+        effects.place(&[(id(1), LEFT), (id(2), RIGHT)], end, true);
+        let popping = if scale() > 0. { popped(RIGHT) } else { RIGHT };
+        assert_eq!(effects.frame(id(2), RIGHT, end), popping);
+        assert_eq!(effects.leaving(end), vec![]);
+    }
+
+    #[test]
+    fn jumps_leave_nothing_behind() {
+        let now = Instant::now();
+        let mut effects = Effects::default();
+        effects.place(&[(id(1), LEFT), (id(2), RIGHT)], now, true);
+        effects.place(&[(id(1), WHOLE)], now, false);
+        assert_eq!(effects.leaving(now), vec![]);
+    }
+
+    #[test]
+    fn handles_sit_on_the_top_edge() {
+        let card = Rect::new(100., 48., 300., 200.);
+        let (plate, zone) = handle_rects(card, 40., 1.);
+        assert_eq!(plate, Rect::new(234., 43., 32., 10.));
+        assert_eq!(zone, Rect::new(226., 40., 48., 17.));
+        assert_eq!(plate.center(), (250., 48.));
+        // At twice the scale.
+        let (plate, zone) = handle_rects(Rect::new(0., 96., 600., 400.), 60., 2.);
+        assert_eq!((plate.w, plate.h, zone.w, zone.h), (64., 20., 96., 36.));
+        // A card without a margin keeps its handle below the bar.
+        let (plate, zone) = handle_rects(Rect::new(0., 40., 300., 200.), 40., 1.);
+        assert_eq!((plate.y, zone.y), (40., 40.));
+    }
+
+    #[test]
+    fn handles_grab_within_their_zone() {
+        let cards = [(0, Rect::new(8., 48., 384., 584.)), (1, Rect::new(408., 48., 384., 584.))];
+        let at = |x: f64, y: f64| grabbed(&cards, 40., PhysicalPosition::new(x, y), 1.);
+        assert_eq!(at(200., 48.), Some(0));
+        assert_eq!(at(600., 56.), Some(1));
+        assert_eq!(at(600. + 23., 48.), Some(1));
+        assert_eq!(at(600. + 25., 48.), None);
+        assert_eq!(at(600., 58.), None);
+        assert_eq!(at(600., 39.), None, "the bar keeps the pointer");
+        assert_eq!(at(400., 48.), None);
+    }
+
+    #[test]
+    fn cards_are_the_gap_apart() {
+        let layout = Split::Pane(1).join(Split::Pane(2), Axis::Row, Side::After);
+        for (gap, scale) in [(0., 1.), (16., 1.), (48., 1.), (16., 2.), (48., 1.5)] {
+            let tabs = Tabs { panel: true, gap, scale, ..Tabs::default() };
+            let rects = layout.rects(WHOLE, tabs.spacing());
+            let (left, right) = (tabs.card(rects[0].1), tabs.card(rects[1].1));
+            assert_eq!(
+                right.x - left.right(),
+                (gap * scale as f32).round(),
+                "gap {gap} at {scale}"
+            );
+            // The window's edges keep their margin.
+            assert_eq!(left.x, (MARGIN * scale as f32).round());
+        }
+        let tabs = Tabs { panel: false, gap: 48., scale: 1., ..Tabs::default() };
+        assert_eq!(tabs.spacing(), 0.);
     }
 }

@@ -415,15 +415,21 @@ impl Tabs {
     }
 
     /// The shown panes of the active tab other than the live one, and where to draw them at
-    /// `now`.
+    /// `now`: first those no longer shown that stay under the others until they are covered.
     pub fn background_panes(&self, now: Instant) -> Vec<PaneDraw> {
         let Some(tab) = self.tabs.get(self.active) else { return Vec::new() };
-        self.pane_rects()
-            .into_iter()
-            .filter_map(|(index, rect)| {
-                let pane = &tab.panes[index];
+        let leaving =
+            self.pane_effects.leaving(now).into_iter().filter_map(|(id, frame)| {
+                Some((tab.panes.iter().find(|pane| pane.id == id)?, frame))
+            });
+        let shown = self.pane_rects().into_iter().map(|(index, rect)| {
+            let pane = &tab.panes[index];
+            (pane, self.pane_effects.frame(pane.id, rect, now))
+        });
+        leaving
+            .chain(shown)
+            .filter_map(|(pane, frame)| {
                 let session = pane.session.as_ref()?;
-                let frame = self.pane_effects.frame(pane.id, rect, now);
                 Some(PaneDraw {
                     terminal: session.terminal.clone(),
                     config: session.config.clone(),
@@ -1204,7 +1210,8 @@ fn sync(ctx: &mut WindowContext, config: &Rc<UiConfig>, resize: bool) {
     let px = |value: f32| (value * ctx.display.window.scale_factor as f32).round() as u32;
     // Without its panel the terminal fills the window, its text still lined up with the logo.
     ctx.display.tabs.panel = config.window.panel;
-    ctx.display.tabs.gap = 2. * MARGIN;
+    let gap = f32::from(config.window.pane_gap.min(48));
+    let regap = mem::replace(&mut ctx.display.tabs.gap, gap) != gap;
     let (offset, inset) = match (shown, frame) {
         (false, _) => (0, 0),
         (_, Frame::Fullscreen) => (px(BAR), 0),
@@ -1237,7 +1244,7 @@ fn sync(ctx: &mut WindowContext, config: &Rc<UiConfig>, resize: bool) {
     let size = &ctx.display.size_info;
     let cells = (size.cell_width(), size.cell_height());
     let tabs = &mut ctx.display.tabs;
-    if offset != tabs.height || changed || resize || cells != tabs.cells {
+    if offset != tabs.height || changed || resize || regap || cells != tabs.cells {
         (tabs.height, tabs.cells) = (offset, cells);
         relayout(ctx);
         // The live terminal's cells move with its padding, though its size stays.
