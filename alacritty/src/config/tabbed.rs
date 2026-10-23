@@ -148,9 +148,11 @@ mod tests {
 
     #[test]
     fn pane_gap_and_highlight_are_read() {
-        let config = config("[tabbed]
+        let config = config(
+            "[tabbed]
 pane_gap = 4
-pane_highlight = \"#FF9500\"");
+pane_highlight = \"#FF9500\"",
+        );
         assert_eq!(config.tabbed.pane_gap, 4);
         assert_eq!(config.tabbed.pane_highlight, Some(Rgb::new(0xff, 0x95, 0x00)));
     }
@@ -175,8 +177,10 @@ pane_highlight = \"#FF9500\"");
             ("layout", RestoreSession::Layout),
             ("text", RestoreSession::Text),
         ] {
-            let config = config(&format!("[tabbed]
-restore_session = \"{text}\""));
+            let config = config(&format!(
+                "[tabbed]
+restore_session = \"{text}\""
+            ));
             assert_eq!(config.tabbed.restore_session, restore);
         }
         let text = "[tabbed]
@@ -209,15 +213,19 @@ dynamic_title = false";
         assert_eq!(config.window.identity.title, "Mine");
 
         // The old place beside the upstream `[window]` keys is not read.
-        let old = self::config("[window]
+        let old = self::config(
+            "[window]
 tabs = false
-pane_gap = 4");
+pane_gap = 4",
+        );
         assert!(old.tabbed.tabs);
         assert_eq!(old.tabbed.pane_gap, 16);
 
         let mut config = UiConfig::default();
-        let value = toml::from_str("tabbed.tab_track = false
-window.dynamic_padding = true");
+        let value = toml::from_str(
+            "tabbed.tab_track = false
+window.dynamic_padding = true",
+        );
         config.replace(value.unwrap()).unwrap();
         assert!(!config.tabbed.tab_track && config.window.dynamic_padding);
 

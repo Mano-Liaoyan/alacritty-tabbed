@@ -174,11 +174,9 @@ impl Layout {
         // the edge of the panes' cards below, as the window's controls end at it on the right.
         // macOS puts it beside its window buttons instead.
         let left = if mac { lights + px(7.) } else { margin };
-        let on_track =
-            tabs.configs.as_ref().is_none_or(|(config, _)| config.tabbed.tab_track);
+        let on_track = tabs.configs.as_ref().is_none_or(|(config, _)| config.tabbed.tab_track);
         let default = Brand::default();
-        let config =
-            tabs.configs.as_ref().map_or(&default, |(config, _)| &config.tabbed.brand);
+        let config = tabs.configs.as_ref().map_or(&default, |(config, _)| &config.tabbed.brand);
         let image = config.show.then(|| icons::brand(&config.icon)).flatten();
         let names: Vec<_> = [(&config.title, true), (&config.subtitle, false)]
             .into_iter()
@@ -207,7 +205,8 @@ impl Layout {
             .min(count - shown);
 
         let (track, slots) = track(brand, (inner, pad), shown, step, bar, scale);
-        let tab_rects: Vec<_> = slots.into_iter().enumerate().map(|(i, r)| (first + i, r)).collect();
+        let tab_rects: Vec<_> =
+            slots.into_iter().enumerate().map(|(i, r)| (first + i, r)).collect();
 
         let mut buttons = Vec::new();
         let mut x = track.right() + px(6.);

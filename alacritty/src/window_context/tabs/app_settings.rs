@@ -403,16 +403,16 @@ mod tests {
 
     #[test]
     fn old_window_keys_move_to_their_own_table() {
-        let text = "# Mine.\n[window]\nopacity = 0.9\n# Wide.\npane_gap = 4\ntabs = false\n\n\
-                    [window.ui_font]\nsize = 12 # Big.\n\n[window.brand]\ntitle = \"Work\"\n\n\
-                    [font]\nsize = 11\n";
+        let text = "# Mine.\n[window]\nopacity = 0.9\n# Wide.\npane_gap = 4\ntabs = \
+                    false\n\n[window.ui_font]\nsize = 12 # Big.\n\n[window.brand]\ntitle = \
+                    \"Work\"\n\n[font]\nsize = 11\n";
         let changed = AppSettings { corners: Corners::Square, ..defaults() };
         let edited = changed.edit(&defaults(), text).unwrap();
         assert_eq!(
             edited,
             "# Mine.\n[window]\nopacity = 0.9\n\n[font]\nsize = 11\n\n[tabbed]\n# Wide.\npane_gap \
-             = 4\ntabs = false\ncorners = \"square\"\n\n[tabbed.ui_font]\nsize = 12 # Big.\n\n\
-             [tabbed.brand]\ntitle = \"Work\"\n"
+             = 4\ntabs = false\ncorners = \"square\"\n\n[tabbed.ui_font]\nsize = 12 # \
+             Big.\n\n[tabbed.brand]\ntitle = \"Work\"\n"
         );
         let config: toml::Value = toml::from_str(&edited).unwrap();
         let config = UiConfig::deserialize(config).unwrap();

@@ -964,12 +964,8 @@ impl Settings {
         let pad = if card.w < px(440.) { px(16.) } else { px(28.) };
         // New profile and Duplicate share the line of the card's footer buttons.
         let footer_middle = card.bottom() - pad - (px(FOOTER_BUTTON) / 2.).round();
-        let new_profile = Rect::new(
-            x + px(14.),
-            footer_middle - px(18.),
-            (new_width * shrink).round(),
-            px(36.),
-        );
+        let new_profile =
+            Rect::new(x + px(14.), footer_middle - px(18.), (new_width * shrink).round(), px(36.));
         let duplicate = Rect::new(
             new_profile.right() + px(4.),
             new_profile.y,
@@ -1295,15 +1291,14 @@ impl Settings {
                 Rect::new(left + px(6.), top + header, columns as f32 * cell, rows as f32 * cell);
             (picker, cells, cell, columns)
         });
-        let logo_bar = self.logos.as_ref().zip(logos).and_then(
-            |(picker, (rect, cells, cell, columns))| {
+        let logo_bar =
+            self.logos.as_ref().zip(logos).and_then(|(picker, (rect, cells, cell, columns))| {
                 let rows = ((cells.h / cell).round() as usize).max(1);
                 let max = picker.kind.count().div_ceil(columns).saturating_sub(rows);
                 let track = Rect::new(rect.right() - px(5.), cells.y, px(3.), cells.h);
                 let (first, rows) = (picker.first.min(max) as f32, rows as f32);
                 Scrollbar::new(track, rect.right(), px(12.), rows, first, max as f32, px(16.))
-            },
-        );
+            });
 
         // The color picker drops from its well, or rises above it when there is no room below,
         // ending where the hex field does, kept inside the scrolling fields.

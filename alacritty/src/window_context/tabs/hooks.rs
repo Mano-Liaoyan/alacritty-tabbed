@@ -15,9 +15,9 @@ use winit::window::WindowId;
 use alacritty_terminal::event::OnResize;
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::term::Term;
+use alacritty_terminal::tty::Options as PtyOptions;
 #[cfg(windows)]
 use alacritty_terminal::tty::Pty;
-use alacritty_terminal::tty::Options as PtyOptions;
 
 use crate::cli::{ParsedOptions, WindowOptions};
 use crate::config::UiConfig;
@@ -51,10 +51,7 @@ pub fn pty_config(
 }
 
 /// The new terminal `terminal`, with the text of the live pane of the window `saved` written in.
-pub fn replay(
-    mut terminal: Term<EventProxy>,
-    saved: Option<&restore::Window>,
-) -> Term<EventProxy> {
+pub fn replay(mut terminal: Term<EventProxy>, saved: Option<&restore::Window>) -> Term<EventProxy> {
     if let Some(text) = saved.and_then(restore::first_text) {
         restore::replay(&mut terminal, text);
     }
