@@ -652,6 +652,9 @@ pub struct Effects {
     pin: Option<Tween<f32>>,
     /// The button under the pointer that has a tooltip, the tooltip, and since when.
     tip: Option<(Hit, &'static str, Instant)>,
+    /// Whether the last frames drew a tooltip, which reaches below the bar: the last, then the one
+    /// before.
+    tip_drawn: [bool; 2],
 }
 
 /// Where a pane's tab is, by its index, and how far its icon is fanned out and lifted.
@@ -770,7 +773,8 @@ impl Tabs {
         };
         let now = Instant::now();
         // A bar that is not pinned lies over the panes, which it uncovers as it hides.
-        let overlay = self.autohide.overlay(now);
+        // So does a tooltip, below the bar, and the frame after it.
+        let overlay = self.autohide.overlay(now) || self.bar_effects.tip_drawn.contains(&true);
         if panes > 1 || fanned || overlay || self.animating(now) || self.peeking.visible(now) {
             return vec![DamageRect::new(0, 0, width, height)];
         }
@@ -1074,7 +1078,10 @@ impl Tabs {
 
         // The tooltip of the button under the pointer, below it.
         let mut tip = Layer::default();
-        if let Some((hit, text, shown)) = self.bar_effects.tip(now) {
+        let tip_shown = self.bar_effects.tip(now);
+        let drawn = self.bar_effects.tip_drawn[0];
+        self.bar_effects.tip_drawn = [tip_shown.is_some(), drawn];
+        if let Some((hit, text, shown)) = tip_shown {
             if let Some(&(_, button)) = layout.buttons.iter().find(|(h, _)| *h == hit) {
                 let size = (font.width(text, false) + px(16.), line_height + px(8.));
                 let x = (button.center().0 - size.0 / 2.).min(width - px(MARGIN) - size.0);
@@ -1242,7 +1249,7 @@ impl Tabs {
                     Hit::Pin => {
                         let pinned = self.bar_effects.pin(now);
                         let pin = icons::pin(45. * (1. - pinned), pinned);
-                        return layer.image(rect.square(px(18.)), &pin, color);
+                        return layer.image(rect.square(px(20.)), &pin, color);
                     },
                     _ => {
                         let background = if hovered { palette.hover } else { palette.chrome };

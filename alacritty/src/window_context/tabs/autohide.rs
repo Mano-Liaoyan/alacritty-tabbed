@@ -114,14 +114,14 @@ impl State {
         !self.pinned
     }
 
-    /// Whether the bar should be shown at `now`: while something on it is open, for a moment after
-    /// a keyboard action, once the pointer rested at the top edge, and then while the pointer is
-    /// on it or only just left it.
+    /// Whether the bar should be shown at `now`: for a moment after a keyboard action, once the
+    /// pointer rested at the top edge, and then while the pointer is on it or only just left it,
+    /// or something open keeps it; what is open over the panes never brings it.
     fn target(&self, now: Instant) -> bool {
         let rested = self.near_since.is_some_and(|since| now >= since + DWELL);
         let lingers = self.left_at.is_some_and(|at| now < at + LINGER);
         let flashing = self.flash_until.is_some_and(|until| now < until);
-        self.hold || flashing || rested || self.revealed && (self.band || lingers)
+        flashing || rested || self.revealed && (self.band || self.hold || lingers)
     }
 }
 
@@ -204,8 +204,11 @@ mod tests {
         let flashed = State { flash_until: Some(now + FLASH), ..unpinned() };
         assert!(flashed.target(now + ms(1199)));
         assert!(!flashed.target(now + FLASH));
-        let held = State { hold: true, ..unpinned() };
+        // Something open keeps a shown bar, but a pane's menu does not bring a hidden one.
+        let held = State { hold: true, revealed: true, left_at: Some(now), ..unpinned() };
         assert!(held.target(now + ms(10_000)));
+        let hidden = State { hold: true, ..unpinned() };
+        assert!(!hidden.target(now));
     }
 
     #[test]
