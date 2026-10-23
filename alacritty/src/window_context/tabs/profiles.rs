@@ -26,7 +26,8 @@ pub struct Profile {
     /// Starting directory; empty starts in the home directory.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub directory: String,
-    /// Image file, or text such as an emoji; empty uses the program's own icon.
+    /// Image file, a bundled logo as `bundled:name`, or text such as an emoji; empty uses the
+    /// program's own icon.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub icon: String,
     /// Font family; empty uses the font from `alacritty.toml`.
@@ -126,7 +127,10 @@ impl Profile {
         match self.icon.trim() {
             "" if self.command.trim().is_empty() => icons::get(None, &shell(config)),
             "" => icons::get(None, &self.command),
-            icon => icons::get(Some(Path::new(&expand(icon))), ""),
+            icon => match icon.strip_prefix(icons::BUNDLED_PREFIX) {
+                Some(name) => icons::named(name),
+                None => icons::get(Some(Path::new(&expand(icon))), ""),
+            },
         }
     }
 

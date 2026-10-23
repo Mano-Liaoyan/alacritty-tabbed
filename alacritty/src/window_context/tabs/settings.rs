@@ -92,6 +92,8 @@ enum Target {
     AllFonts,
     /// Row of the font list.
     Font(usize),
+    /// Cell of the logo picker: the program's own icon, then the bundled logos.
+    Logo(usize),
     ToggleDefault,
     ToggleShown,
     Delete,
@@ -104,6 +106,8 @@ enum Target {
 struct Entry {
     text: [String; 7],
     hidden: bool,
+    /// Name of the saved profile this edits, which tabs opened with it know it by.
+    origin: Option<String>,
 }
 
 impl Entry {
@@ -118,7 +122,7 @@ impl Entry {
             env.collect::<Vec<_>>().join("\n"),
             profile.options.join("\n"),
         ];
-        Self { text, hidden: profile.hidden }
+        Self { text, hidden: profile.hidden, origin: None }
     }
 
     fn lines(&self, field: Field) -> impl Iterator<Item = &str> {
@@ -153,8 +157,15 @@ impl Entry {
             return Err(format!("{name}: the starting directory does not exist"));
         }
         let icon = profiles::expand(&profile.icon);
-        if profile.icon.contains(['.', '/', '\\']) && !Path::new(&icon).is_file() {
-            return Err(format!("{name}: the icon file does not exist"));
+        match profile.icon.strip_prefix(icons::BUNDLED_PREFIX) {
+            Some(logo) if icons::names().all(|known| known != logo) => {
+                return Err(format!("{name}: there is no bundled logo named {logo}"));
+            },
+            Some(_) => (),
+            None if profile.icon.contains(['.', '/', '\\']) && !Path::new(&icon).is_file() => {
+                return Err(format!("{name}: the icon file does not exist"));
+            },
+            None => (),
         }
         if self
             .lines(Field::Env)
@@ -209,6 +220,14 @@ struct FontList {
     filter: bool,
 }
 
+/// The bundled logos dropped from the icon tile.
+struct LogoPicker {
+    /// Cell chosen with the keyboard.
+    highlighted: usize,
+    /// First row of cells shown.
+    first: usize,
+}
+
 /// Geometry of the dialog in window pixels.
 struct Panel {
     dialog: Rect,
@@ -218,6 +237,11 @@ struct Panel {
     new_profile: Rect,
     duplicate: Rect,
     card: Rect,
+    /// Part of the card the profile's fields scroll in, above its buttons.
+    viewport: Rect,
+    /// How far the fields are scrolled, and can be.
+    scrolled: f32,
+    scroll_max: f32,
     tile: Rect,
     fields: [Rect; 7],
     labels: [Rect; 7],
@@ -225,6 +249,24 @@ struct Panel {
     status: Rect,
     /// The font list, its rows' area and the height of a row.
     font_list: Option<(Rect, Rect, f32)>,
+    /// The logo picker, its cells' area, the size of a cell and the cells in a row.
+    logos: Option<(Rect, Rect, f32, usize)>,
+}
+
+impl Target {
+    /// Whether the target scrolls with the profile's fields.
+    fn scrolls(self) -> bool {
+        matches!(
+            self,
+            Target::Tile
+                | Target::Field(_)
+                | Target::Browse(_)
+                | Target::Reset
+                | Target::AllFonts
+                | Target::ToggleDefault
+                | Target::ToggleShown
+        )
+    }
 }
 
 pub struct Settings {
@@ -243,19 +285,26 @@ pub struct Settings {
     status: Option<(String, bool)>,
     /// File picker being shown for a field.
     picking: Option<(Field, Receiver<Option<String>>)>,
+    /// Profiles just saved, under the names they had before, for their open tabs.
+    saved: Vec<(String, Profile)>,
     /// Installed font families, and their listing until it is done.
     fonts: Vec<Family>,
     listing: Option<Receiver<Vec<Family>>>,
     /// Offer every font, not only monospaced ones.
     all_fonts: bool,
     font_list: Option<FontList>,
+    logos: Option<LogoPicker>,
+    /// Pixels the profile's fields are scrolled by.
+    card_scroll: f32,
     pointer: PhysicalPosition<f64>,
 }
 
 impl Settings {
     pub fn new(config: &UiConfig, wake: impl Fn() + Send + 'static) -> Self {
         let profiles = Profiles::load(config);
-        let mut entries: Vec<_> = profiles.list.iter().map(Entry::new).collect();
+        let saved =
+            |profile: &Profile| Entry { origin: Some(profile.name.clone()), ..Entry::new(profile) };
+        let mut entries: Vec<_> = profiles.list.iter().map(saved).collect();
         if entries.is_empty() {
             entries.push(Entry::new(&Profile::new("New profile", "")));
         }
@@ -273,32 +322,46 @@ impl Settings {
             confirm_close: false,
             status: None,
             picking: None,
+            saved: Vec::new(),
             fonts: Vec::new(),
             listing: Some(fonts::list(wake)),
             all_fonts: false,
             font_list: None,
+            logos: None,
+            card_scroll: 0.,
             pointer: PhysicalPosition::default(),
         }
     }
 
     fn panel(&self, layout: &Layout) -> Panel {
         let px = |value: f32| layout.px(value);
-        let (window, bar) = (layout.width, layout.bar);
-        let height = layout.height;
-        let (w, h) = (px(920.).min(window - px(24.)), px(700.).min(height - bar - px(12.)));
+        let (cw, ch) = layout.cell;
+        let (window, bar, height) = (layout.width, layout.bar, layout.height);
+        let w = px(920.).min(window - px(24.)).max(0.);
+        let h = px(700.).min(height - bar - px(12.)).max(0.);
         let dialog =
             Rect::new(((window - w) / 2.).round(), (bar + (height - bar - h) / 2.).round(), w, h);
         let (x, y) = (dialog.x, dialog.y);
         let title = px(48.);
 
-        // Text takes the terminal's font, so text-bound widths follow its cells.
-        let cw = layout.cell.0;
-        let side = px(240.).max((20. * cw + px(88.)).round());
-        let sidebar = Rect::new(x + px(8.), y + title, side, h - title - px(8.));
-        let new_profile =
-            Rect::new(x + px(14.), sidebar.bottom() - px(42.), px(40.) + 11. * cw, px(36.));
-        let duplicate =
-            Rect::new(new_profile.right() + px(4.), new_profile.y, px(40.) + 9. * cw, px(36.));
+        // Text takes the terminal's font, so text-bound widths follow its cells; a narrow dialog
+        // leaves most of its width to the profile.
+        let side = px(240.).max((20. * cw + px(88.)).round()).min((w * 0.4).round());
+        let sidebar = Rect::new(x + px(8.), y + title, side, (h - title - px(8.)).max(0.));
+        let (new_width, duplicate_width) = (px(40.) + 11. * cw, px(40.) + 9. * cw);
+        let shrink = ((side - px(16.)) / (new_width + duplicate_width)).clamp(0., 1.);
+        let new_profile = Rect::new(
+            x + px(14.),
+            sidebar.bottom() - px(42.),
+            (new_width * shrink).round(),
+            px(36.),
+        );
+        let duplicate = Rect::new(
+            new_profile.right() + px(4.),
+            new_profile.y,
+            (duplicate_width * shrink).round(),
+            px(36.),
+        );
         let mut rows = Vec::new();
         let mut top = sidebar.y + px(36.);
         for index in self.scroll..self.entries.len() {
@@ -310,38 +373,76 @@ impl Settings {
         }
 
         let card =
-            Rect::new(sidebar.right() + px(8.), y + title, w - side - px(24.), h - title - px(8.));
-        let (x0, x1) = (card.x + px(28.), card.right() - px(28.));
-        let at = |top: f32| card.y + px(top);
-        let tile = Rect::new(x0, at(24.), px(52.), px(52.));
-        let mid = ((x0 + x1) / 2.).round();
-        let button = px(88.);
-        let field = |x: f32, top: f32, right: f32, height: f32| {
-            Rect::new(x, at(top), right - x, px(height))
+            Rect::new(sidebar.right() + px(8.), y + title, (w - side - px(24.)).max(0.), sidebar.h);
+        let pad = if card.w < px(440.) { px(16.) } else { px(28.) };
+        let (x0, x1) = (card.x + pad, (card.right() - pad).max(card.x + pad));
+        let width = x1 - x0;
+        let narrow = width < px(440.);
+        let button = px(88.).min((width * 0.22).round());
+        let all_fonts = (px(32.) + 14. * cw).min((width * 0.45).round());
+
+        // Delete, Cancel and Save stay at the card's bottom, with the status beside or above them.
+        let (save, cancel) =
+            (px(96.).min((width * 0.3).round()), px(92.).min((width * 0.28).round()));
+        let delete = px(128.).min(width - save - cancel - px(16.)).max(0.);
+        let status_width = width - save - cancel - delete - px(24.);
+        let footer = card.bottom() - px(58.);
+        let status = if status_width >= px(160.) {
+            Rect::new(x0 + delete + px(12.), footer, status_width, px(34.))
+        } else {
+            Rect::new(x0, footer - ch - px(10.), width, ch + px(6.))
         };
-        let fields = [
-            field(tile.right() + px(16.), 24., x1, 36.),
-            field(x0, 122., x1 - button - px(8.), 34.),
-            field(x0, 194., x1 - button - px(8.), 34.),
-            field(x0, 266., x1 - 2. * (button + px(8.)), 34.),
-            field(x0, 338., x1 - 2. * (button + px(8.)), 34.),
-            field(x0, 410., mid - px(8.), 96.),
-            field(mid + px(8.), 410., x1, 96.),
-        ];
-        let label = |x: f32, top: f32, right: f32| field(x, top, right, 20.);
-        let labels = [
-            label(fields[0].x, 62., x1),
-            label(x0, 98., x1),
-            label(x0, 170., x1),
-            label(x0, 242., x1),
-            label(x0, 314., x1),
-            label(x0, 386., mid - px(8.)),
-            label(mid + px(8.), 386., x1),
-        ];
+        let viewport = Rect::new(card.x, card.y, card.w, (status.y.min(footer) - card.y).max(0.));
+
+        // The profile's fields from `top`, with the multiline ones `lines` high, and their end.
+        let place = |top: f32, lines: f32| {
+            let field = |x: f32, y: f32, right: f32, height: f32| {
+                Rect::new(x, y, (right - x).max(0.), height)
+            };
+            let tile = Rect::new(x0, top + px(24.), px(52.), px(52.));
+            let mut fields = [Rect::default(); 7];
+            let mut labels = [Rect::default(); 7];
+            fields[0] = field(tile.right() + px(16.), tile.y, x1, px(36.));
+            labels[0] = field(fields[0].x, tile.y + px(38.), x1, px(20.));
+            let mut at = tile.y + px(74.);
+            let beside = button + px(8.);
+            let rights = [x1 - beside, x1 - beside, x1 - 2. * beside, x1 - all_fonts - px(8.)];
+            for (index, right) in (1..5).zip(rights) {
+                labels[index] = field(x0, at, x1, px(20.));
+                fields[index] = field(x0, at + px(24.), right, px(34.));
+                at += px(72.);
+            }
+            let mid = ((x0 + x1) / 2.).round();
+            let halves =
+                if narrow { [(x0, x1); 2] } else { [(x0, mid - px(8.)), (mid + px(8.), x1)] };
+            for (index, (left, right)) in (5..7).zip(halves) {
+                labels[index] = field(left, at, right, px(20.));
+                fields[index] = field(left, at + px(24.), right, lines);
+                if narrow || index == 6 {
+                    at += px(40.) + lines;
+                }
+            }
+            let toggles = if narrow {
+                [field(x0, at, x1, px(32.)), field(x0, at + px(40.), x1, px(32.))]
+            } else {
+                [field(x0, at, mid - px(8.), px(32.)), field(mid + px(8.), at, x1, px(32.))]
+            };
+            (tile, fields, labels, toggles, toggles[1].bottom() + px(24.) - top)
+        };
+
+        // Multiline fields give up height down to two lines before the fields scroll.
+        let full = px(96.);
+        let deficit = place(0., full).4 - viewport.h;
+        let lines = (full - deficit / if narrow { 2. } else { 1. })
+            .clamp((2. * ch + px(16.)).min(full), full);
+        let scroll_max = (place(0., lines).4 - viewport.h).max(0.);
+        let scrolled = self.card_scroll.clamp(0., scroll_max);
+        let (tile, fields, labels, toggles, _) = place(viewport.y - scrolled, lines);
+
         let beside = |field: Rect, offset: f32| {
             Rect::new(field.right() + px(8.) + offset, field.y, button, field.h)
         };
-        let footer = card.bottom() - px(58.);
+        let font = fields[Field::Font.index()];
         let buttons = vec![
             (Target::Close, Rect::new(dialog.right() - px(48.), y + px(8.), px(40.), px(32.))),
             (Target::NewProfile, new_profile),
@@ -351,25 +452,51 @@ impl Settings {
             (Target::Browse(Field::Directory), beside(fields[2], 0.)),
             (Target::Browse(Field::Icon), beside(fields[3], 0.)),
             (Target::Reset, beside(fields[3], button + px(8.))),
-            (Target::AllFonts, Rect { w: 2. * button + px(8.), ..beside(fields[4], 0.) }),
-            (Target::ToggleDefault, Rect::new(x0, at(524.), mid - x0 - px(8.), px(32.))),
-            (Target::ToggleShown, Rect::new(mid + px(8.), at(524.), x1 - mid - px(8.), px(32.))),
-            (Target::Delete, Rect::new(x0, footer, px(128.), px(34.))),
-            (Target::Cancel, Rect::new(x1 - px(196.), footer, px(92.), px(34.))),
-            (Target::Save, Rect::new(x1 - px(96.), footer, px(96.), px(34.))),
+            (
+                Target::AllFonts,
+                Rect::new(font.right() + px(8.), font.y, x1 - font.right() - px(8.), font.h),
+            ),
+            (Target::ToggleDefault, toggles[0]),
+            (Target::ToggleShown, toggles[1]),
+            (Target::Delete, Rect::new(x0, footer, delete, px(34.))),
+            (Target::Cancel, Rect::new(x1 - save - px(4.) - cancel, footer, cancel, px(34.))),
+            (Target::Save, Rect::new(x1 - save, footer, save, px(34.))),
         ];
-        let status = Rect::new(x0 + px(140.), footer, x1 - px(208.) - x0 - px(140.), px(34.));
 
-        // The font list drops from its field over the fields below.
+        // The font list drops from its field, or rises above it when there is more room there.
         let font_list = self.font_list().map(|_| {
-            let field = fields[Field::Font.index()];
-            let row = px(28.).max(layout.cell.1 + px(8.));
-            let space = ((dialog.bottom() - field.bottom() - px(24.)) / row).max(1.) as usize;
+            let row = px(28.).max(ch + px(8.));
+            let below = viewport.bottom() - font.bottom() - px(16.);
+            let above = font.y - viewport.y - px(16.);
+            let space = (below.max(above) / row).max(1.) as usize;
             let rows = self.candidates().len().clamp(1, FONT_ROWS.min(space));
-            let list =
-                Rect::new(field.x, field.bottom() + px(4.), field.w, rows as f32 * row + px(12.));
+            let list_height = rows as f32 * row + px(12.);
+            let top = if below >= list_height || below >= above {
+                font.bottom() + px(4.)
+            } else {
+                font.y - px(4.) - list_height
+            };
+            let list = Rect::new(font.x, top, font.w, list_height);
             (list, list.inset(px(6.)), row)
         });
+
+        // The logo picker drops from the tile, kept inside the dialog.
+        let logos = self.logos.as_ref().map(|_| {
+            let cell = px(48.);
+            let count = icons::names().count() + 1;
+            let columns = ((width - px(12.)) / cell).clamp(1., 12.) as usize;
+            let header = ch + px(18.);
+            let room = dialog.bottom() - px(8.) - (y + title) - header - px(12.);
+            let rows = count.div_ceil(columns).min((room / cell).max(1.) as usize);
+            let size = (columns as f32 * cell + px(12.), header + rows as f32 * cell + px(12.));
+            let top =
+                (tile.bottom() + px(6.)).min(dialog.bottom() - px(8.) - size.1).max(y + title);
+            let picker = Rect::new(x0, top, size.0, size.1);
+            let cells =
+                Rect::new(x0 + px(6.), top + header, columns as f32 * cell, rows as f32 * cell);
+            (picker, cells, cell, columns)
+        });
+
         Panel {
             dialog,
             close: buttons[0].1,
@@ -378,16 +505,30 @@ impl Settings {
             new_profile,
             duplicate,
             card,
+            viewport,
+            scrolled,
+            scroll_max,
             tile,
             fields,
             labels,
             buttons,
             status,
             font_list,
+            logos,
         }
     }
 
     fn target(&self, panel: &Panel, point: PhysicalPosition<f64>) -> Option<Target> {
+        if let (Some(picker), Some((rect, cells, cell, columns))) = (&self.logos, panel.logos) {
+            if rect.contains(point) {
+                let column = ((point.x as f32 - cells.x) / cell) as usize;
+                let row = picker.first + ((point.y as f32 - cells.y) / cell) as usize;
+                let index = row * columns + column;
+                let count = icons::names().count() + 1;
+                return (cells.contains(point) && column < columns && index < count)
+                    .then_some(Target::Logo(index));
+            }
+        }
         if let (Some(list), Some((rect, rows, row))) = (self.font_list(), panel.font_list) {
             if rect.contains(point) {
                 let index = list.first + ((point.y as f32 - rows.y) / row).max(0.) as usize;
@@ -395,12 +536,17 @@ impl Settings {
                     .then_some(Target::Font(index));
             }
         }
+        // What scrolls with the fields can only be reached where they show.
+        let shown = |target: Target| !target.scrolls() || panel.viewport.contains(point);
         let button = panel
             .buttons
             .iter()
-            .find(|(target, rect)| rect.contains(point) && self.enabled(*target));
+            .find(|(target, rect)| rect.contains(point) && self.enabled(*target) && shown(*target));
         let row = panel.rows.iter().find(|(_, rect)| rect.contains(point));
-        let field = FIELDS.into_iter().find(|field| panel.fields[field.index()].contains(point));
+        let field = FIELDS
+            .into_iter()
+            .find(|field| panel.fields[field.index()].contains(point))
+            .filter(|_| panel.viewport.contains(point));
         button
             .map(|(target, _)| *target)
             .or(row.map(|(index, _)| Target::Row(*index)))
@@ -466,6 +612,55 @@ impl Settings {
         list.first = list.first.min(index).max((index + 1).saturating_sub(rows.max(1)));
     }
 
+    /// Cell of the logo picker showing the profile's icon, or the first.
+    fn logo_index(&self) -> usize {
+        let icon = self.text(Field::Icon).trim();
+        let name = icon.strip_prefix(icons::BUNDLED_PREFIX);
+        name.and_then(|name| icons::names().position(|known| known == name)).map_or(0, |i| i + 1)
+    }
+
+    /// Show the logo picker, at the profile's icon.
+    fn open_logos(&mut self, layout: &Layout) {
+        self.focus = None;
+        self.logos = Some(LogoPicker { highlighted: 0, first: 0 });
+        self.highlight_logo(self.logo_index(), layout);
+    }
+
+    /// Highlight cell `index` of the logo picker, scrolling it into view.
+    fn highlight_logo(&mut self, index: usize, layout: &Layout) {
+        let logos = self.panel(layout).logos;
+        let (rows, columns) = logos.map_or((1, 1), |(_, cells, cell, columns)| {
+            (((cells.h / cell).round() as usize).max(1), columns)
+        });
+        let Some(picker) = &mut self.logos else { return };
+        let row = index / columns;
+        picker.highlighted = index;
+        picker.first = picker.first.min(row).max((row + 1).saturating_sub(rows));
+    }
+
+    /// Take the logo in cell `index`: the program's own icon, or a bundled logo.
+    fn pick_logo(&mut self, index: usize) {
+        let name = index.checked_sub(1).and_then(|index| icons::names().nth(index));
+        let icon = name.map_or_else(String::new, |name| format!("{}{name}", icons::BUNDLED_PREFIX));
+        self.entries[self.selected].text[Field::Icon.index()] = icon;
+        self.logos = None;
+        self.touched();
+    }
+
+    /// Scroll the focused field and its label into view.
+    fn reveal(&mut self, layout: &Layout) {
+        let Some(field) = self.focus else { return };
+        let panel = self.panel(layout);
+        let (label, rect) = (panel.labels[field.index()], panel.fields[field.index()]);
+        let tile = if field == Field::Name { panel.tile } else { rect };
+        let top = label.y.min(rect.y).min(tile.y) - panel.viewport.y + panel.scrolled;
+        let bottom = label.bottom().max(rect.bottom()).max(tile.bottom()) - panel.viewport.y
+            + panel.scrolled;
+        let margin = layout.px(12.);
+        let scroll = panel.scrolled.max(bottom + margin - panel.viewport.h).min(top - margin);
+        self.card_scroll = scroll.clamp(0., panel.scroll_max);
+    }
+
     /// Note an unsaved change.
     fn touched(&mut self) {
         self.dirty = true;
@@ -476,6 +671,7 @@ impl Settings {
     fn select(&mut self, index: usize, layout: &Layout) {
         self.selected = index.min(self.entries.len() - 1);
         self.focus = None;
+        self.logos = None;
         let visible = self.panel(layout).rows.len().max(1);
         self.scroll =
             self.scroll.min(self.selected).max((self.selected + 1).saturating_sub(visible));
@@ -541,10 +737,15 @@ impl Settings {
         if button != MouseButton::Left || !panel.dialog.contains(point) {
             return false;
         }
-        let Some(target) = self.target(&panel, point) else {
+        let target = self.target(&panel, point);
+        if !matches!(target, Some(Target::Logo(_) | Target::Tile)) {
+            self.logos = None;
+        }
+        let Some(target) = target else {
             self.focus = None;
             return false;
         };
+        let focus = self.focus;
         let pick = |settings: &mut Self, field: Field| {
             let (sender, receiver) = channel();
             let title = if field == Field::Directory {
@@ -575,7 +776,7 @@ impl Settings {
                 self.touched();
             },
             Target::Duplicate => {
-                let mut copy = self.entries[self.selected].clone();
+                let mut copy = Entry { origin: None, ..self.entries[self.selected].clone() };
                 let name = &copy.text[Field::Name.index()];
                 let taken = |name: &str| {
                     self.entries.iter().any(|e| e.text[Field::Name.index()].trim() == name)
@@ -589,7 +790,9 @@ impl Settings {
                 self.focus(Field::Name);
                 self.touched();
             },
-            Target::Tile => pick(self, Field::Icon),
+            Target::Tile if self.logos.is_some() => self.logos = None,
+            Target::Tile => self.open_logos(layout),
+            Target::Logo(index) => self.pick_logo(index),
             Target::Browse(field) => pick(self, field),
             Target::Reset => {
                 self.entries[self.selected].text[Field::Icon.index()].clear();
@@ -628,6 +831,9 @@ impl Settings {
             },
             Target::Save => self.save(config),
         }
+        if self.focus.is_some() && (self.focus != focus || matches!(target, Target::Field(_))) {
+            self.reveal(layout);
+        }
         false
     }
 
@@ -637,6 +843,15 @@ impl Settings {
 
     pub fn scroll(&mut self, layout: &Layout, down: bool) {
         let (panel, count) = (self.panel(layout), self.candidates().len());
+        if let (Some(picker), Some((rect, cells, cell, columns))) = (&mut self.logos, panel.logos) {
+            if rect.contains(self.pointer) {
+                let rows = (icons::names().count() + 1).div_ceil(columns);
+                let max = rows.saturating_sub((cells.h / cell).round() as usize);
+                let first = picker.first.min(max);
+                picker.first = if down { (first + 1).min(max) } else { first.saturating_sub(1) };
+                return;
+            }
+        }
         if let (Some(list), Some((rect, rows, row))) = (&mut self.font_list, panel.font_list) {
             if rect.contains(self.pointer) {
                 let max = count.saturating_sub((rows.h / row) as usize);
@@ -644,6 +859,11 @@ impl Settings {
                 list.first = if down { (first + 3).min(max) } else { first.saturating_sub(3) };
                 return;
             }
+        }
+        if panel.viewport.contains(self.pointer) {
+            let step = if down { layout.px(48.) } else { -layout.px(48.) };
+            self.card_scroll = (panel.scrolled + step).clamp(0., panel.scroll_max);
+            return;
         }
         let visible = panel.rows.len();
         let max = self.entries.len().saturating_sub(visible);
@@ -761,7 +981,7 @@ impl Settings {
         layout: &Layout,
     ) -> bool {
         let command = modifiers.control_key() || modifiers.super_key();
-        if self.font_key(event, layout) {
+        if self.logo_key(event, layout) || self.font_key(event, layout) {
             return false;
         }
         match event.logical_key.as_ref() {
@@ -772,6 +992,7 @@ impl Settings {
                 let step = if modifiers.shift_key() { FIELDS.len() - 1 } else { 1 };
                 let next = self.focus.map_or(0, |field| (field.index() + step) % FIELDS.len());
                 self.focus(FIELDS[next]);
+                self.reveal(layout);
             },
             _ if command || modifiers.alt_key() => (),
             key => {
@@ -825,6 +1046,30 @@ impl Settings {
             },
         }
         false
+    }
+
+    /// Handle a key for the logo picker, returning whether it was used.
+    fn logo_key(&mut self, event: &KeyEvent, layout: &Layout) -> bool {
+        let Some(picker) = &self.logos else { return false };
+        let columns = self.panel(layout).logos.map_or(1, |(.., columns)| columns);
+        let (index, last) = (picker.highlighted, icons::names().count());
+        let index = match event.logical_key.as_ref() {
+            Key::Named(NamedKey::Escape) => {
+                self.logos = None;
+                return true;
+            },
+            Key::Named(NamedKey::Enter | NamedKey::Space) => {
+                self.pick_logo(index);
+                return true;
+            },
+            Key::Named(NamedKey::ArrowRight) => index + 1,
+            Key::Named(NamedKey::ArrowLeft) => index.saturating_sub(1),
+            Key::Named(NamedKey::ArrowDown) => index + columns,
+            Key::Named(NamedKey::ArrowUp) => index.saturating_sub(columns),
+            _ => return false,
+        };
+        self.highlight_logo(index.min(last), layout);
+        true
     }
 
     /// Handle a key for the font list, returning whether it was used.
@@ -887,14 +1132,25 @@ impl Settings {
             return;
         }
         let default = self.default.map(|index| list[index].name.clone()).unwrap_or_default();
-        match (Profiles { default, list }).save(config) {
+        let profiles = Profiles { default, list };
+        match profiles.save(config) {
             Ok(path) => {
+                for (entry, profile) in self.entries.iter_mut().zip(profiles.list) {
+                    if let Some(origin) = entry.origin.replace(profile.name.clone()) {
+                        self.saved.push((origin, profile));
+                    }
+                }
                 self.dirty = false;
                 self.confirm_close = false;
                 self.status = Some((format!("Saved to {}", path.display()), false));
             },
             Err(err) => self.status = Some((format!("Could not save: {err}"), true)),
         }
+    }
+
+    /// Profiles saved since this was last asked, under the names they had before.
+    pub fn take_saved(&mut self) -> Vec<(String, Profile)> {
+        std::mem::take(&mut self.saved)
     }
 
     /// Draw the dialog, and place the input method's popup at the caret.
@@ -1023,11 +1279,12 @@ impl Settings {
 
         // The selected profile, on a panel like the terminal's.
         layer.outlined(panel.card, px(10.), palette.terminal, palette.card_outline, line);
+        let mut content = Layer::default();
         let profile = self.entries[self.selected].draft();
         let tile_outline = if hover(Target::Tile) { palette.focus } else { palette.raised_outline };
-        layer.outlined(panel.tile, px(12.), palette.raised, tile_outline, line);
+        content.outlined(panel.tile, px(12.), palette.raised, tile_outline, line);
         self.icon(
-            &mut layer,
+            &mut content,
             panel.tile.square(px(32.)),
             &profile,
             config,
@@ -1040,7 +1297,7 @@ impl Settings {
             let rect = panel.fields[field.index()];
             let focused = self.focus == Some(field);
             let outline = if focused { palette.focus } else { palette.field_outline };
-            layer.outlined(rect, px(7.), palette.field, outline, line);
+            content.outlined(rect, px(7.), palette.field, outline, line);
 
             // Text scrolled to the caret, with any text being composed by the input method.
             let (first_line, first_column) = self.scrolled(field, rect, layout);
@@ -1065,7 +1322,7 @@ impl Settings {
                     *width += c.width().unwrap_or(0);
                     (*width <= columns).then_some(c)
                 });
-                layer.text(
+                content.text(
                     rect.x + px(10.),
                     top + index as f32 * ch,
                     visible.collect(),
@@ -1080,37 +1337,32 @@ impl Settings {
                 let y = top + (caret_line - first_line) as f32 * ch;
                 if !self.preedit.is_empty() {
                     let width = self.preedit.width() as f32 * cw;
-                    layer
+                    content
                         .rect(Rect::new(x - width, y + ch - line, width, line), palette.foreground);
                 }
-                layer.rect(Rect::new(x, y, px(1.5).max(1.), ch), palette.foreground);
+                content.rect(Rect::new(x, y, px(1.5).max(1.), ch), palette.foreground);
                 let size = SizeInfo::new(layout.width, layout.bar, cw, ch, x, y, false);
                 window.update_ime_position(Point::new(0, Column(0)), &size);
             }
 
             let label = panel.labels[field.index()];
             if field == Field::Name {
-                left(
-                    &mut layer,
-                    label,
-                    "Click the icon to choose your own logo",
-                    palette.muted,
-                    false,
-                );
+                left(&mut content, label, "Click the icon to choose a logo", palette.muted, false);
                 continue;
             }
             // Hints show where they fit beside their label.
             let (name, hint) = (field.label(), field.hint());
-            left(&mut layer, label, name, palette.foreground, true);
+            left(&mut content, label, name, palette.foreground, true);
             let hint_width = hint.width() as f32 * cw;
             if (name.width() + 2) as f32 * cw + hint_width <= label.w {
                 let hint_rect = Rect::new(label.right() - hint_width, label.y, hint_width, label.h);
-                left(&mut layer, hint_rect, hint, palette.muted, false);
+                left(&mut content, hint_rect, hint, palette.muted, false);
             }
         }
 
         for &(target, rect) in &panel.buttons {
             let hovered = hover(target);
+            let layer = if target.scrolls() { &mut content } else { &mut layer };
             let (text, color, bold) = match target {
                 Target::Browse(_) => ("Browse…", palette.foreground, false),
                 Target::Reset if self.enabled(target) => ("Reset", palette.foreground, false),
@@ -1122,7 +1374,7 @@ impl Settings {
                         palette.foreground
                     };
                     layer.rounded(rect, px(8.), fill);
-                    center(&mut layer, rect, "Save", palette.terminal, true);
+                    center(layer, rect, "Save", palette.terminal, true);
                     continue;
                 },
                 Target::Save => ("Save", palette.muted, true),
@@ -1131,7 +1383,7 @@ impl Settings {
                         layer.rounded(rect, px(8.), mix(palette.terminal, palette.danger, 0.18));
                     }
                     center(
-                        &mut layer,
+                        layer,
                         rect,
                         "Delete profile",
                         mix(palette.danger, palette.foreground, 0.25),
@@ -1150,7 +1402,7 @@ impl Settings {
                         layer.outlined(check, px(5.), palette.field, outline, line);
                     }
                     let text = Rect::new(check.right() + px(10.), rect.y, rect.w - px(32.), rect.h);
-                    left(&mut layer, text, "Show all fonts", palette.foreground, false);
+                    left(layer, text, "Show all fonts", palette.foreground, false);
                     continue;
                 },
                 Target::ToggleDefault | Target::ToggleShown => {
@@ -1204,8 +1456,32 @@ impl Settings {
                 palette.raised
             };
             layer.outlined(rect, px(8.), fill, palette.raised_outline, line);
-            center(&mut layer, rect, text, color, bold);
+            center(layer, rect, text, color, bold);
         }
+
+        // The fields scroll inside the card, above its buttons.
+        if panel.scroll_max > 0. {
+            let viewport = panel.viewport;
+            let track = Rect::new(
+                panel.card.right() - px(7.),
+                viewport.y + px(8.),
+                px(3.),
+                viewport.h - px(16.),
+            );
+            let h = (track.h * viewport.h / (viewport.h + panel.scroll_max)).max(px(16.));
+            let y = track.y + (track.h - h) * panel.scrolled / panel.scroll_max;
+            content.rounded(Rect::new(track.x, y, track.w, h), px(1.5), palette.muted);
+        }
+        let viewport = panel.viewport;
+        content.clip(
+            Rect::new(
+                viewport.x + line,
+                viewport.y + line,
+                viewport.w - 2. * line,
+                viewport.h - line,
+            ),
+            ch,
+        );
 
         if let Some((message, error)) = &self.status {
             let color =
@@ -1266,7 +1542,71 @@ impl Settings {
                 left(&mut popup, item, message, palette.muted, false);
             }
         }
-        vec![layer, popup]
+
+        // Logos to choose from, in a grid under the tile.
+        if let (Some(picker), Some((rect, cells, cell, columns))) = (&self.logos, panel.logos) {
+            let radius = px(8.);
+            let shadow = Rect::new(rect.x, rect.y + px(2.), rect.w, rect.h);
+            popup.rounded_alpha(shadow, radius + px(2.), BLACK, 0.3);
+            popup.outlined(rect, radius, palette.popup, palette.popup_outline, line);
+
+            let names: Vec<_> = icons::names().collect();
+            let count = names.len() + 1;
+            let highlighted = match self.hover {
+                Some(Target::Logo(index)) => index,
+                _ => picker.highlighted,
+            };
+            let name =
+                |index: usize| if index == 0 { "Program's own icon" } else { names[index - 1] };
+            let header = Rect::new(
+                rect.x + px(12.),
+                rect.y + px(4.),
+                rect.w - px(24.),
+                cells.y - rect.y - px(4.),
+            );
+            let title = "Logos";
+            left(&mut popup, header, title, palette.muted, false);
+            let hovered = fit(
+                name(highlighted),
+                ((header.w / cw) as usize).saturating_sub(title.width() + 2),
+            );
+            let x = header.right() - hovered.width() as f32 * cw;
+            popup.text(x, header.center().1 - ch / 2., hovered, palette.foreground, false);
+
+            let rows = ((cells.h / cell).round() as usize).max(1);
+            let total = count.div_ceil(columns);
+            let first = picker.first.min(total.saturating_sub(rows));
+            let profile = self.entries[self.selected].draft();
+            let chosen = self.logo_index();
+            let custom = !profile.icon.is_empty() && chosen == 0;
+            for index in first * columns..count.min((first + rows) * columns) {
+                let (row, column) = (index / columns - first, index % columns);
+                let x = cells.x + column as f32 * cell;
+                let item = Rect::new(x, cells.y + row as f32 * cell, cell, cell).inset(px(3.));
+                let surface = if index == highlighted { palette.hover } else { palette.popup };
+                if index == chosen && !custom {
+                    popup.outlined(item, px(8.), surface, palette.focus, line);
+                } else if index == highlighted {
+                    popup.rounded(item, px(8.), surface);
+                }
+                let icon = item.square(px(26.));
+                match index.checked_sub(1).and_then(|index| icons::named(names[index])) {
+                    Some(image) => popup.image(icon, &image, palette.foreground),
+                    None => {
+                        let own = Profile { icon: String::new(), ..profile.clone() };
+                        self.icon(&mut popup, icon, &own, config, palette, surface, (cw, ch));
+                    },
+                }
+            }
+            if total > rows {
+                let track = Rect::new(rect.right() - px(5.), cells.y, px(3.), cells.h);
+                let h = (track.h * rows as f32 / total as f32).max(px(16.));
+                let y = track.y + (track.h - h) * first as f32 / (total - rows) as f32;
+                popup.rounded(Rect::new(track.x, y, track.w, h), px(1.5), palette.muted);
+            }
+        }
+        popup.clip(panel.dialog, ch);
+        vec![layer, content, popup]
     }
 
     /// Draw a profile's icon, or a badge with text.

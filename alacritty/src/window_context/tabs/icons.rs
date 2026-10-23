@@ -14,56 +14,79 @@ use png::{ColorType, Decoder, Transformations};
 use super::paint::Image;
 use super::platform;
 
-/// Logos for programs the system has no icon for: the programs, whether the logo is a single
-/// color to tint, and the image. Sources and licences are in `alacritty/res/icons/LICENSES.md`.
-const BUNDLED: &[(&[&str], bool, &[u8])] = &[
+/// A bundled logo: its name, its file's extension, the programs it is for, and whether it is a
+/// single color to tint.
+macro_rules! logo {
+    ($name:literal, $ext:ident, [$($program:literal),*], $tint:literal) => {
+        Logo {
+            name: $name,
+            programs: &[$($program),*],
+            tint: $tint,
+            data: include_bytes!(concat!("../../../res/icons/", $name, ".", stringify!($ext))),
+        }
+    };
+}
+
+struct Logo {
+    name: &'static str,
+    programs: &'static [&'static str],
+    tint: bool,
+    data: &'static [u8],
+}
+
+/// Prefix of a profile's icon that names a bundled logo, as in `bundled:python`.
+pub const BUNDLED_PREFIX: &str = "bundled:";
+
+/// Logos for programs the system has no icon for, which profiles can also choose by name.
+/// Sources and licences are in `alacritty/res/icons/LICENSES.md`.
+const BUNDLED: &[Logo] = &[
     // Shells.
-    (&["bash"], false, include_bytes!("../../../res/icons/bash.svg")),
-    (&["zsh"], false, include_bytes!("../../../res/icons/zsh.svg")),
-    (&["fish"], true, include_bytes!("../../../res/icons/fish.svg")),
-    (&["nu"], true, include_bytes!("../../../res/icons/nushell.svg")),
-    (&["pwsh", "powershell"], false, include_bytes!("../../../res/icons/powershell.svg")),
-    (&["cmd"], false, include_bytes!("../../../res/icons/windows.svg")),
-    (&["elvish"], false, include_bytes!("../../../res/icons/elvish.svg")),
-    (&["xonsh"], false, include_bytes!("../../../res/icons/xonsh.svg")),
+    logo!("bash", svg, ["bash"], false),
+    logo!("zsh", svg, ["zsh"], false),
+    logo!("fish", svg, ["fish"], true),
+    logo!("nushell", svg, ["nu"], true),
+    logo!("powershell", svg, ["pwsh", "powershell"], false),
+    logo!("windows", svg, ["cmd"], false),
+    logo!("elvish", svg, ["elvish"], false),
+    logo!("xonsh", svg, ["xonsh"], false),
     // Multiplexers, remote shells and containers.
-    (&["tmux"], true, include_bytes!("../../../res/icons/tmux.svg")),
-    (&["zellij"], false, include_bytes!("../../../res/icons/zellij.svg")),
-    (&["ssh", "mosh"], true, include_bytes!("../../../res/icons/ssh.svg")),
-    (&["docker"], false, include_bytes!("../../../res/icons/docker.svg")),
-    (&["podman"], false, include_bytes!("../../../res/icons/podman.svg")),
-    (&["kubectl", "k9s"], false, include_bytes!("../../../res/icons/kubernetes.svg")),
+    logo!("tmux", svg, ["tmux"], true),
+    logo!("zellij", svg, ["zellij"], false),
+    logo!("ssh", svg, ["ssh", "mosh"], true),
+    logo!("docker", svg, ["docker"], false),
+    logo!("podman", svg, ["podman"], false),
+    logo!("kubernetes", svg, ["kubectl", "k9s"], false),
     // Languages and their interpreters.
-    (&["python", "py"], false, include_bytes!("../../../res/icons/python.svg")),
-    (&["ipython"], false, include_bytes!("../../../res/icons/ipython.png")),
-    (&["node"], false, include_bytes!("../../../res/icons/nodejs.svg")),
-    (&["deno"], true, include_bytes!("../../../res/icons/deno.svg")),
-    (&["bun"], false, include_bytes!("../../../res/icons/bun.svg")),
-    (&["ruby", "irb"], false, include_bytes!("../../../res/icons/ruby.svg")),
-    (&["lua", "luajit"], false, include_bytes!("../../../res/icons/lua.svg")),
-    (&["julia"], false, include_bytes!("../../../res/icons/julia.svg")),
-    (&["r"], false, include_bytes!("../../../res/icons/r.svg")),
-    (&["ghci", "ghc", "stack", "cabal"], false, include_bytes!("../../../res/icons/haskell.svg")),
-    (&["psql"], false, include_bytes!("../../../res/icons/postgresql.svg")),
-    (&["sqlite"], false, include_bytes!("../../../res/icons/sqlite.svg")),
+    logo!("python", svg, ["python", "py"], false),
+    logo!("ipython", png, ["ipython"], false),
+    logo!("nodejs", svg, ["node"], false),
+    logo!("deno", svg, ["deno"], true),
+    logo!("bun", svg, ["bun"], false),
+    logo!("ruby", svg, ["ruby", "irb"], false),
+    logo!("lua", svg, ["lua", "luajit"], false),
+    logo!("julia", svg, ["julia"], false),
+    logo!("r", svg, ["r"], false),
+    logo!("haskell", svg, ["ghci", "ghc", "stack", "cabal"], false),
+    logo!("postgresql", svg, ["psql"], false),
+    logo!("sqlite", svg, ["sqlite"], false),
     // Editors and tools.
-    (&["nvim"], false, include_bytes!("../../../res/icons/neovim.svg")),
-    (&["vim", "vi"], false, include_bytes!("../../../res/icons/vim.svg")),
-    (&["hx", "helix"], true, include_bytes!("../../../res/icons/helix.svg")),
-    (&["htop"], true, include_bytes!("../../../res/icons/htop.svg")),
-    (&["btop"], false, include_bytes!("../../../res/icons/btop.svg")),
-    (&["git", "git-bash"], false, include_bytes!("../../../res/icons/git.svg")),
+    logo!("neovim", svg, ["nvim"], false),
+    logo!("vim", svg, ["vim", "vi"], false),
+    logo!("helix", svg, ["hx", "helix"], true),
+    logo!("htop", svg, ["htop"], true),
+    logo!("btop", svg, ["btop"], false),
+    logo!("git", svg, ["git", "git-bash"], false),
     // WSL distributions, by name.
-    (&["ubuntu"], false, include_bytes!("../../../res/icons/ubuntu.svg")),
-    (&["debian"], false, include_bytes!("../../../res/icons/debian.svg")),
-    (&["kali"], false, include_bytes!("../../../res/icons/kali.svg")),
-    (&["opensuse", "suse"], false, include_bytes!("../../../res/icons/opensuse.svg")),
-    (&["fedora"], false, include_bytes!("../../../res/icons/fedora.svg")),
-    (&["arch"], false, include_bytes!("../../../res/icons/arch.svg")),
-    (&["alpine"], true, include_bytes!("../../../res/icons/alpine.svg")),
-    (&["alma"], false, include_bytes!("../../../res/icons/alma.svg")),
+    logo!("ubuntu", svg, ["ubuntu"], false),
+    logo!("debian", svg, ["debian"], false),
+    logo!("kali", svg, ["kali"], false),
+    logo!("opensuse", svg, ["opensuse", "suse"], false),
+    logo!("fedora", svg, ["fedora"], false),
+    logo!("arch", svg, ["arch"], false),
+    logo!("alpine", svg, ["alpine"], true),
+    logo!("alma", svg, ["alma"], false),
 ];
-const TERMINAL: &[u8] = include_bytes!("../../../res/icons/terminal.svg");
+const TERMINAL: Logo = logo!("terminal", svg, [], false);
 
 /// Alacritty's logo, shown in the caption.
 pub fn logo() -> Arc<Image> {
@@ -99,7 +122,23 @@ fn program(command: &str) -> Option<Arc<Image>> {
     platform::program_icon(command)
         .or_else(|| bundled(&bundled_name(command)?))
         .or_else(platform::terminal_icon)
-        .or_else(|| image(TERMINAL, false))
+        .or_else(|| image(TERMINAL.data, TERMINAL.tint))
+}
+
+/// Names of the bundled logos, as profiles choose them.
+pub fn names() -> impl Iterator<Item = &'static str> {
+    BUNDLED.iter().chain([&TERMINAL]).map(|logo| logo.name)
+}
+
+/// The bundled logo named `name`.
+pub fn named(name: &str) -> Option<Arc<Image>> {
+    static LOGOS: OnceLock<Mutex<HashMap<String, Option<Arc<Image>>>>> = OnceLock::new();
+    let mut logos = LOGOS.get_or_init(Default::default).lock().unwrap();
+    let logo = logos.entry(name.into()).or_insert_with(|| {
+        let logo = BUNDLED.iter().chain([&TERMINAL]).find(|logo| logo.name == name)?;
+        image(logo.data, logo.tint)
+    });
+    logo.clone()
 }
 
 /// Name of the bundled logo for a command line: the program, without a version or extension,
@@ -120,10 +159,10 @@ fn bundled_name(command: &str) -> Option<String> {
 
 fn bundled(name: &str) -> Option<Arc<Image>> {
     // Distributions are named like `Ubuntu-24.04`.
-    let (_, tint, data) = BUNDLED.iter().find(|(names, ..)| {
-        names.iter().any(|known| name == *known || name.starts_with(&format!("{known}-")))
+    let logo = BUNDLED.iter().find(|logo| {
+        logo.programs.iter().any(|known| name == *known || name.starts_with(&format!("{known}-")))
     })?;
-    image(data, *tint)
+    image(logo.data, logo.tint)
 }
 
 fn image(data: &[u8], tint: bool) -> Option<Arc<Image>> {
@@ -156,9 +195,10 @@ mod tests {
     #[test]
     fn bundled_logos_load() {
         logo();
-        for (names, tint, data) in BUNDLED.iter().chain([&(&[][..], false, TERMINAL)]) {
-            assert!(image(data, *tint).is_some(), "{names:?}");
+        for name in names() {
+            assert!(named(name).is_some(), "{name}");
         }
+        assert!(named("unknown").is_none());
     }
 
     #[test]
