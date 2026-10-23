@@ -1,5 +1,7 @@
-//! The context menu of a pane, opened by a right click in it: split the pane, or move or close it.
+//! Context menus, opened by a right click: a pane's, to split, zoom, move or close it, and a tab's,
+//! to rename, ungroup, move or close it.
 
+use std::cmp::Ordering;
 use std::rc::Rc;
 use std::time::Instant;
 
@@ -17,28 +19,54 @@ use crate::window_context::WindowContext;
 
 use super::anim::{Curve, Tween};
 use super::bar::{Hit, ITEM_RADIUS, Layout, MARGIN, TRACK_RADIUS};
-use super::dnd::Target;
+use super::dnd::{Source, Target};
 use super::paint::{BLACK, Layer, Palette, Rect, mix};
-use super::split::{Axis, Side};
-use super::{Press, Tabs, close_pane, focus_pane, move_pane, redraw, split};
+use super::split::{Axis, Side, Split};
+use super::tear::{can_tear, tear_off};
+use super::{
+    Press, Tab, Tabs, close as close_tab, close_pane, focus_pane, move_pane, redraw, relayout,
+    rename, split, toggle_zoom,
+};
 
-/// Something the menu offers to do with the pane it was opened on.
+/// Something a menu offers to do with the pane or the tab it was opened on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Item {
     /// Put a new pane beside this one, with a vertical divider between them.
     SplitVertically,
     /// Put a new pane below this one, with a horizontal divider between them.
     SplitHorizontally,
+    /// Show only this pane, over the whole tab.
+    Zoom,
+    Unzoom,
     MoveToNewTab,
+    /// Move the pane, or the tab, to a window of its own.
+    NewWindow,
+    /// Name the tab, which is a group of panes or a single one.
+    Rename {
+        group: bool,
+    },
+    ResetName,
+    /// Make each pane of the tab a tab of its own.
+    Ungroup,
     Close,
 }
 
 impl Item {
-    fn label(self) -> &'static str {
+    /// The item's label, in a tab's menu or else a pane's.
+    fn label(self, tab: bool) -> &'static str {
         match self {
             Item::SplitVertically => "Split Vertically",
             Item::SplitHorizontally => "Split Horizontally",
+            Item::Zoom => "Zoom Pane",
+            Item::Unzoom => "Unzoom Pane",
             Item::MoveToNewTab => "Move Pane to New Tab",
+            Item::NewWindow if tab => "Move Tab to New Window",
+            Item::NewWindow => "Move Pane to New Window",
+            Item::Rename { group: true } => "Rename Group…",
+            Item::Rename { group: false } => "Rename Tab…",
+            Item::ResetName => "Reset Name",
+            Item::Ungroup => "Ungroup",
+            Item::Close if tab => "Close Tab",
             Item::Close => "Close Pane",
         }
     }
@@ -50,6 +78,22 @@ impl Item {
         match self {
             Item::SplitVertically => &[BOX[0], BOX[1], BOX[2], BOX[3], [0., -1., 0., 1.]],
             Item::SplitHorizontally => &[BOX[0], BOX[1], BOX[2], BOX[3], [-1., 0., 1., 0.]],
+            // Arrows out to two corners, and back in from them.
+            Item::Zoom => &[
+                [-1., 1., 1., -1.],
+                [0.2, -1., 1., -1.],
+                [1., -1., 1., -0.2],
+                [-1., 0.2, -1., 1.],
+                [-1., 1., -0.2, 1.],
+            ],
+            Item::Unzoom => &[
+                [-1., 1., -0.15, 0.15],
+                [-0.85, 0.15, -0.15, 0.15],
+                [-0.15, 0.15, -0.15, 0.85],
+                [1., -1., 0.15, -0.15],
+                [0.85, -0.15, 0.15, -0.15],
+                [0.15, -0.15, 0.15, -0.85],
+            ],
             // An arrow leaving a box by its open corner.
             Item::MoveToNewTab => &[
                 [0., -1., -1., -1.],
@@ -60,25 +104,103 @@ impl Item {
                 [0.2, -1., 1., -1.],
                 [1., -1., 1., -0.6],
             ],
+            // A window in front of another.
+            Item::NewWindow => &[
+                [-1., -0.4, 0.4, -0.4],
+                [0.4, -0.4, 0.4, 1.],
+                [0.4, 1., -1., 1.],
+                [-1., 1., -1., -0.4],
+                [-0.4, -0.4, -0.4, -1.],
+                [-0.4, -1., 1., -1.],
+                [1., -1., 1., 0.4],
+                [1., 0.4, 0.4, 0.4],
+            ],
+            // A pencil, writing down to the left.
+            Item::Rename { .. } => &[
+                [-1., 1., -0.8, 0.4],
+                [-1., 1., -0.4, 0.8],
+                [-0.8, 0.4, 0.6, -1.],
+                [-0.4, 0.8, 1., -0.6],
+                [0.6, -1., 1., -0.6],
+            ],
+            // An arrow turning back around.
+            Item::ResetName => &[
+                [0., -0.8, 0.57, -0.57],
+                [0.57, -0.57, 0.8, 0.],
+                [0.8, 0., 0.57, 0.57],
+                [0.57, 0.57, 0., 0.8],
+                [0., 0.8, -0.57, 0.57],
+                [-0.57, 0.57, -0.8, 0.],
+                [-0.8, 0., -0.57, -0.57],
+                [-0.57, -0.57, -0.95, -0.6],
+                [-0.57, -0.57, -0.5, -0.95],
+            ],
+            // Two boxes apart.
+            Item::Ungroup => &[
+                [-1., -0.5, -0.2, -0.5],
+                [-0.2, -0.5, -0.2, 0.5],
+                [-0.2, 0.5, -1., 0.5],
+                [-1., 0.5, -1., -0.5],
+                [0.2, -0.5, 1., -0.5],
+                [1., -0.5, 1., 0.5],
+                [1., 0.5, 0.2, 0.5],
+                [0.2, 0.5, 0.2, -0.5],
+            ],
             Item::Close => &[[-0.7, -0.7, 0.7, 0.7], [-0.7, 0.7, 0.7, -0.7]],
         }
     }
 
     /// Whether a separator divides this item from `previous`.
     fn separated(self, previous: Item) -> bool {
-        let splits = |item| matches!(item, Item::SplitVertically | Item::SplitHorizontally);
-        splits(self) != splits(previous)
+        let section = |item| match item {
+            Item::SplitVertically | Item::SplitHorizontally => 0,
+            Item::Rename { .. } | Item::ResetName => 0,
+            Item::Zoom | Item::Unzoom => 1,
+            Item::MoveToNewTab | Item::NewWindow | Item::Ungroup => 2,
+            Item::Close => 3,
+        };
+        section(self) != section(previous)
     }
 }
 
-/// What the menu offers for a pane of a tab with `panes` panes.
-fn items(panes: usize) -> Vec<Item> {
+/// What the menu offers for a pane of a tab with `panes` panes, `zoomed` or not, which can `tear`
+/// off into a window of its own or not.
+fn pane_items(panes: usize, zoomed: bool, tear: bool) -> Vec<Item> {
     let mut items = vec![Item::SplitVertically, Item::SplitHorizontally];
     if panes > 1 {
-        items.push(Item::MoveToNewTab);
+        items.extend([if zoomed { Item::Unzoom } else { Item::Zoom }, Item::MoveToNewTab]);
+    }
+    if tear {
+        items.push(Item::NewWindow);
     }
     items.push(Item::Close);
     items
+}
+
+/// What the menu offers for a tab with `panes` panes, `named` or not, which can `tear` off into a
+/// window of its own or not.
+fn tab_items(panes: usize, named: bool, tear: bool) -> Vec<Item> {
+    let mut items = vec![Item::Rename { group: panes > 1 }];
+    if named {
+        items.push(Item::ResetName);
+    }
+    if panes > 1 {
+        items.push(Item::Ungroup);
+    }
+    if tear {
+        items.push(Item::NewWindow);
+    }
+    items.push(Item::Close);
+    items
+}
+
+/// What a menu was opened on, by the id of a pane, so it follows the tab as tabs move.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Owner {
+    /// The live pane.
+    Pane(WindowId),
+    /// The tab holding this pane.
+    Tab(WindowId),
 }
 
 /// Sizes of the menu's parts, in pixels.
@@ -126,8 +248,8 @@ fn row_at(rows: &[Rect], point: PhysicalPosition<f64>) -> Option<usize> {
 /// The open context menu.
 pub struct Menu {
     items: Vec<Item>,
-    /// Id of the pane it was opened on, which it acts on.
-    pane: WindowId,
+    /// What it was opened on, which it acts on.
+    owner: Owner,
     /// Where the pointer opened it.
     at: (f32, f32),
     /// The row under the pointer or chosen by the keyboard.
@@ -137,15 +259,32 @@ pub struct Menu {
 }
 
 impl Menu {
-    fn new(items: Vec<Item>, pane: WindowId, at: (f32, f32)) -> Self {
+    fn new(items: Vec<Item>, owner: Owner, at: (f32, f32)) -> Self {
         let mut pop = Tween::new(0.);
         pop.to(1., Instant::now(), 140, Curve::EASE_OUT);
-        Self { items, pane, at, selected: None, pop }
+        Self { items, owner, at, selected: None, pop }
     }
 
-    /// Whether the pane it was opened on is no longer live, such as after it exited.
+    /// What the menu acts on: the live pane, or the tab at an index; none once that is gone, such
+    /// as after the pane exited.
+    fn source(&self, tabs: &Tabs) -> Option<Source> {
+        match self.owner {
+            Owner::Pane(id) => {
+                let live = tabs.tabs.get(tabs.active).is_some_and(|tab| tab.pane().id == id);
+                live.then(|| Source::Pane(tabs.active, tabs.live().1))
+            },
+            Owner::Tab(id) => {
+                tabs.tabs.iter().position(|tab| tab.position(id).is_some()).map(Source::Tab)
+            },
+        }
+    }
+
     fn stale(&self, tabs: &Tabs) -> bool {
-        tabs.tabs.get(tabs.active).is_none_or(|tab| tab.pane().id != self.pane)
+        self.source(tabs).is_none()
+    }
+
+    fn label(&self, item: Item) -> &'static str {
+        item.label(matches!(self.owner, Owner::Tab(_)))
     }
 
     /// Whether the menu is still animating at `now`.
@@ -157,7 +296,8 @@ impl Menu {
     fn geometry(&self, layout: &Layout) -> (Rect, Vec<Rect>) {
         let font = &layout.font;
         let row = layout.px(32.).max(layout.line + layout.px(12.));
-        let text = self.items.iter().map(|item| font.width(item.label(), false)).fold(0., f32::max);
+        let text =
+            self.items.iter().map(|&item| font.width(self.label(item), false)).fold(0., f32::max);
         let width = (text + row + layout.px(36.)).max(layout.px(200.));
         let metrics = Metrics { width, row, gap: layout.px(9.), pad: layout.px(6.) };
         let margin = layout.px(MARGIN);
@@ -221,11 +361,9 @@ pub fn press(
     }
 
     let Some(tab) = tabs.tabs.get(tabs.active) else { return false };
-    let (items, at) = (items(tab.panes.len()), (pointer.x as f32, pointer.y as f32));
-    tabs.context = Some(Menu::new(items, tab.pane().id, at));
-    tabs.press = Press::Swallowed;
-    ctx.display.window.set_mouse_cursor(CursorIcon::Default);
-    repaint(ctx);
+    let tear = can_tear(tabs, Source::Pane(tabs.active, tab.focus));
+    let (items, owner) = (pane_items(tab.panes.len(), tab.zoom, tear), Owner::Pane(tab.pane().id));
+    open(ctx, items, owner);
     true
 }
 
@@ -233,10 +371,25 @@ pub fn press(
 pub fn open_tab(
     ctx: &mut WindowContext,
     index: usize,
-    config: &Rc<UiConfig>,
-    proxy: &EventLoopProxy<Event>,
+    _config: &Rc<UiConfig>,
+    _proxy: &EventLoopProxy<Event>,
 ) {
-    let _ = (ctx, index, config, proxy);
+    let tabs = &ctx.display.tabs;
+    let Some(tab) = tabs.tabs.get(index) else { return };
+    let tear = can_tear(tabs, Source::Tab(index));
+    let (items, owner) =
+        (tab_items(tab.panes.len(), tab.name.is_some(), tear), Owner::Tab(tab.pane().id));
+    open(ctx, items, owner);
+}
+
+/// Open a menu of `items` for `owner` at the pointer.
+fn open(ctx: &mut WindowContext, items: Vec<Item>, owner: Owner) {
+    let tabs = &mut ctx.display.tabs;
+    let at = (tabs.pointer.x as f32, tabs.pointer.y as f32);
+    tabs.context = Some(Menu::new(items, owner, at));
+    tabs.press = Press::Swallowed;
+    ctx.display.window.set_mouse_cursor(CursorIcon::Default);
+    repaint(ctx);
 }
 
 /// Handle a key press, returning whether the menu used it; it takes every key while open.
@@ -299,21 +452,59 @@ fn choose(
     config: &Rc<UiConfig>,
     proxy: &EventLoopProxy<Event>,
 ) {
-    let Some(menu) = ctx.display.tabs.context.as_ref() else { return };
-    let item = menu.items.get(index).copied();
+    let tabs = &ctx.display.tabs;
+    let Some(menu) = tabs.context.as_ref() else { return };
+    let (item, source) = (menu.items.get(index).copied(), menu.source(tabs));
     close(ctx);
-    let (tab, pane) = ctx.display.tabs.live();
+    let (Some(item), Some(source)) = (item, source) else { return };
+    let (tab, pane) = match source {
+        Source::Pane(tab, pane) => (tab, pane),
+        Source::Tab(tab) => (tab, ctx.display.tabs.tabs[tab].focus),
+    };
     match item {
-        Some(Item::SplitVertically) => {
+        Item::SplitVertically => {
             split(ctx, Axis::Row, Side::After, config, proxy);
         },
-        Some(Item::SplitHorizontally) => {
+        Item::SplitHorizontally => {
             split(ctx, Axis::Column, Side::After, config, proxy);
         },
-        Some(Item::MoveToNewTab) => move_pane(ctx, (tab, pane), Target::Detach(tab + 1), config),
-        Some(Item::Close) => close_pane(ctx, tab, pane, config),
-        None => (),
+        Item::Zoom | Item::Unzoom => toggle_zoom(ctx),
+        Item::MoveToNewTab => move_pane(ctx, (tab, pane), Target::Detach(tab + 1), config),
+        Item::NewWindow => {
+            tear_off(ctx, source, None, config);
+        },
+        Item::Rename { .. } => rename::start(ctx, tab),
+        Item::ResetName => rename(ctx, tab, None),
+        Item::Ungroup => {
+            let tabs = &mut ctx.display.tabs;
+            if ungroup(&mut tabs.tabs, &mut tabs.active, tab) {
+                ctx.display.damage_tracker.frame().mark_fully_damaged();
+                relayout(ctx);
+            }
+        },
+        Item::Close if source == Source::Tab(tab) => close_tab(ctx, tab, config),
+        Item::Close => close_pane(ctx, tab, pane, config),
     }
+}
+
+/// Make each pane of the tab at `index` a tab of its own, in reading order: the first pane keeps
+/// the tab, and the others follow it. The live pane stays live, in its new tab. Returns whether
+/// the tab was a group.
+fn ungroup<S>(tabs: &mut Vec<Tab<S>>, active: &mut usize, index: usize) -> bool {
+    let Some(tab) = tabs.get_mut(index).filter(|tab| tab.panes.len() > 1) else { return false };
+    let focus = tab.pane().id;
+    let others = tab.panes.split_off(1);
+    tab.layout = Split::Pane(tab.panes[0].id);
+    (tab.focus, tab.zoom) = (0, false);
+    let count = others.len();
+    let at = others.iter().position(|pane| pane.id == focus).map_or(0, |at| at + 1);
+    tabs.splice(index + 1..index + 1, others.into_iter().map(Tab::new));
+    match (*active).cmp(&index) {
+        Ordering::Equal => *active += at,
+        Ordering::Greater => *active += count,
+        Ordering::Less => (),
+    }
+    true
 }
 
 fn close(ctx: &mut WindowContext) {
@@ -321,7 +512,7 @@ fn close(ctx: &mut WindowContext) {
     repaint(ctx);
 }
 
-/// Close the menu once the pane it was opened on is no longer live.
+/// Close the menu once what it was opened on is gone, or the pane no longer live.
 fn close_stale(ctx: &mut WindowContext) {
     let tabs = &ctx.display.tabs;
     if tabs.context.as_ref().is_some_and(|menu| menu.stale(tabs)) {
@@ -384,7 +575,7 @@ pub fn draw(tabs: &Tabs, layout: &Layout, palette: &Palette, now: Instant) -> Op
         let color = if item == Item::Close { palette.danger } else { palette.muted };
         layer.icon(glyph.center(), px(6.), width, item.glyph(), fade(color));
         let y = row.center().1 - layout.line / 2.;
-        let text = font.fit(item.label(), row.right() - glyph.right() - px(16.), false);
+        let text = font.fit(menu.label(item), row.right() - glyph.right() - px(16.), false);
         layer.text(glyph.right() + px(10.), y, text, fade(palette.foreground), false);
     }
     Some(layer)
@@ -392,24 +583,96 @@ pub fn draw(tabs: &Tabs, layout: &Layout, palette: &Palette, now: Instant) -> Op
 
 #[cfg(test)]
 mod tests {
+    use super::super::Pane;
     use super::*;
 
     const METRICS: Metrics = Metrics { width: 200., row: 30., gap: 10., pad: 5. };
     const BOUNDS: Rect = Rect { x: 0., y: 0., w: 800., h: 600. };
 
     #[test]
-    fn items_follow_pane_count() {
+    fn pane_menu_follows_the_tab() {
         use Item::*;
-        assert_eq!(items(1), [SplitVertically, SplitHorizontally, Close]);
-        assert_eq!(items(2), [SplitVertically, SplitHorizontally, MoveToNewTab, Close]);
-        assert_eq!(items(5), items(2));
+        // A tab's only pane, with other tabs or alone in the window.
+        let lone = [SplitVertically, SplitHorizontally, NewWindow, Close];
+        assert_eq!(pane_items(1, false, true), lone);
+        assert_eq!(pane_items(1, false, false), [SplitVertically, SplitHorizontally, Close]);
+        // A pane of a group.
+        let group = [SplitVertically, SplitHorizontally, Zoom, MoveToNewTab, NewWindow, Close];
+        assert_eq!(pane_items(2, false, true), group);
+        assert_eq!(pane_items(5, false, true), group);
+        let zoomed = [SplitVertically, SplitHorizontally, Unzoom, MoveToNewTab, NewWindow, Close];
+        assert_eq!(pane_items(3, true, true), zoomed);
+    }
+
+    #[test]
+    fn tab_menu_follows_the_tab() {
+        use Item::*;
+        let tab = Rename { group: false };
+        assert_eq!(tab_items(1, false, true), [tab, NewWindow, Close]);
+        assert_eq!(tab_items(1, true, true), [tab, ResetName, NewWindow, Close]);
+        // The only tab of the window stays in it.
+        assert_eq!(tab_items(1, false, false), [tab, Close]);
+        let group = Rename { group: true };
+        assert_eq!(tab_items(3, false, true), [group, Ungroup, NewWindow, Close]);
+        assert_eq!(tab_items(3, true, false), [group, ResetName, Ungroup, Close]);
+        assert_eq!(group.label(true), "Rename Group…");
+        assert_eq!((Close.label(true), Close.label(false)), ("Close Tab", "Close Pane"));
+    }
+
+    #[test]
+    fn ungroup_keeps_reading_order_and_the_live_pane() {
+        let pane = |id: u64| Pane {
+            id: WindowId::from(id),
+            name: String::new(),
+            title: String::new(),
+            badge: String::new(),
+            icon: None,
+            profile: None,
+            session: Some(id),
+        };
+        let id = |pane: &Pane<u64>| u64::from(pane.id);
+        // Tabs [1] [2 | 3 over 4] [5], with the pane 3 focused.
+        let mut group = Tab::new(pane(2));
+        group.insert(WindowId::from(2), pane(3), Axis::Row, Side::After);
+        group.insert(WindowId::from(3), pane(4), Axis::Column, Side::After);
+        group.focus = 1;
+        group.zoom = true;
+        group.name = Some("build".into());
+        let tabs = vec![Tab::new(pane(1)), group, Tab::new(pane(5))];
+
+        let ids = |tabs: &[Tab<u64>]| -> Vec<Vec<u64>> {
+            tabs.iter().map(|tab| tab.panes.iter().map(id).collect()).collect()
+        };
+        let mut split = tabs;
+        let mut active = 1;
+        assert!(ungroup(&mut split, &mut active, 1));
+        assert_eq!(ids(&split), [[1], [2], [3], [4], [5]]);
+        assert_eq!(active, 2, "the focused pane stays active");
+        assert!(split.iter().all(|tab| tab.layout == Split::Pane(tab.panes[0].id) && !tab.zoom));
+        assert_eq!(split[1].name.as_deref(), Some("build"));
+
+        // Tabs after the group move along, and tabs before it stay.
+        let tabs = || {
+            let mut tabs = vec![Tab::new(pane(1)), Tab::new(pane(2)), Tab::new(pane(4))];
+            tabs[1].insert(WindowId::from(2), pane(3), Axis::Row, Side::After);
+            tabs
+        };
+        for (active, moved) in [(0, 0), (1, 1), (2, 3)] {
+            let (mut split, mut active) = (tabs(), active);
+            assert!(ungroup(&mut split, &mut active, 1));
+            assert_eq!((ids(&split), active), (vec![vec![1], vec![2], vec![3], vec![4]], moved));
+        }
+        let (mut split, mut active) = (tabs(), 0);
+        assert!(!ungroup(&mut split, &mut active, 0), "a lone pane is no group");
+        assert!(!ungroup(&mut split, &mut active, 9));
+        assert_eq!(ids(&split), [vec![1], vec![2, 3], vec![4]]);
     }
 
     #[test]
     fn rows_are_hit_below_their_separator() {
-        let items = items(2);
+        let items = pane_items(1, false, false);
         let (menu, rows) = geometry(&items, (100., 100.), METRICS, BOUNDS);
-        assert_eq!(menu, Rect::new(100., 100., 200., 4. * 30. + 10. + 10.));
+        assert_eq!(menu, Rect::new(100., 100., 200., 3. * 30. + 10. + 10.));
         let at = |y: f64| row_at(&rows, PhysicalPosition::new(150., y));
         assert_eq!(at(104.), None);
         assert_eq!(at(106.), Some(0));
@@ -417,14 +680,13 @@ mod tests {
         // The separator between the splits and the rest is not a row.
         assert_eq!(at(168.), None);
         assert_eq!(at(176.), Some(2));
-        assert_eq!(at(220.), Some(3));
-        assert_eq!(at(250.), None);
+        assert_eq!(at(206.), None);
         assert_eq!(row_at(&rows, PhysicalPosition::new(102., 140.)), None);
     }
 
     #[test]
     fn opens_inside_the_window() {
-        let items = items(1);
+        let items = pane_items(1, false, false);
         let inside = |menu: Rect| {
             menu.x >= BOUNDS.x
                 && menu.y >= BOUNDS.y
