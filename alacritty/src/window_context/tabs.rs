@@ -90,7 +90,6 @@ pub use paint::Rect;
 use profiles::{Profile, Profiles};
 use settings::{Page, Settings};
 use split::{Axis, Divider, Side, Split};
-#[allow(unused_imports, reason = "torn tabs get windows next")]
 pub use tear::{Live, Torn, adopt, take as take_torn};
 use text::UiFont;
 
@@ -197,7 +196,6 @@ struct Tab<S = Session> {
     /// Whether only the focused pane is shown, over the whole area.
     zoom: bool,
     /// Name given to the tab, shown instead of its focused pane's title.
-    #[allow(dead_code, reason = "the bar shows it next")]
     name: Option<String>,
 }
 
@@ -226,7 +224,6 @@ pub struct PaneDraw {
     /// Where to draw it in the window, in pixels from the top left.
     pub frame: Rect,
     /// The pane's card, which nothing of it is drawn outside of.
-    #[allow(dead_code, reason = "panes are clipped to it next")]
     pub clip: Rect,
 }
 
@@ -378,7 +375,6 @@ impl Tabs {
     }
 
     /// The dividers between the active tab's panes; none while it is zoomed.
-    #[allow(dead_code, reason = "dividers are dragged next")]
     pub fn dividers(&self) -> Vec<Divider> {
         match self.tabs.get(self.active) {
             Some(tab) if !tab.zoom => tab.layout.dividers(self.area(), self.spacing()),
@@ -409,7 +405,6 @@ impl Tabs {
     }
 
     /// The card of the live terminal at `now`, which nothing of it is drawn outside of.
-    #[allow(dead_code, reason = "panes are clipped to it next")]
     pub fn focused_clip(&self, now: Instant) -> Rect {
         self.card(self.focused_frame(now))
     }
@@ -578,7 +573,6 @@ fn nearest(rects: &[(usize, Rect)], point: PhysicalPosition<f64>, margin: f32) -
 }
 
 /// The name a tab is given for `name`: trimmed, and none when that leaves nothing.
-#[allow(dead_code, reason = "tabs are renamed next")]
 fn tidy(name: Option<String>) -> Option<String> {
     let name = name?;
     let name = name.trim();
@@ -1713,7 +1707,6 @@ pub fn min_pane(size: &SizeInfo) -> (f32, f32) {
 
 /// Give the pair of panes `index` of the active tab, in the order of its tree, `ratio` of their
 /// space, as far as every pane keeps its smallest size.
-#[allow(dead_code, reason = "dividers are dragged next")]
 pub fn set_ratio(ctx: &mut WindowContext, index: usize, ratio: f32) {
     let min = min_pane(&ctx.display.size_info);
     let tabs = &mut ctx.display.tabs;
@@ -1737,7 +1730,6 @@ pub fn toggle_zoom(ctx: &mut WindowContext) {
 }
 
 /// Name the tab at `tab`, or give it back its focused pane's title with none.
-#[allow(dead_code, reason = "tabs are renamed next")]
 pub fn rename(ctx: &mut WindowContext, tab: usize, name: Option<String>) {
     let Some(tab) = ctx.display.tabs.tabs.get_mut(tab) else { return };
     tab.name = tidy(name);
