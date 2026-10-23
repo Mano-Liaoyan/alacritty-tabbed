@@ -1,23 +1,19 @@
 //! Drawing with Alacritty's renderer: anti-aliased shapes and images become thin rectangles for
-//! the rectangle renderer, and text uses the terminal's font.
+//! the rectangle renderer, and text uses the interface's font.
 
 use std::f32::consts::{FRAC_PI_2, FRAC_PI_4};
 use std::sync::{Arc, Mutex};
 
 use resvg::{tiny_skia, usvg};
-
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use winit::dpi::PhysicalPosition;
-
-use alacritty_terminal::index::{Column, Point};
-use alacritty_terminal::term::cell::Flags;
 
 use crate::config::color::Colors;
 use crate::display::SizeInfo;
 use crate::display::color::Rgb;
-use crate::display::content::RenderableCell;
+use crate::renderer::Renderer;
 use crate::renderer::rects::RenderRect;
-use crate::renderer::{GlyphCache, Renderer};
+
+use super::text::{Text, UiFont};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Rect {
@@ -166,7 +162,7 @@ enum Source {
     /// Pixels with straight alpha.
     Pixels { width: u32, height: u32, rgba: Vec<u8> },
     /// A vector image, rendered at each size it is drawn at.
-    Svg(usvg::Tree),
+    Svg(Box<usvg::Tree>),
 }
 
 impl Image {
@@ -178,7 +174,11 @@ impl Image {
 
     pub fn svg(data: &[u8], tint: bool) -> Option<Arc<Self>> {
         let tree = usvg::Tree::from_data(data, &usvg::Options::default()).ok()?;
-        Some(Arc::new(Self { source: Source::Svg(tree), tint, scaled: Default::default() }))
+        Some(Arc::new(Self {
+            source: Source::Svg(Box::new(tree)),
+            tint,
+            scaled: Default::default(),
+        }))
     }
 
     /// Runs of the image fit in a `size` square, averaging the pixels each one covers.
@@ -261,7 +261,7 @@ fn render(tree: &usvg::Tree, size: u32) -> Vec<u8> {
 #[derive(Default)]
 pub struct Layer {
     rects: Vec<RenderRect>,
-    texts: Vec<(f32, f32, String, Rgb, bool)>,
+    texts: Vec<Text>,
 }
 
 impl Layer {
@@ -433,11 +433,12 @@ impl Layer {
         self.texts.push((x.round(), y.round(), text, color, bold));
     }
 
-    /// Text centered in `rect`.
-    pub fn label(&mut self, rect: Rect, text: &str, cell: (f32, f32), color: Rgb, bold: bool) {
+    /// Text centered in `rect`, cut to fit it.
+    pub fn label(&mut self, rect: Rect, text: &str, font: &UiFont, color: Rgb, bold: bool) {
+        let text = font.fit(text, rect.w, bold);
         let (x, y) = rect.center();
-        let x = x - text.width() as f32 * cell.0 / 2.;
-        self.text(x, y - cell.1 / 2., text.into(), color, bold);
+        let x = x - font.width(&text, bold) / 2.;
+        self.text(x, y - font.line / 2., text, color, bold);
     }
 
     /// Keep only what lies inside `rect`, keeping or dropping text by whole lines of `line` pixels.
@@ -454,18 +455,10 @@ impl Layer {
     }
 
     /// Draw the layers over the window, whose size is `window`.
-    pub fn draw(
-        layers: Vec<Layer>,
-        renderer: &mut Renderer,
-        glyph_cache: &mut GlyphCache,
-        window: &SizeInfo,
-    ) {
-        let metrics = glyph_cache.font_metrics();
+    pub fn draw(layers: Vec<Layer>, renderer: &mut Renderer, font: &UiFont, window: &SizeInfo) {
         for layer in layers {
-            renderer.draw_rects(window, &metrics, layer.rects);
-            for text in layer.texts {
-                draw_text(renderer, glyph_cache, window, text);
-            }
+            renderer.draw_rects(window, &font.metrics, layer.rects);
+            font.draw(renderer, window, layer.texts);
         }
     }
 }
@@ -481,52 +474,4 @@ fn span(points: &[(f32, f32)], y: f32) -> Option<(f32, f32)> {
         }
     }
     span.filter(|(left, right)| right > left)
-}
-
-/// `text` cut to `columns` cells, with an ellipsis when it does not fit.
-pub fn fit(text: &str, columns: usize) -> String {
-    if text.width() <= columns {
-        return text.into();
-    }
-    let mut width = 0;
-    let mut fitted: String = text
-        .chars()
-        .take_while(|c| {
-            width += c.width().unwrap_or(0);
-            width < columns
-        })
-        .collect();
-    fitted.push('…');
-    fitted
-}
-
-/// Draw `text` with its top left corner at `x`, `y` in the window.
-fn draw_text(
-    renderer: &mut Renderer,
-    glyph_cache: &mut GlyphCache,
-    window: &SizeInfo,
-    (x, y, text, color, bold): (f32, f32, String, Rgb, bool),
-) {
-    // Place the text with the padding of a grid laid over the window.
-    let (cell_width, cell_height) = (window.cell_width(), window.cell_height());
-    let (column, line) = ((x / cell_width).floor().max(0.), (y / cell_height).floor().max(0.));
-    let (padding_x, padding_y) = (x - column * cell_width, y - line * cell_height);
-    let (width, height) = (window.width(), window.height());
-    let size = SizeInfo::new(width, height, cell_width, cell_height, padding_x, padding_y, false);
-    renderer.resize(&size);
-
-    let mut column = column as usize;
-    let flags = if bold { Flags::BOLD } else { Flags::empty() };
-    let cells: Vec<_> = text
-        .chars()
-        .filter_map(|character| {
-            let width = character.width().filter(|&width| width > 0)?;
-            let point = Point::new(line as usize, Column(column));
-            column += width;
-            let flags = if width == 2 { flags | Flags::WIDE_CHAR } else { flags };
-            let (fg, bg, underline, bg_alpha, extra) = (color, color, color, 0., None);
-            Some(RenderableCell { character, point, fg, bg, bg_alpha, underline, flags, extra })
-        })
-        .collect();
-    renderer.draw_cells(&size, glyph_cache, cells.into_iter());
 }

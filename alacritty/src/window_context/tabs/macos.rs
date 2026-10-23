@@ -5,6 +5,7 @@ use std::process::Command;
 use std::sync::Arc;
 use std::{env, fs};
 
+use core_text::font_descriptor::CTFontDescriptor;
 use winit::platform::macos::WindowAttributesExtMacOS;
 use winit::window::WindowAttributes;
 
@@ -82,4 +83,56 @@ pub fn fonts() -> Vec<(String, bool)> {
     let mono =
         |traits: core_text::font_descriptor::CTFontTraits| traits.symbolic_traits().is_monospace();
     descriptors.iter().map(|font| (font.family_name(), mono(font.traits()))).collect()
+}
+
+/// The face of a family in `style`, or else bold or regular, as Core Text describes it.
+fn face(family: &str, style: Option<&str>, bold: bool) -> Option<CTFontDescriptor> {
+    use core_text::font_collection;
+    use core_text::font_descriptor::{SymbolicTraitAccessors, TraitAccessors};
+
+    let descriptors = font_collection::create_for_family(family)?.get_descriptors()?;
+    let face = descriptors.iter().find(|face| match style {
+        Some(style) => face.style_name() == style,
+        None => {
+            let traits = face.traits().symbolic_traits();
+            traits.is_bold() == bold && !traits.is_italic()
+        },
+    });
+    face.map(|face| face.clone())
+}
+
+/// Whether Core Text has the font family, in `style` if given.
+pub fn installed(family: &str, style: Option<&str>) -> bool {
+    match style {
+        Some(_) => face(family, style, false).is_some(),
+        None => core_text::font_collection::create_for_family(family).is_some(),
+    }
+}
+
+/// Advances of a face, which the rasterizer does not report on macOS.
+pub fn advances(
+    family: &str,
+    style: Option<&str>,
+    bold: bool,
+    size: crossfont::Size,
+) -> Option<super::text::Advances> {
+    use core_text::font_descriptor::kCTFontDefaultOrientation;
+
+    let font =
+        core_text::font::new_from_descriptor(&face(family, style, bold)?, size.as_pt().into());
+    Some(Box::new(move |character| {
+        let mut units = [0; 2];
+        let units = character.encode_utf16(&mut units);
+        let mut glyphs = [0; 2];
+        unsafe {
+            let count = units.len() as isize;
+            if !font.get_glyphs_for_characters(units.as_ptr(), glyphs.as_mut_ptr(), count) {
+                return None;
+            }
+            let orientation = kCTFontDefaultOrientation;
+            let advance =
+                font.get_advances_for_glyphs(orientation, glyphs.as_ptr(), std::ptr::null_mut(), 1);
+            Some(advance as f32)
+        }
+    }))
 }

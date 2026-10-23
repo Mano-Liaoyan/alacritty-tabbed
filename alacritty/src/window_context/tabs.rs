@@ -14,6 +14,7 @@ mod icons;
 mod paint;
 mod profiles;
 mod settings;
+mod text;
 
 #[cfg(target_os = "macos")]
 mod macos;
@@ -61,6 +62,7 @@ use alacritty_terminal::vte::ansi::NamedColor;
 
 use crate::cli::{ParsedOptions, WindowOptions};
 use crate::clipboard::Clipboard;
+use crate::config::window::UiFont as UiFontConfig;
 use crate::config::{Action, BindingKey, BindingMode, UiConfig};
 use crate::event::{Event, EventProxy, EventType, InlineSearchState, SearchState};
 use crate::window_context::WindowContext;
@@ -69,6 +71,7 @@ use bar::{BAR, Hit, INSET, Layout, MARGIN};
 use paint::Image;
 use profiles::{Profile, Profiles};
 use settings::Settings;
+use text::UiFont;
 
 /// Ids for the terminals of new tabs, far from the platform's window ids.
 static NEXT_ID: AtomicU64 = AtomicU64::new(1 << 62);
@@ -115,6 +118,9 @@ pub struct Tabs {
     settings: Option<Settings>,
     /// Close the window instead of a tab once the active terminal exits.
     closing: bool,
+    /// Font of the bar, menus and settings, and what it was last loaded for.
+    font: Option<Rc<UiFont>>,
+    font_source: Option<(UiFontConfig, f64)>,
 }
 
 struct Tab {
@@ -186,6 +192,13 @@ enum Command {
 }
 
 impl Tabs {
+    /// Forget the interface's glyphs, after the glyph atlas was cleared.
+    pub fn reset_glyphs(&self) {
+        if let Some(font) = &self.font {
+            font.reset();
+        }
+    }
+
     fn len(&self) -> usize {
         self.tabs.len().max(1)
     }
@@ -517,7 +530,19 @@ fn sync(ctx: &mut WindowContext, config: &Rc<UiConfig>, resize: bool) {
     let id = ctx.id();
     let tabs = &mut ctx.display.tabs;
     tabs.scale = ctx.display.window.scale_factor;
-    let shown = ctx.config.window.tabs || tabs.tabs.len() > 1;
+
+    // The interface's font follows the configuration and the window's scale.
+    let source = (config.window.ui_font.clone(), tabs.scale);
+    if tabs.font_source.as_ref() != Some(&source) {
+        match UiFont::new(&source.0, source.1) {
+            Ok(font) => tabs.font = Some(Rc::new(font)),
+            Err(err) => error!("Could not load the interface font: {err}"),
+        }
+        tabs.font_source = Some(source);
+        redraw(ctx);
+    }
+    let tabs = &mut ctx.display.tabs;
+    let shown = (ctx.config.window.tabs || tabs.tabs.len() > 1) && tabs.font.is_some();
 
     // The window's own terminal becomes the first tab.
     if shown && tabs.tabs.is_empty() {

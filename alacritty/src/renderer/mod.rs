@@ -28,10 +28,11 @@ pub mod rects;
 mod shader;
 mod text;
 
+pub use text::glyph_cache::{Glyph, LoadGlyph};
 pub use text::{GlyphCache, LoaderApi};
 
 use shader::ShaderVersion;
-use text::{Gles2Renderer, Glsl3Renderer, TextRenderer};
+use text::{Gles2Renderer, Glsl3Renderer, TextRenderApi, TextRenderer};
 
 /// Whether the OpenGL functions have been loaded.
 pub static GL_FUNS_LOADED: AtomicBool = AtomicBool::new(false);
@@ -187,6 +188,22 @@ impl Renderer {
             TextRendererProvider::Glsl3(renderer) => {
                 renderer.draw_cells(size_info, glyph_cache, cells)
             },
+        }
+    }
+
+    /// Draw glyphs already loaded into the atlas, each placed as in the cell it comes with.
+    pub fn draw_glyphs<I: Iterator<Item = (RenderableCell, Glyph)>>(
+        &mut self,
+        size_info: &SizeInfo,
+        glyphs: I,
+    ) {
+        match &mut self.text_renderer {
+            TextRendererProvider::Gles2(renderer) => renderer.with_api(size_info, |mut api| {
+                glyphs.for_each(|(cell, glyph)| api.add_render_item(&cell, &glyph, size_info))
+            }),
+            TextRendererProvider::Glsl3(renderer) => renderer.with_api(size_info, |mut api| {
+                glyphs.for_each(|(cell, glyph)| api.add_render_item(&cell, &glyph, size_info))
+            }),
         }
     }
 

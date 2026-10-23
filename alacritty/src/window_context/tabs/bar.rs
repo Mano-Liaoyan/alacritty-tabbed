@@ -3,10 +3,10 @@
 //!
 //! The layout is the same on every platform; only the window controls follow the system's look.
 
+use std::rc::Rc;
 use std::sync::Arc;
 
 use glutin::surface::Rect as DamageRect;
-use unicode_width::UnicodeWidthStr;
 use winit::dpi::PhysicalPosition;
 use winit::window::ResizeDirection;
 
@@ -14,9 +14,10 @@ use crate::config::UiConfig;
 use crate::display::SizeInfo;
 use crate::display::color::Rgb;
 use crate::display::window::Window;
-use crate::renderer::{GlyphCache, Renderer};
+use crate::renderer::Renderer;
 
-use super::paint::{BLACK, Image, Layer, Palette, Rect, WHITE, fit, mix};
+use super::paint::{BLACK, Image, Layer, Palette, Rect, WHITE, mix};
+use super::text::UiFont;
 use super::{Frame, Tabs, icons};
 
 /// Height of the bar in logical pixels, on every platform.
@@ -59,7 +60,9 @@ pub enum Hit {
 /// Geometry of the bar, the terminal's panel and the menu, in window pixels.
 pub struct Layout {
     pub scale: f32,
-    pub cell: (f32, f32),
+    pub font: Rc<UiFont>,
+    /// Height of a line of text.
+    pub line: f32,
     pub bar: f32,
     pub width: f32,
     pub first: usize,
@@ -82,7 +85,8 @@ impl Layout {
     pub fn new(tabs: &Tabs, size: &SizeInfo) -> Self {
         let scale = tabs.scale as f32;
         let px = |value: f32| (value * scale).round();
-        let cell = (size.cell_width(), size.cell_height());
+        let font = tabs.font.clone().expect("the bar is only shown with its font");
+        let line = font.line;
         let (width, height) = (size.width(), size.height() + tabs.height as f32);
         let (bar, count, fullscreen) = (px(BAR), tabs.len(), tabs.frame == Frame::Fullscreen);
         let mac = MAC;
@@ -154,10 +158,10 @@ impl Layout {
         // The menu drops from the new-tab button over the terminal.
         let new = buttons.iter().find(|(hit, _)| *hit == Hit::New).map_or(track, |(_, rect)| *rect);
         let menu = tabs.menu.as_ref().map(|menu| {
-            let row = px(34.).max(cell.1 + px(12.));
-            let names = menu.profiles.iter().map(|profile| profile.name.width());
-            let chars = names.chain([EDIT_PROFILES.width()]).max().unwrap_or(0);
-            let w = (chars as f32 * cell.0 + row + px(36.)).max(px(220.)).min(width - 2. * margin);
+            let row = px(34.).max(line + px(12.));
+            let names = menu.profiles.iter().map(|profile| font.width(&profile.name, false));
+            let text = names.fold(font.width(EDIT_PROFILES, false), f32::max);
+            let w = (text + row + px(36.)).max(px(220.)).min(width - 2. * margin);
             let x = new.x.min(width - margin - w).max(margin);
             let rows = menu.profiles.len() + 1;
             (Rect::new(x, bar - px(4.), w, rows as f32 * row + px(12.)), row)
@@ -165,7 +169,8 @@ impl Layout {
 
         Self {
             scale,
-            cell,
+            font,
+            line,
             bar,
             width,
             first,
@@ -272,7 +277,7 @@ fn badge(
     rect: Rect,
     image: Option<&Arc<Image>>,
     text: &str,
-    cell: (f32, f32),
+    font: &UiFont,
     colors: (Rgb, Rgb, Rgb),
 ) {
     match image {
@@ -280,7 +285,7 @@ fn badge(
         None => {
             let (surface, accent, _) = colors;
             layer.rounded(rect, rect.w / 4., mix(surface, accent, 0.3));
-            layer.label(rect, text, cell, accent, true);
+            layer.label(rect, text, font, accent, true);
         },
     }
 }
@@ -309,7 +314,6 @@ impl Tabs {
     pub fn draw(
         &mut self,
         renderer: &mut Renderer,
-        glyph_cache: &mut GlyphCache,
         window: &Window,
         size: &SizeInfo,
         config: &UiConfig,
@@ -321,7 +325,8 @@ impl Tabs {
         let layout = Layout::new(self, size);
         self.first = layout.first;
         let palette = Palette::new(&config.colors);
-        let (cell, bar, width) = (layout.cell, layout.bar, layout.width);
+        let (font, line_height) = (&*layout.font, layout.line);
+        let (bar, width) = (layout.bar, layout.width);
         let px = |value: f32| layout.px(value);
         let line = px(1.).max(1.);
         let icon = (1.3 * layout.scale).max(1.);
@@ -350,19 +355,14 @@ impl Tabs {
         base.image(layout.mark.square(px(24.)), &icons::logo(), palette.foreground);
         if let Some(brand) = layout.brand {
             let middle = (bar / 2.).round();
-            let columns = (brand.w / cell.0) as usize;
-            let (label, host) = ("Alacritty", fit(&self.host, columns));
-            if 2. * cell.1 <= bar - px(8.) {
-                base.text(
-                    brand.x,
-                    middle - cell.1 + px(1.),
-                    label.into(),
-                    palette.foreground,
-                    true,
-                );
+            let (label, host) = ("Alacritty", font.fit(&self.host, brand.w, false));
+            if 2. * line_height <= bar - px(8.) {
+                let y = middle - line_height + px(1.);
+                base.text(brand.x, y, label.into(), palette.foreground, true);
                 base.text(brand.x, middle + px(1.), host, palette.muted, false);
             } else {
-                base.text(brand.x, middle - cell.1 / 2., label.into(), palette.foreground, true);
+                let y = middle - line_height / 2.;
+                base.text(brand.x, y, label.into(), palette.foreground, true);
             }
         }
 
@@ -415,7 +415,7 @@ impl Tabs {
             let tab = &self.tabs[index];
             let title = if active { window.title() } else { &tab.title };
             let colors = (surface, palette.accent(title), palette.foreground);
-            badge(layer, layout.badge(rect), tab.icon.as_ref(), &tab.badge, cell, colors);
+            badge(layer, layout.badge(rect), tab.icon.as_ref(), &tab.badge, font, colors);
 
             let close = layout.close(rect);
             if lit(index) {
@@ -428,9 +428,9 @@ impl Tabs {
 
             let left = layout.badge(rect).right() + px(8.);
             let right = if lit(index) { close.x + px(2.) } else { rect.right() - px(10.) };
-            let columns = ((right - left) / cell.0).max(0.) as usize;
+            let title = font.fit(title, (right - left).max(0.), active);
             let color = if lit(index) { palette.foreground } else { palette.muted };
-            layer.text(left, rect.center().1 - cell.1 / 2., fit(title, columns), color, active);
+            layer.text(left, rect.center().1 - line_height / 2., title, color, active);
         }
 
         for &(hit, rect) in &layout.buttons {
@@ -464,11 +464,11 @@ impl Tabs {
                     Some(profile) => {
                         let image = profile.image(config);
                         let colors = (surface, palette.accent(name), palette.foreground);
-                        badge(&mut top, icon_rect, image.as_ref(), &profile.badge(), cell, colors);
+                        badge(&mut top, icon_rect, image.as_ref(), &profile.badge(), font, colors);
                     },
                     None => top.gear(icon_rect.center(), px(8.), palette.muted, surface),
                 }
-                let y = item.center().1 - cell.1 / 2.;
+                let y = item.center().1 - line_height / 2.;
                 top.text(icon_rect.right() + px(10.), y, name.into(), palette.foreground, false);
             }
         }
@@ -480,8 +480,8 @@ impl Tabs {
 
         // Draw over the whole window, then give the terminal its own viewport back.
         let height = size.height() + self.height as f32;
-        let window = SizeInfo::new(size.width(), height, cell.0, cell.1, 0., 0., false);
-        Layer::draw(layers, renderer, glyph_cache, &window);
+        let window = SizeInfo::new(size.width(), height, 1., 1., 0., 0., false);
+        Layer::draw(layers, renderer, font, &window);
         renderer.resize(size);
     }
 
