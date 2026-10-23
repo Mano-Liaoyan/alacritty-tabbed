@@ -53,7 +53,7 @@ use crate::display::window::Window;
 use crate::event::{Event, EventType, Mouse, SearchState};
 use crate::message_bar::{MessageBuffer, MessageType};
 use crate::renderer::rects::{RenderLine, RenderLines, RenderRect};
-use crate::renderer::{self, GlyphCache, Renderer, platform};
+use crate::renderer::{self, Frame, GlyphCache, Renderer, platform};
 use crate::scheduler::{Scheduler, TimerId, Topic};
 use crate::string::{ShortenDirection, StrShortener};
 
@@ -382,6 +382,10 @@ pub struct Display {
     /// Damage tracker for the given display.
     pub damage_tracker: DamageTracker,
 
+    /// Present the whole window this frame and the next, since the terminal's damage alone does
+    /// not cover it; set while drawing into frames, reset once presented.
+    pub full_damage: bool,
+
     /// Font size used by the window.
     pub font_size: FontSize,
 
@@ -527,6 +531,7 @@ impl Display {
             frame_timer: FrameTimer::new(),
             raw_window_handle,
             damage_tracker,
+            full_damage: false,
             glyph_cache,
             hint_state,
             size_info,
@@ -614,7 +619,8 @@ impl Display {
             #[cfg(not(any(target_os = "macos", windows)))]
             (Surface::Egl(surface), PossiblyCurrentContext::Egl(context))
                 if matches!(self.raw_window_handle, RawWindowHandle::Wayland(_))
-                    && !self.damage_tracker.debug =>
+                    && !self.damage_tracker.debug
+                    && !self.full_damage =>
             {
                 let damage = self.damage_tracker.shape_frame_damage(self.size_info.into());
                 let damage = self.tabs.damage(damage, &self.size_info);
@@ -691,6 +697,10 @@ impl Display {
         if let Some(dimensions) = pending_update.dimensions() {
             width = dimensions.width as f32;
             height = dimensions.height as f32;
+
+            // Resize the surface with the window, even when the terminal keeps its size.
+            let renderer_update = self.pending_renderer_update.get_or_insert(Default::default());
+            renderer_update.resize = true;
         }
 
         let padding = config.window.padding(self.window.scale_factor as f32);
@@ -755,9 +765,10 @@ impl Display {
 
         // Resize renderer.
         if renderer_update.resize {
-            let width = NonZeroU32::new(self.size_info.width() as u32).unwrap();
-            let height = NonZeroU32::new(self.size_info.height() as u32).unwrap();
-            let height = height.saturating_add(self.tabs.height);
+            // The surface is the whole window, which holds the tab bar and every pane.
+            let size = self.window.inner_size();
+            let width = NonZeroU32::new(size.width.max(1)).unwrap();
+            let height = NonZeroU32::new(size.height.max(1)).unwrap();
             self.surface.resize(&self.context, width, height);
         }
 
@@ -781,11 +792,40 @@ impl Display {
     /// This call may block if vsync is enabled.
     pub fn draw<T: EventListener>(
         &mut self,
-        mut terminal: MutexGuard<'_, Term<T>>,
+        terminal: MutexGuard<'_, Term<T>>,
         scheduler: &mut Scheduler,
         message_buffer: &MessageBuffer,
         config: &UiConfig,
         search_state: &mut SearchState,
+    ) {
+        self.draw_terminal(terminal, message_buffer, config, search_state, None);
+        self.present(scheduler, config);
+    }
+
+    /// Start drawing a window of several terminals, clearing all of it.
+    ///
+    /// Not needed when the window's own terminal is drawn without a frame, which clears it.
+    #[expect(dead_code, reason = "split panes are not drawn yet")]
+    pub fn begin(&mut self, config: &UiConfig) {
+        // Make sure this window's OpenGL context is active.
+        self.make_current();
+
+        self.renderer.set_frame(None);
+        self.renderer.clear(config.colors.primary.background, config.window_opacity());
+    }
+
+    /// Draw the terminal into `frame`, or over the window without one, with everything around
+    /// it: its search, hints, message bar and input method.
+    ///
+    /// A [`Frame`] is created from where the terminal goes in the window, with
+    /// [`Frame::new`]`(&display.size_info, [x, y, width, height], window_height)`.
+    pub fn draw_terminal<T: EventListener>(
+        &mut self,
+        mut terminal: MutexGuard<'_, Term<T>>,
+        message_buffer: &MessageBuffer,
+        config: &UiConfig,
+        search_state: &mut SearchState,
+        frame: Option<Frame>,
     ) {
         // Collect renderable content before the terminal is dropped.
         let mut content = RenderableContent::new(config, self, &terminal, search_state);
@@ -842,7 +882,15 @@ impl Display {
         // Make sure this window's OpenGL context is active.
         self.make_current();
 
-        self.renderer.clear(background_color, config.window_opacity());
+        self.renderer.set_frame(frame);
+        self.renderer.set_viewport(&size_info);
+        match &frame {
+            Some(frame) => {
+                self.full_damage = true;
+                self.renderer.clear_rect(frame, background_color, config.window_opacity());
+            },
+            None => self.renderer.clear(background_color, config.window_opacity()),
+        }
         let mut lines = RenderLines::new();
 
         // Optimize loop hint comparator.
@@ -852,10 +900,6 @@ impl Display {
         // Draw grid.
         {
             let _sampler = self.meter.sampler();
-
-            // Ensure macOS hasn't reset our viewport.
-            #[cfg(target_os = "macos")]
-            self.renderer.set_viewport(&size_info);
 
             let glyph_cache = &mut self.glyph_cache;
             let highlighted_hint = &self.highlighted_hint;
@@ -1022,7 +1066,62 @@ impl Display {
             let cursor_point = vi_cursor_point.or(Some(cursor_point));
             self.draw_hyperlink_preview(config, cursor_point, display_offset);
         }
+    }
 
+    /// Draw a terminal other than the window's own, which is `size` large, into `frame`.
+    ///
+    /// Only its cells, lines and cursor are drawn, in the colors of `config`.
+    #[expect(dead_code, reason = "split panes are not drawn yet")]
+    pub fn draw_pane<T: EventListener>(
+        &mut self,
+        terminal: MutexGuard<'_, Term<T>>,
+        size: SizeInfo,
+        config: &UiConfig,
+        frame: Frame,
+    ) {
+        // Draw as if the terminal were the window's own, without its hints or input method.
+        let colors = List::from(&config.colors);
+        let own = (
+            mem::replace(&mut self.size_info, size),
+            mem::replace(&mut self.colors, colors),
+            mem::replace(&mut self.hint_state, HintState::new("")),
+            mem::take(&mut self.ime),
+            mem::take(&mut self.cursor_hidden),
+        );
+
+        let mut search_state = SearchState::default();
+        let mut content = RenderableContent::new(config, self, &terminal, &mut search_state);
+        let mut lines = RenderLines::new();
+        let cells: Vec<_> = (&mut content).inspect(|cell| lines.update(cell)).collect();
+        let background = content.color(NamedColor::Background as usize);
+        let cursor = content.cursor();
+
+        // Free the terminal's lock before drawing.
+        drop(terminal);
+
+        self.full_damage = true;
+        self.renderer.set_frame(Some(frame));
+        self.renderer.resize(&size);
+        self.renderer.clear_rect(&frame, background, config.window_opacity());
+        self.renderer.draw_cells(&size, &mut self.glyph_cache, cells.into_iter());
+
+        let metrics = self.glyph_cache.font_metrics();
+        let mut rects = lines.rects(&metrics, &size);
+        rects.extend(cursor.rects(&size, config.cursor.thickness()));
+        self.renderer.draw_rects(&size, &metrics, rects);
+
+        (self.size_info, self.colors, self.hint_state, self.ime, self.cursor_hidden) = own;
+        self.renderer.set_frame(None);
+        self.renderer.resize(&self.size_info);
+    }
+
+    /// Draw the tab bar over everything drawn since [`Self::begin`] and show it all.
+    pub fn present(&mut self, scheduler: &mut Scheduler, config: &UiConfig) {
+        let metrics = self.glyph_cache.font_metrics();
+        let size_info = self.size_info;
+
+        self.renderer.set_frame(None);
+        self.renderer.set_viewport(&size_info);
         self.tabs.draw(&mut self.renderer, &self.window, &size_info, config);
 
         // Notify winit that we're about to present.
@@ -1052,6 +1151,10 @@ impl Display {
             self.request_frame(scheduler);
         }
 
+        // Drawing without frames next must still replace what was drawn into them.
+        if mem::take(&mut self.full_damage) {
+            self.damage_tracker.next_frame().mark_fully_damaged();
+        }
         self.damage_tracker.swap_damage();
     }
 

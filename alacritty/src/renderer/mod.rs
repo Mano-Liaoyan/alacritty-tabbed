@@ -91,6 +91,54 @@ pub struct Renderer {
     text_renderer: TextRendererProvider,
     rect_renderer: RectRenderer,
     robustness: bool,
+    frame: Option<Frame>,
+}
+
+/// Where a terminal is drawn in the window, which its `SizeInfo` is stretched over.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Frame {
+    /// Left edge, in window pixels.
+    pub x: f32,
+    /// Bottom edge, in window pixels from the window's bottom, as OpenGL counts them.
+    pub y_bottom: f32,
+    /// Scale from the terminal's size to the frame.
+    pub sx: f32,
+    pub sy: f32,
+    /// Scissor rectangle `[x, y, width, height]` outside which nothing is drawn.
+    pub clip: [i32; 4],
+}
+
+impl Frame {
+    /// The window's bottom left corner, unscaled and unclipped, where terminals are drawn
+    /// without a frame.
+    const ORIGIN: Frame = Frame { x: 0., y_bottom: 0., sx: 1., sy: 1., clip: [0; 4] };
+
+    /// Frame stretching `size` over `[x, y, width, height]`, in window pixels from the top left
+    /// of a window `window_height` pixels tall.
+    #[cfg_attr(not(test), expect(dead_code, reason = "split panes are not drawn yet"))]
+    pub fn new(size: &SizeInfo, [x, y, width, height]: [f32; 4], window_height: f32) -> Self {
+        let y_bottom = window_height - y - height;
+        let (sx, sy) = (width / size.width(), height / size.height());
+        let frame = Self { x, y_bottom, sx, sy, clip: [0; 4] };
+        Self { clip: frame.area(size), ..frame }
+    }
+
+    /// Viewport `[x, y, width, height]` of the whole of `size`, padding included, with its edges
+    /// rounded to whole pixels.
+    fn area(&self, size: &SizeInfo) -> [i32; 4] {
+        let (left, bottom) = (self.x.round(), self.y_bottom.round());
+        let right = (self.x + size.width() * self.sx).round();
+        let top = (self.y_bottom + size.height() * self.sy).round();
+        [left, bottom, right - left, top - bottom].map(|value| value as i32)
+    }
+}
+
+/// Viewport `[x, y, width, height]` of the cells of `size`, drawn in `frame`.
+fn viewport(size: &SizeInfo, frame: &Frame) -> [i32; 4] {
+    let (padding_x, padding_y) =
+        ((size.padding_x() * frame.sx) as i32, (size.padding_y() * frame.sy) as i32);
+    let [x, y, width, height] = frame.area(size);
+    [x + padding_x, y + padding_y, width - 2 * padding_x, height - 2 * padding_y]
 }
 
 /// Wrapper around gl::GetString with error checking and reporting.
@@ -172,7 +220,7 @@ impl Renderer {
             }
         }
 
-        Ok(Self { text_renderer, rect_renderer, robustness })
+        Ok(Self { text_renderer, rect_renderer, robustness, frame: None })
     }
 
     pub fn draw_cells<I: Iterator<Item = RenderableCell>>(
@@ -282,13 +330,14 @@ impl Renderer {
         }
 
         // Prepare rect rendering state.
+        let [x, y, width, height] = self.frame.unwrap_or(Frame::ORIGIN).area(size_info);
         unsafe {
             // Remove padding from viewport.
-            gl::Viewport(0, 0, size_info.width() as i32, size_info.height() as i32);
+            gl::Viewport(x, y, width, height);
             gl::BlendFuncSeparate(src_rgb, dst_rgb, src_alpha, dst_alpha);
         }
 
-        self.rect_renderer.draw(size_info, metrics, rects);
+        self.rect_renderer.draw(size_info, metrics, rects, [x as f32, y as f32]);
 
         // Activate regular state again.
         unsafe {
@@ -300,7 +349,35 @@ impl Renderer {
         }
     }
 
-    /// Fill the window with `color` and `alpha`.
+    /// Draw terminals into `frame`, or as they fill the window without one.
+    ///
+    /// Takes effect on the viewport with the next [`Self::set_viewport`] or [`Self::resize`].
+    pub fn set_frame(&mut self, frame: Option<Frame>) {
+        self.frame = frame;
+        Self::scissor(frame);
+    }
+
+    /// Fill `frame` with `color` and `alpha`.
+    pub fn clear_rect(&self, frame: &Frame, color: Rgb, alpha: f32) {
+        Self::scissor(Some(*frame));
+        self.clear(color, alpha);
+        Self::scissor(self.frame);
+    }
+
+    /// Clip drawing to `frame`, or stop clipping without one.
+    fn scissor(frame: Option<Frame>) {
+        unsafe {
+            match frame {
+                Some(Frame { clip: [x, y, width, height], .. }) => {
+                    gl::Scissor(x, y, width, height);
+                    gl::Enable(gl::SCISSOR_TEST);
+                },
+                None => gl::Disable(gl::SCISSOR_TEST),
+            }
+        }
+    }
+
+    /// Fill the window, or only the frame's clip, with `color` and `alpha`.
     pub fn clear(&self, color: Rgb, alpha: f32) {
         unsafe {
             gl::ClearColor(
@@ -365,13 +442,9 @@ impl Renderer {
     /// Set the viewport for cell rendering.
     #[inline]
     pub fn set_viewport(&self, size: &SizeInfo) {
+        let [x, y, width, height] = viewport(size, &self.frame.unwrap_or(Frame::ORIGIN));
         unsafe {
-            gl::Viewport(
-                size.padding_x() as i32,
-                size.padding_y() as i32,
-                size.width() as i32 - 2 * size.padding_x() as i32,
-                size.height() as i32 - 2 * size.padding_y() as i32,
-            );
+            gl::Viewport(x, y, width, height);
         }
     }
 
@@ -433,4 +506,71 @@ extern "system" fn gl_debug_log(
 ) {
     let msg = unsafe { CStr::from_ptr(msg).to_string_lossy() };
     debug!("[gl_render] {msg}");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn size() -> SizeInfo {
+        SizeInfo::new(800., 600., 10., 20., 5., 7., false)
+    }
+
+    #[test]
+    fn viewport_without_frame() {
+        let size = size();
+        assert_eq!(viewport(&size, &Frame::ORIGIN), [5, 7, 790, 586]);
+        assert_eq!(Frame::ORIGIN.area(&size), [0, 0, 800, 600]);
+    }
+
+    #[test]
+    fn viewport_of_terminal_below_bar() {
+        // Framed where it is drawn without a frame: below a 40 pixels tall bar.
+        let size = size();
+        let frame = Frame::new(&size, [0., 40., 800., 600.], 640.);
+        assert_eq!(frame, Frame { clip: [0, 0, 800, 600], ..Frame::ORIGIN });
+        assert_eq!(viewport(&size, &frame), viewport(&size, &Frame::ORIGIN));
+    }
+
+    #[test]
+    fn viewport_offset() {
+        // Right half of a 1600x640 window.
+        let size = size();
+        let frame = Frame::new(&size, [800., 40., 800., 600.], 640.);
+        assert_eq!(viewport(&size, &frame), [805, 7, 790, 586]);
+        assert_eq!(frame.area(&size), [800, 0, 800, 600]);
+
+        // Top half of a 800x1240 window.
+        let frame = Frame::new(&size, [0., 40., 800., 600.], 1240.);
+        assert_eq!(viewport(&size, &frame), [5, 607, 790, 586]);
+        assert_eq!(frame.area(&size), [0, 600, 800, 600]);
+    }
+
+    #[test]
+    fn viewport_scaled() {
+        // Popping in at 85 % about the centre of the window.
+        let size = size();
+        let frame = Frame::new(&size, [60., 45., 680., 510.], 600.);
+        assert_eq!((frame.sx, frame.sy), (0.85, 0.85));
+        assert_eq!(viewport(&size, &frame), [64, 50, 672, 500]);
+        assert_eq!(frame.area(&size), [60, 45, 680, 510]);
+    }
+
+    #[test]
+    fn clip() {
+        let size = size();
+        let frame = Frame::new(&size, [10.4, 20.6, 99.5, 50.2], 100.);
+        assert_eq!(frame.clip, [10, 29, 100, 50]);
+    }
+
+    #[test]
+    fn clip_matches_area_between_pixels() {
+        // Halfway through a slide, edges rounded alike so neighbours neither overlap nor gap.
+        let size = size();
+        let frame = Frame::new(&size, [10.5, 20., 10.5, 50.], 100.);
+        assert_eq!(frame.clip, [11, 30, 10, 50]);
+        assert_eq!(frame.area(&size), frame.clip);
+        let next = Frame::new(&size, [21., 20., 10.5, 50.], 100.);
+        assert_eq!(next.clip[0], frame.clip[0] + frame.clip[2]);
+    }
 }
