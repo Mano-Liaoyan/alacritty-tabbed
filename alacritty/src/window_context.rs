@@ -44,7 +44,7 @@ use crate::logging::LOG_TARGET_IPC_CONFIG;
 use crate::message_bar::MessageBuffer;
 use crate::renderer::Frame;
 use crate::scheduler::Scheduler;
-use crate::window_context::tabs::{Live, Rect, Torn};
+use crate::window_context::tabs::{Live, Rect, Torn, restore};
 use crate::{input, renderer};
 
 pub mod tabs;
@@ -83,6 +83,7 @@ impl WindowContext {
         proxy: EventLoopProxy<Event>,
         config: Rc<UiConfig>,
         mut options: WindowOptions,
+        saved: Option<restore::Window>,
     ) -> Result<Self, Box<dyn Error>> {
         let raw_display_handle = event_loop.display_handle().unwrap().as_raw();
 
@@ -122,7 +123,7 @@ impl WindowContext {
 
         let display = Display::new(window, gl_context, &config, false)?;
 
-        Self::new(display, config, options, proxy)
+        Self::new(display, config, options, proxy, saved)
     }
 
     /// Create additional context with the graphics platform other windows are using.
@@ -133,15 +134,17 @@ impl WindowContext {
         config: Rc<UiConfig>,
         mut options: WindowOptions,
         config_overrides: ParsedOptions,
+        saved: Option<restore::Window>,
     ) -> Result<Self, Box<dyn Error>> {
         let display = Self::display(gl_config, event_loop, &config, &mut options, |_| ())?;
 
-        let mut window_context = Self::new(display, config, options, proxy)?;
+        let mut window_context = Self::new(display, config, options, proxy, saved)?;
 
-        // Set the config overrides at startup.
+        // Set the config overrides at startup, before those of a restored pane's profile.
         //
         // These are already applied to `config`, so no update is necessary.
-        window_context.window_config = config_overrides;
+        let profile = mem::replace(&mut window_context.window_config, config_overrides);
+        window_context.window_config.extend_from_slice(&profile);
 
         Ok(window_context)
     }
@@ -176,11 +179,16 @@ impl WindowContext {
         };
 
         // From here on the terminal belongs to the new window, whatever happens.
+        let zoom = live.zoom;
         let mut window_context = Self::assemble(display, config.clone(), id, live);
         // A configured size gives way to the size of the window it was torn off.
         window_context.display.window.request_inner_size(size);
         window_context.display.window.hold = torn.hold;
         tabs::adopt(&mut window_context, torn, &config);
+        // A zoomed pane keeps its text size.
+        if let Some(size) = zoom {
+            tabs::set_live_font(&mut window_context, size);
+        }
         window_context.display.window.winit().focus_window();
         Ok(window_context)
     }
@@ -224,27 +232,37 @@ impl WindowContext {
         Ok(Display::new(window, gl_context, config, tabbed)?)
     }
 
-    /// Create a new terminal window context.
+    /// Create a new terminal window context, like the window `saved` from a previous session.
     fn new(
         display: Display,
         config: Rc<UiConfig>,
         options: WindowOptions,
         proxy: EventLoopProxy<Event>,
+        saved: Option<restore::Window>,
     ) -> Result<Self, Box<dyn Error>> {
-        let (first, live) = Self::spawn(&display, &config, &options, proxy)?;
-        Ok(Self::assemble(display, config, first, live))
+        let (first, live) =
+            Self::spawn(&display, &config, &options, proxy.clone(), saved.as_ref())?;
+        let mut window_context = Self::assemble(display, config.clone(), first, live);
+        if let Some(saved) = saved {
+            restore::install(&mut window_context, saved, &config, &proxy);
+        }
+        Ok(window_context)
     }
 
-    /// Start the terminal of a new window.
+    /// Start the terminal of a new window, or of the live pane of the window `saved`.
     fn spawn(
         display: &Display,
         config: &UiConfig,
         options: &WindowOptions,
         proxy: EventLoopProxy<Event>,
+        saved: Option<&restore::Window>,
     ) -> Result<(WindowId, Live), Box<dyn Error>> {
         let mut pty_config = config.pty_config();
         options.terminal_options.override_pty_config(&mut pty_config);
-        tabs::launch(config, options, &mut pty_config, &display.tabs);
+        match saved {
+            Some(saved) => restore::prepare(config, &display.tabs, saved, &mut pty_config),
+            None => tabs::launch(config, options, &mut pty_config, &display.tabs),
+        }
 
         let preserve_title = options.window_identity.title.is_some();
 
@@ -262,7 +280,11 @@ impl WindowContext {
         // This object contains all of the state about what's being displayed. It's
         // wrapped in a clonable mutex since both the I/O loop and display need to
         // access it.
-        let terminal = Term::new(config.term_options(), &display.size_info, event_proxy.clone());
+        let mut terminal =
+            Term::new(config.term_options(), &display.size_info, event_proxy.clone());
+        if let Some(text) = saved.and_then(restore::first_text) {
+            restore::replay(&mut terminal, text);
+        }
         let terminal = Arc::new(FairMutex::new(terminal));
 
         // Create the PTY.

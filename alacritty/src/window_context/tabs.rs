@@ -26,7 +26,7 @@ mod panes;
 mod peek;
 mod profiles;
 mod rename;
-mod restore;
+pub mod restore;
 mod settings;
 mod split;
 mod tear;
@@ -418,7 +418,6 @@ impl Tabs {
     }
 
     /// Whether the window was closed as a window, rather than by closing its tabs.
-    #[allow(dead_code, reason = "lane X saves the session of windows closed whole")]
     pub fn closed_whole(&self) -> bool {
         self.ending == Some(Ending::Window)
     }
