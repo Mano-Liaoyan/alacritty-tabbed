@@ -15,7 +15,7 @@ use glutin::error::ErrorKind;
 use glutin::prelude::*;
 use glutin::surface::{Surface, SwapInterval, WindowSurface};
 
-use log::{debug, info, warn};
+use log::{debug, info};
 use parking_lot::MutexGuard;
 use serde::{Deserialize, Serialize};
 use winit::dpi::PhysicalSize;
@@ -637,7 +637,7 @@ impl Display {
     ///
     /// This will return a tuple of the cell width and height.
     fn update_font(&mut self, config: &UiConfig, font: &Font) -> (f32, f32) {
-        if self.glyph_cache.update_font(font).unwrap_or(false) {
+        if self.glyph_cache.update_font(font) {
             self.pending_renderer_update.get_or_insert(Default::default()).clear_font_cache = true;
         }
 
@@ -655,16 +655,17 @@ impl Display {
 
     /// Run `f` with `font` selected in the glyph cache, then select the window's font again.
     fn with_font<R>(&mut self, font: &Font, f: impl FnOnce(&mut Self) -> R) -> R {
-        let window = (self.glyph_cache.font() != font).then(|| self.glyph_cache.font().clone());
-        if let Err(err) = self.glyph_cache.select(font) {
-            warn!("Could not load font {:?}: {err}", font.normal().family);
+        let window = self.glyph_cache.select(font);
+
+        // Bound the atlas, clearing it before the next frame rather than in the middle of this one.
+        if self.glyph_cache.full() {
+            self.pending_renderer_update.get_or_insert(Default::default()).clear_font_cache = true;
         }
 
         let result = f(self);
 
-        // The window's font is still loaded, so selecting it cannot fail.
         if let Some(window) = window {
-            let _ = self.glyph_cache.select(&window);
+            self.glyph_cache.select_index(window);
         }
 
         result

@@ -42,6 +42,9 @@ pub struct Glyph {
 /// Fonts kept loaded at once before a font change clears the atlas, which bounds its growth.
 const MAX_FACES: usize = 8;
 
+/// Fonts loaded at once before the atlas is cleared regardless, far more than one frame draws.
+const MAX_LOADED: usize = 4 * MAX_FACES;
+
 /// The font keys and metrics of one [`Font`].
 #[derive(Copy, Clone, Debug)]
 struct Faces {
@@ -93,6 +96,9 @@ pub struct GlyphCache {
     /// Every font loaded since the atlas was last cleared; the selected one is at `active`.
     faces: Vec<(Font, Faces)>,
     active: usize,
+
+    /// Fonts that could not be loaded since the atlas was last cleared, not to be retried.
+    failed: Vec<Font>,
 }
 
 impl GlyphCache {
@@ -112,6 +118,7 @@ impl GlyphCache {
             builtin_box_drawing: font.builtin_box_drawing,
             faces: vec![(font.clone(), faces)],
             active: 0,
+            failed: Vec::new(),
         })
     }
 
@@ -129,22 +136,40 @@ impl GlyphCache {
 
     /// Draw the next glyphs with `font`, loading it unless it was used before.
     ///
+    /// Returns the index of the font selected before, for [`Self::select_index`], or `None` when
+    /// `font` cannot be loaded (logged once) and the selection is unchanged.
+    ///
     /// The atlas is kept: glyphs of another size or face have their own keys. Fonts that differ
-    /// only in offsets or built-in box drawing share keys, see [`Self::update_font`].
-    pub fn select(&mut self, font: &Font) -> Result<(), crossfont::Error> {
+    /// only in `offset`, `glyph_offset` or `builtin_box_drawing` share keys, so the glyphs of
+    /// whichever is drawn first at a size are used for all of them until the atlas is cleared.
+    pub fn select(&mut self, font: &Font) -> Option<usize> {
+        let previous = self.active;
         if self.font() == font {
-            return Ok(());
+            return Some(previous);
         }
 
         let index = match faces_index(&self.faces, font) {
             Some(index) => index,
-            None => {
-                let faces = Self::load_faces(&mut self.rasterizer, font)?;
-                self.faces.push((font.clone(), faces));
-                self.faces.len() - 1
+            None if self.failed.contains(font) => return None,
+            None => match Self::load_faces(&mut self.rasterizer, font) {
+                Ok(faces) => {
+                    self.faces.push((font.clone(), faces));
+                    self.faces.len() - 1
+                },
+                Err(err) => {
+                    error!("Could not load font {:?}: {err}", font.normal().family);
+                    self.failed.push(font.clone());
+                    return None;
+                },
             },
         };
 
+        self.select_index(index);
+        Some(previous)
+    }
+
+    /// Draw the next glyphs with the font at `index`, as returned by [`Self::select`].
+    pub fn select_index(&mut self, index: usize) {
         let (font, faces) = &self.faces[index];
         self.font_size = font.size();
         self.font_key = faces.regular;
@@ -156,8 +181,11 @@ impl GlyphCache {
         self.glyph_offset = font.glyph_offset;
         self.builtin_box_drawing = font.builtin_box_drawing;
         self.active = index;
+    }
 
-        Ok(())
+    /// Whether so many fonts are loaded that the atlas should be cleared before the next frame.
+    pub fn full(&self) -> bool {
+        self.faces.len() > MAX_LOADED
     }
 
     // Load font metrics and adjust for glyph offset.
@@ -337,6 +365,7 @@ impl GlyphCache {
         self.faces.swap(0, self.active);
         self.faces.truncate(1);
         self.active = 0;
+        self.failed.clear();
 
         self.load_common_glyphs(loader);
     }
@@ -345,13 +374,19 @@ impl GlyphCache {
     ///
     /// Returns whether the cached glyphs must be dropped with [`Self::reset_glyph_cache`]: when
     /// they were drawn with other offsets, or when too many fonts were loaded since the last reset.
-    pub fn update_font(&mut self, font: &Font) -> Result<bool, crossfont::Error> {
-        let clear = needs_clear(self.font(), font);
-        self.select(font)?;
+    pub fn update_font(&mut self, font: &Font) -> bool {
+        let clear = needs_clear(self.font(), font)
+            || self
+                .faces
+                .iter()
+                .any(|(face, _)| face.size() == font.size() && needs_clear(face, font));
+        if self.select(font).is_none() {
+            return false;
+        }
 
         info!("Font size changed to {:?} px", font.size().as_px());
 
-        Ok(clear || self.faces.len() > MAX_FACES)
+        clear || self.faces.len() > MAX_FACES
     }
 
     pub fn font_metrics(&self) -> crossfont::Metrics {
