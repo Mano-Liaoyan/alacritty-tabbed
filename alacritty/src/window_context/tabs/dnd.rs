@@ -72,6 +72,8 @@ struct Scene {
     shown: usize,
     /// The shown panes a dock may cut.
     panes: Vec<(usize, Rect)>,
+    /// The room each of `panes` has to be cut, once a pane dragged out of them has left.
+    room: Vec<Rect>,
     /// The panes a dock would add, as they are laid out.
     docked: Option<Split<WindowId>>,
     /// Smallest size a pane may be split to.
@@ -97,12 +99,14 @@ impl Scene {
         }
 
         if y >= self.bar {
-            let &(index, rect) = self.panes.iter().find(|(_, rect)| rect.contains(pointer))?;
+            let at = self.panes.iter().position(|(_, rect)| rect.contains(pointer))?;
+            let (index, rect) = self.panes[at];
             let (axis, side) = split::drop_zone(rect, (x, y));
+            let room = self.room.get(at).copied().unwrap_or(rect);
             let fits = self
                 .docked
                 .as_ref()
-                .is_some_and(|new| split::fits(rect, axis, side, new, self.min, self.spacing));
+                .is_some_and(|new| split::fits(room, axis, side, new, self.min, self.spacing));
             return match pane {
                 None if self.shown == from => None,
                 Some(pane) if (self.shown, index) == (from, pane) => None,
@@ -206,14 +210,29 @@ fn scene(ctx: &WindowContext, layout: &Layout, source: Source) -> Scene {
     };
     let shown = (layout.first..).map_while(|index| Some((index, layout.tab(index)?)));
     // A zoomed tab shows one pane over the places of the others, so nothing docks into it.
-    let zoomed = tabs.tabs.get(tabs.active).is_some_and(|tab| tab.zoom);
+    let shown_tab = tabs.tabs.get(tabs.active);
+    let panes = if shown_tab.is_some_and(|tab| tab.zoom) { Vec::new() } else { tabs.pane_rects() };
+    // A pane moved within its group first leaves its place to its neighbours.
+    let left = match (source, shown_tab) {
+        (Source::Pane(tab, pane), Some(shown)) if tab == tabs.active => {
+            let id = shown.panes.get(pane).map(|pane| pane.id);
+            id.and_then(|id| shown.layout.clone().remove(id))
+        },
+        _ => None,
+    };
+    let left = left.map_or_else(Vec::new, |layout| layout.rects(tabs.area(), tabs.spacing()));
+    let room = panes.iter().map(|&(index, rect)| {
+        let id = shown_tab.and_then(|tab| tab.panes.get(index)).map(|pane| pane.id);
+        left.iter().find(|(pane, _)| Some(*pane) == id).map_or(rect, |&(_, room)| room)
+    });
     Scene {
         bar: layout.bar,
         area: tabs.area(),
         tabs: shown.collect(),
         groups: tabs.tabs.iter().map(|tab| tab.layout.clone()).collect(),
         shown: tabs.active,
-        panes: if zoomed { Vec::new() } else { tabs.pane_rects() },
+        room: room.collect(),
+        panes,
         docked,
         min: min_pane(&ctx.display.size_info),
         spacing: tabs.spacing(),
@@ -296,6 +315,7 @@ mod tests {
             groups: vec![pane(1), pane(2).join(pane(3), Axis::Row, Side::After), pane(4)],
             shown: 1,
             panes: vec![(0, Rect::new(0., 40., 400., 300.)), (1, Rect::new(400., 40., 400., 300.))],
+            room: vec![Rect::new(0., 40., 400., 300.), Rect::new(400., 40., 400., 300.)],
             docked: Some(pane(9)),
             min: (100., 50.),
             spacing: 0.,
@@ -428,6 +448,16 @@ mod tests {
             drop(0, 790., 190.),
             Some(Target::Dock { pane: 1, axis: Axis::Row, side: Side::After })
         );
+        // Once it has left, its neighbour has its room too: two panes swap where halves would
+        // otherwise be too small.
+        let full = Rect::new(0., 40., 800., 300.);
+        let swap = Scene { min: (250., 50.), room: vec![full, full], ..self::scene() };
+        assert_eq!(
+            swap.target(Source::Pane(1, 1), at(10., 190.)),
+            Some(Target::Dock { pane: 0, axis: Axis::Row, side: Side::Before })
+        );
+        let tight = Scene { room: self::scene().room, ..swap };
+        assert_eq!(tight.target(Source::Pane(1, 1), at(10., 190.)), None);
         // Or leaves for the bar.
         assert_eq!(drop(0, 150., 20.), Some(Target::Merge(0)));
         assert_eq!(drop(0, 390., 20.), Some(Target::Detach(3)));
