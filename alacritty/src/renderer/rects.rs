@@ -16,6 +16,9 @@ use crate::gl::types::*;
 use crate::renderer::shader::{ShaderError, ShaderProgram, ShaderVersion};
 use crate::{gl, renderer};
 
+// tabbed: rects of panes drawn in a frame.
+mod tabbed;
+
 #[derive(Debug, Copy, Clone)]
 pub struct RenderRect {
     pub x: f32,
@@ -252,6 +255,8 @@ pub struct RectRenderer {
 
     programs: [RectShaderProgram; 4],
     vertices: [Vec<Vertex>; 4],
+    // tabbed: window pixel a framed pane's grid is drawn from, for its line patterns.
+    pub origin: [f32; 2],
 }
 
 impl RectRenderer {
@@ -314,18 +319,10 @@ impl RectRenderer {
         }
 
         let programs = [rect_program, undercurl_program, dotted_program, dashed_program];
-        Ok(Self { vao, vbo, programs, vertices: Default::default() })
+        Ok(Self { vao, vbo, programs, vertices: Default::default(), origin: [0.; 2] })
     }
 
-    /// Draw `rects`, with line patterns aligned to cells whose grid starts at `origin`, the
-    /// window pixel where `size_info` is drawn from its bottom left.
-    pub fn draw(
-        &mut self,
-        size_info: &SizeInfo,
-        metrics: &Metrics,
-        rects: Vec<RenderRect>,
-        origin: [f32; 2],
-    ) {
+    pub fn draw(&mut self, size_info: &SizeInfo, metrics: &Metrics, rects: Vec<RenderRect>) {
         unsafe {
             // Bind VAO to enable vertex attribute slots.
             gl::BindVertexArray(self.vao);
@@ -354,7 +351,9 @@ impl RectRenderer {
 
                 let program = &self.programs[rect_kind as usize];
                 gl::UseProgram(program.id());
-                program.update_uniforms(size_info, metrics, origin);
+                program.update_uniforms(size_info, metrics);
+                // tabbed: align line patterns with a framed pane's cells.
+                program.update_origin(size_info, self.origin);
 
                 // Upload accumulated undercurl vertices.
                 gl::BufferData(
@@ -469,7 +468,7 @@ impl RectShaderProgram {
         self.program.id()
     }
 
-    pub fn update_uniforms(&self, size_info: &SizeInfo, metrics: &Metrics, [x, y]: [f32; 2]) {
+    pub fn update_uniforms(&self, size_info: &SizeInfo, metrics: &Metrics) {
         let position = (0.5 * metrics.descent).abs();
         let underline_position = metrics.descent.abs() - metrics.underline_position.abs();
 
@@ -485,10 +484,10 @@ impl RectShaderProgram {
                 gl::Uniform1f(u_cell_height, size_info.cell_height());
             }
             if let Some(u_padding_y) = self.u_padding_y {
-                gl::Uniform1f(u_padding_y, y + padding_y);
+                gl::Uniform1f(u_padding_y, padding_y);
             }
             if let Some(u_padding_x) = self.u_padding_x {
-                gl::Uniform1f(u_padding_x, x + size_info.padding_x());
+                gl::Uniform1f(u_padding_x, size_info.padding_x());
             }
             if let Some(u_underline_position) = self.u_underline_position {
                 gl::Uniform1f(u_underline_position, underline_position);
