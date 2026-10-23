@@ -131,12 +131,19 @@ on Windows, with each WSL distribution's own artwork and Git Bash's logo; the
 icon theme's logo on Linux, preferring SVG; the application's icon on macOS.
 About 40 common shells, tools, languages and WSL distributions have bundled logos
 where the system has none, and other programs get a terminal. A profile can set its own SVG or PNG, or an emoji.
+In a tab of several panes the logos lie on tiles; turn off **Icon tiles** under
+Appearance, or in `alacritty.toml`, to draw them bare and as large as the tiles:
+
+```toml
+[window]
+icon_tiles = true  # false: no tile behind the logos in a tab's deck.
+```
 
 **Settings panel.** Like Windows Terminal's, the settings list the
 application's pages above the profiles. **General** holds the session restore,
 the pinned tab bar and Ctrl+wheel text zoom. The gear opens **Appearance**: the
 corners, the interface font and its size, the background opacity, the
-terminal panel, the pane gap, the focus highlight, the tab track and the logo,
+terminal panel, the pane gap, the focus highlight, the tab track, the icon tiles and the logo,
 saved to `alacritty.toml` (changing only those keys, and keeping its comments)
 and applied to every window. "Edit profiles…" in the ⌄ menu opens the profiles:
 name, icon, command line, starting directory, font, environment variables, configuration overrides,
