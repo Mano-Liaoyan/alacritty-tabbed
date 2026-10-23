@@ -317,7 +317,15 @@ impl RectRenderer {
         Ok(Self { vao, vbo, programs, vertices: Default::default() })
     }
 
-    pub fn draw(&mut self, size_info: &SizeInfo, metrics: &Metrics, rects: Vec<RenderRect>) {
+    /// Draw `rects`, with line patterns aligned to cells whose grid starts at `origin`, the
+    /// window pixel where `size_info` is drawn from its bottom left.
+    pub fn draw(
+        &mut self,
+        size_info: &SizeInfo,
+        metrics: &Metrics,
+        rects: Vec<RenderRect>,
+        origin: [f32; 2],
+    ) {
         unsafe {
             // Bind VAO to enable vertex attribute slots.
             gl::BindVertexArray(self.vao);
@@ -346,7 +354,7 @@ impl RectRenderer {
 
                 let program = &self.programs[rect_kind as usize];
                 gl::UseProgram(program.id());
-                program.update_uniforms(size_info, metrics);
+                program.update_uniforms(size_info, metrics, origin);
 
                 // Upload accumulated undercurl vertices.
                 gl::BufferData(
@@ -461,7 +469,7 @@ impl RectShaderProgram {
         self.program.id()
     }
 
-    pub fn update_uniforms(&self, size_info: &SizeInfo, metrics: &Metrics) {
+    pub fn update_uniforms(&self, size_info: &SizeInfo, metrics: &Metrics, [x, y]: [f32; 2]) {
         let position = (0.5 * metrics.descent).abs();
         let underline_position = metrics.descent.abs() - metrics.underline_position.abs();
 
@@ -477,10 +485,10 @@ impl RectShaderProgram {
                 gl::Uniform1f(u_cell_height, size_info.cell_height());
             }
             if let Some(u_padding_y) = self.u_padding_y {
-                gl::Uniform1f(u_padding_y, padding_y);
+                gl::Uniform1f(u_padding_y, y + padding_y);
             }
             if let Some(u_padding_x) = self.u_padding_x {
-                gl::Uniform1f(u_padding_x, size_info.padding_x());
+                gl::Uniform1f(u_padding_x, x + size_info.padding_x());
             }
             if let Some(u_underline_position) = self.u_underline_position {
                 gl::Uniform1f(u_underline_position, underline_position);
