@@ -22,6 +22,7 @@ mod cwd;
 mod divider;
 mod dnd;
 mod fonts;
+mod fullscreen;
 mod icons;
 mod job;
 mod paint;
@@ -97,6 +98,7 @@ use dnd::{Drag, Source, Target};
 use paint::Image;
 #[cfg(windows)]
 pub use cwd::{mark as mark_pane, register as register_pane};
+pub use fullscreen::FullscreenState;
 pub use paint::Rect;
 use panes::Control;
 use profiles::{Profile, Profiles};
