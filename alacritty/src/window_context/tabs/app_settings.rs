@@ -9,7 +9,7 @@ use std::{fs, io};
 use toml_edit::{DocumentMut, Item, value};
 
 use crate::config::UiConfig;
-use crate::config::window::Corners;
+use crate::config::window::{Corners, MAX_PANE_GAP};
 use crate::display::color::Rgb;
 
 use super::profiles;
@@ -42,7 +42,7 @@ impl AppSettings {
             opacity: window.opacity.as_f32(),
             panel: window.panel,
             tab_track: window.tab_track,
-            pane_gap: window.pane_gap,
+            pane_gap: window.pane_gap.min(MAX_PANE_GAP),
             pane_highlight: window.pane_highlight,
         }
     }
@@ -169,6 +169,16 @@ mod tests {
         assert!(window.get("tab_track").is_none());
         assert_eq!(window["pane_gap"].as_integer(), Some(4));
         assert_eq!(window["pane_highlight"].as_str(), Some("#ff9500"));
+    }
+
+    #[test]
+    fn too_wide_gaps_are_narrowed_without_being_rewritten() {
+        let mut config = UiConfig::default();
+        config.window.pane_gap = 60;
+        let settings = AppSettings::new(&config);
+        assert_eq!(settings.pane_gap, MAX_PANE_GAP);
+        let text = "[window]\npane_gap = 60 # Big.\n";
+        assert_eq!(settings.edit(&AppSettings::new(&config), text).unwrap(), text);
     }
 
     #[test]

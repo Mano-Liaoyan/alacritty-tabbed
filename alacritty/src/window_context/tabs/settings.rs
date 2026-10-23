@@ -488,7 +488,7 @@ impl Settings {
             edited_opacity: saved.opacity,
             edited_panel: saved.panel,
             edited_tab_track: saved.tab_track,
-            edited_gap: saved.pane_gap.min(MAX_PANE_GAP),
+            edited_gap: saved.pane_gap,
             sliding: None,
             picker: None,
             saved_app_settings: saved,
@@ -788,17 +788,18 @@ impl Settings {
         });
 
         // The color picker drops from its well, or rises above it when there is no room below,
-        // ending where the hex field does.
+        // ending where the hex field does, kept inside the scrolling fields.
         let picker = appearance.as_ref().filter(|_| self.picker.is_some()).map(|page| {
             let size = ColorPicker::layout((0., 0.), layout.scale).popover;
             let field = fields[Field::PaneHighlight.index()];
             let x = (field.right() - size.w).max(dialog.x + px(8.));
             let below = page.well.bottom() + px(6.);
-            let y = if below + size.h <= dialog.bottom() - px(8.) {
+            let y = if below + size.h <= viewport.bottom() {
                 below
             } else {
-                (page.well.y - px(6.) - size.h).max(dialog.y + px(8.))
+                page.well.y - px(6.) - size.h
             };
+            let y = y.min(viewport.bottom() - size.h).max(viewport.y);
             ColorPicker::layout((x, y), layout.scale)
         });
 
@@ -1096,6 +1097,10 @@ impl Settings {
     }
 
     fn focus(&mut self, field: Field) {
+        // Only the hex field types alongside the color picker.
+        if field != Field::PaneHighlight {
+            self.picker = None;
+        }
         self.focus = Some(field);
         self.caret = self.text(field).len();
         self.preedit.clear();
@@ -1324,6 +1329,10 @@ impl Settings {
 
     pub fn scroll(&mut self, layout: &Layout, down: bool) {
         let (panel, count) = (self.panel(layout), self.candidates().len());
+        // The color picker covers what lies under it.
+        if panel.picker.is_some_and(|parts| parts.popover.contains(self.pointer)) {
+            return;
+        }
 
         // The wheel turns the font's size and the opacity under the pointer.
         let over = |rect: Rect| rect.contains(self.pointer);
@@ -1588,8 +1597,8 @@ impl Settings {
         let Some(picker) = &mut self.picker else { return false };
         match event.logical_key.as_ref() {
             Key::Named(NamedKey::Escape | NamedKey::Enter) => self.picker = None,
-            // The arrows move through the square, but for the caret in the hex field.
-            Key::Named(key) if self.focus != Some(Field::PaneHighlight) => {
+            // The arrows move through the square while no field has the caret.
+            Key::Named(key) if self.focus.is_none() => {
                 let Some(color) = picker.key(key, modifiers.shift_key()) else { return false };
                 self.set_highlight(Some(color));
             },
