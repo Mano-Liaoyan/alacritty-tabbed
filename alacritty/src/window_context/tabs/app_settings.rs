@@ -6,7 +6,7 @@
 use std::path::{Path, PathBuf};
 use std::{fs, io};
 
-use toml_edit::{DocumentMut, Item, value};
+use toml_edit::{DocumentMut, Item, Table, value};
 
 use crate::config::UiConfig;
 use crate::config::window::{Corners, MAX_PANE_GAP};
@@ -69,7 +69,18 @@ impl AppSettings {
     /// The configuration `text` with the settings that differ from `before` set.
     fn edit(&self, before: &AppSettings, text: &str) -> Result<String, toml_edit::TomlError> {
         let mut document: DocumentMut = text.parse()?;
-        let window = &mut document["window"];
+        // Tables the file lacks become sections rather than inline tables.
+        let section = || {
+            let mut table = Table::new();
+            table.set_implicit(true);
+            Item::Table(table)
+        };
+        let window = document.entry("window").or_insert_with(section);
+        if self.family != before.family || self.size != before.size {
+            if let Some(window) = window.as_table_mut() {
+                window.entry("ui_font").or_insert_with(section);
+            }
+        }
         if self.corners != before.corners {
             let corners = if self.corners == Corners::Round { "round" } else { "square" };
             window["corners"] = value(corners);
@@ -199,6 +210,13 @@ mod tests {
             let config: toml::Table = toml::from_str(&edited).unwrap();
             assert_eq!(config["window"]["ui_font"]["size"].as_integer(), Some(12), "{edited}");
         }
+    }
+
+    #[test]
+    fn missing_tables_become_sections() {
+        let changed = AppSettings { size: 12., pane_gap: 4, ..defaults() };
+        let edited = changed.edit(&defaults(), "").unwrap();
+        assert_eq!(edited, "[window]\npane_gap = 4\n\n[window.ui_font]\nsize = 12\n");
     }
 
     #[test]
