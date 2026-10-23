@@ -183,7 +183,7 @@ pub fn shell(config: &UiConfig) -> String {
 
 /// Split a command line into its program and arguments.
 #[cfg(windows)]
-fn split(command: &str) -> Option<(String, Vec<String>)> {
+pub(super) fn split(command: &str) -> Option<(String, Vec<String>)> {
     // Windows programs parse their own command line, so the arguments are passed verbatim.
     let command = command.trim();
     let end = match command.strip_prefix('"') {
@@ -227,7 +227,7 @@ fn unquote_distribution(args: &str) -> String {
 
 /// Split a command line into its program and arguments, like a shell without expansions.
 #[cfg(not(windows))]
-fn split(command: &str) -> Option<(String, Vec<String>)> {
+pub(super) fn split(command: &str) -> Option<(String, Vec<String>)> {
     let mut words = Vec::new();
     let mut word: Option<String> = None;
     let mut quote = None;

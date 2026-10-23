@@ -250,6 +250,45 @@ theme set for KDE or GTK, the themes it inherits, and `hicolor`. The bundled
 logos, from devicon, Simple Icons and the projects' own repositories, are listed
 with their licences in `alacritty/res/icons/LICENSES.md`.
 
+### Splits start in the pane's directory
+
+A split runs the pane's profile in the directory its shell is in. The shell can
+report it with `OSC 7` (`ESC ] 7 ; file://host/path ST`) or Windows Terminal's
+`OSC 9 ; 9` (`ESC ] 9 ; 9 ; "C:\path" ST`); the latest report wins. Otherwise:
+
+- **Linux, macOS, BSD**: the directory of the program in the foreground,
+  without any setup; a report is used only when that cannot be read.
+- **Command Prompt, Git Bash** (and other MSYS or Cygwin shells): read from the
+  shell's process, without any setup.
+- **PowerShell, Windows PowerShell**: `Set-Location` does not change the
+  process's directory, so the prompt has to report it.
+- **WSL**: Windows cannot see where a Linux process is, so the shell has to
+  report it. The split starts `wsl.exe` with `--cd <path>`, or, for paths with
+  spaces, in the path's `\\wsl.localhost\<distribution>\…` folder, which WSL
+  translates. Windows paths such as `/mnt/c/…`, `/c/…` or `C:\…` work for every
+  profile.
+
+A report from another host, such as a shell over SSH, or of a directory that
+does not exist here, is ignored. One line in the shell's startup file reports
+the directory at each prompt:
+
+```sh
+# bash, ~/.bashrc
+PROMPT_COMMAND='printf "\e]7;file://%s%s\a" "$HOSTNAME" "$PWD"'${PROMPT_COMMAND:+";$PROMPT_COMMAND"}
+# zsh, ~/.zshrc
+autoload -Uz add-zsh-hook; _osc7() { printf '\e]7;file://%s%s\a' "$HOST" "$PWD" }; add-zsh-hook precmd _osc7
+# fish, ~/.config/fish/config.fish (recent versions already report it)
+function _osc7 --on-variable PWD; printf '\e]7;file://%s%s\a' $hostname $PWD; end
+```
+
+```powershell
+# PowerShell and Windows PowerShell, $PROFILE
+$function:_prompt = $function:prompt; function prompt { $l = $executionContext.SessionState.Path.CurrentLocation; $(if ($l.Provider.Name -eq 'FileSystem') { "$([char]27)]9;9;`"$($l.ProviderPath)`"$([char]27)\" }) + (_prompt) }
+```
+
+With [Oh My Posh](https://ohmyposh.dev), set `pwd = "osc7"` in its
+configuration instead.
+
 ## Syncing with upstream
 
 The fork's code lives in `alacritty/src/window_context/tabs*`. Upstream files

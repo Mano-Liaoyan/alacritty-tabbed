@@ -18,6 +18,7 @@ mod autohide;
 mod bar;
 mod confirm;
 mod context;
+mod cwd;
 mod divider;
 mod dnd;
 mod fonts;
@@ -1995,10 +1996,12 @@ pub fn split(
     let profiles = Profiles::load(config).list;
     let profile = profiles.into_iter().find(|profile| Some(&profile.name) == name.as_ref());
     // The new shell starts where the focused one is.
+    let reported = ctx.terminal.lock().reported_directory.clone();
     #[cfg(not(windows))]
-    let directory = crate::daemon::foreground_process_path(ctx.master_fd, ctx.shell_pid).ok();
+    let process = || crate::daemon::foreground_process_path(ctx.master_fd, ctx.shell_pid).ok();
     #[cfg(windows)]
-    let directory = None;
+    let process = || cwd::process_directory(ctx.shell_pid);
+    let (profile, directory) = cwd::inherit(profile, reported, process);
     let spawned = Session::spawn(ctx, config, proxy, profile.as_ref(), directory, None);
     let (id, session) = match spawned {
         Ok(pane) => pane,
