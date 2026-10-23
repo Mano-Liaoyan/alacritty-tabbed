@@ -6,7 +6,7 @@
 //! terminals are resized once. Panes no longer shown, as a zoomed pane grows over them, stay
 //! drawn under it until it covers them.
 //!
-//! Each pane of a group has a handle on the top edge of its card, which drags it.
+//! Each pane of a group has controls at the top of its card: a grip, which drags it.
 
 use std::cell::Cell;
 use std::mem;
@@ -191,22 +191,43 @@ fn level(cell: &Cell<Tween<f32>>, on: bool, ms: u64, now: Instant) -> f32 {
     tween.get(now)
 }
 
-/// The pane of the active tab whose drag handle is at `point`.
-pub fn handle_at(tabs: &Tabs, layout: &Layout, point: PhysicalPosition<f64>) -> Option<usize> {
-    handle(tabs, point, layout.scale)
+/// A control at the top of each shown pane of a group.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Control {
+    /// Drags the pane.
+    Grip,
+    /// Zooms the pane, or unzooms it.
+    #[allow(dead_code, reason = "lane P adds the zoom control beside the grip")]
+    Zoom,
 }
 
-/// The pane of the active tab whose drag handle is at `point`, at `scale`: panes have handles
-/// while several are shown.
-pub fn handle(tabs: &Tabs, point: PhysicalPosition<f64>, scale: f32) -> Option<usize> {
-    let rects = tabs.pane_rects();
-    if rects.len() < 2 || tabs.drag.is_some() {
+/// The pane of the active tab whose control is at `point`, and which control.
+pub fn control_at(
+    tabs: &Tabs,
+    layout: &Layout,
+    point: PhysicalPosition<f64>,
+) -> Option<(usize, Control)> {
+    control(tabs, point, layout.scale)
+}
+
+/// The pane of the active tab whose control is at `point`, at `scale`, and which control: the
+/// shown panes of a tab of several have them, a zoomed one too.
+pub fn control(tabs: &Tabs, point: PhysicalPosition<f64>, scale: f32) -> Option<(usize, Control)> {
+    let grouped = tabs.tabs.get(tabs.active).is_some_and(|tab| tab.panes.len() > 1);
+    if !grouped || tabs.drag.is_some() {
         return None;
     }
+    let rects = tabs.pane_rects();
     let cards: Vec<_> = rects.into_iter().map(|(index, rect)| (index, tabs.card(rect))).collect();
     // The zone stops at the middle of the gap above, where a divider takes the pointer.
     let reach = (tabs.spacing() / 2. + tabs.margin()).max(0.);
-    grabbed(&cards, tabs.area().y, reach, point, scale)
+    let pane = grabbed(&cards, tabs.area().y, reach, point, scale)?;
+    Some((pane, Control::Grip))
+}
+
+/// The pane of the active tab whose controls the pointer at `point` is near enough to show.
+pub fn near(tabs: &Tabs, point: PhysicalPosition<f64>) -> Option<usize> {
+    control(tabs, point, tabs.scale as f32).map(|(pane, _)| pane)
 }
 
 /// The pane of `cards`, by index, whose handle's zone holds `point`, below `top` and at most
@@ -304,14 +325,15 @@ pub fn draw(tabs: &Tabs, layout: &Layout, palette: &Palette, layer: &mut Layer, 
         border(layer, card, radius, palette, light, widths, above);
     }
 
-    // A handle on each shown pane's top edge, while there are several.
-    if cards.len() > 1 {
+    // A handle on each shown pane's top edge, while the tab has several.
+    if grouped {
         let top = tabs.area().y;
         let rests = tabs.pane_rects();
         let resting =
             rests.into_iter().find(|&(index, _)| index == tab.focus).map(|(_, r)| r.inset(margin));
         for &(index, card) in &cards {
-            let level = effects.handle(tab.panes[index].id, tabs.handle == Some(index), now);
+            let hovered = tabs.control.is_some_and(|(pane, _)| pane == index);
+            let level = effects.handle(tab.panes[index].id, hovered, now);
             let (plate, _) = handle_rects(card, top, layout.scale);
             if index != tab.focus && hidden(plate, focused, resting) {
                 continue;
@@ -378,7 +400,7 @@ fn border(
     // A lit border grows by whole pixels.
     let width = if light > 0. { (thin + (thick - thin) * light).round() } else { thin };
     if above.is_none_or(|above| !overlap(card, above)) {
-        layer.corners(card, radius, palette.chrome, color, width);
+        layer.corners(card, [radius; 4], palette.chrome, color, width);
     }
     let (w, h) = (card.w - 2. * radius, card.h - 2. * radius);
     let edges = [
@@ -470,6 +492,7 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
+    use crate::window_context::tabs::Frame;
     use crate::window_context::tabs::anim::scale;
 
     fn id(id: u64) -> WindowId {
@@ -713,14 +736,16 @@ mod tests {
     #[test]
     fn cards_are_the_gap_apart() {
         let layout = Split::Pane(1).join(Split::Pane(2), Axis::Row, Side::After);
-        for (gap, scale) in [(0., 1.), (16., 1.), (48., 1.), (16., 2.), (48., 1.5)] {
-            let tabs = Tabs { panel: true, gap, scale, ..Tabs::default() };
+        let frames = [Frame::Normal, Frame::Maximized, Frame::Fullscreen];
+        let sizes = [(0., 1.), (16., 1.), (48., 1.), (16., 2.), (48., 1.5)];
+        for ((gap, scale), frame) in sizes.into_iter().flat_map(|size| frames.map(|f| (size, f))) {
+            let tabs = Tabs { panel: true, gap, scale, frame, ..Tabs::default() };
             let rects = layout.rects(WHOLE, tabs.spacing());
             let (left, right) = (tabs.card(rects[0].1), tabs.card(rects[1].1));
             assert_eq!(
                 right.x - left.right(),
                 (gap * scale as f32).round(),
-                "gap {gap} at {scale}"
+                "gap {gap} at {scale} {frame:?}"
             );
             // The window's edges keep their margin.
             assert_eq!(left.x, (MARGIN * scale as f32).round());

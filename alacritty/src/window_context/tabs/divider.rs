@@ -98,8 +98,8 @@ pub fn moved(ctx: &mut WindowContext, position: PhysicalPosition<f64>) -> bool {
     let divider = tabs.dividers().into_iter().find(|d| d.index == index);
     let axis = divider.map_or(Axis::Row, |divider| divider.axis);
     tabs.divider.pill_at = Some((index, along(axis, point)));
-    // The pointer left any handle it was on for the divider.
-    tabs.handle = None;
+    // The pointer left any control it was on for the divider.
+    tabs.control = None;
     ctx.display.window.set_mouse_cursor(cursor(axis));
     redraw(ctx);
     true
@@ -240,11 +240,11 @@ pub fn draw(tabs: &Tabs, layout: &Layout, palette: &Palette, layer: &mut Layer, 
     layer.rounded_alpha(Rect::new(x, y, w, h), layout.curve(width / 2.), color, level.min(1.));
 }
 
-/// The divider of the active tab under `point`, unless a pane's drag handle is there.
+/// The divider of the active tab under `point`, unless a pane's control is there.
 fn under(tabs: &Tabs, point: (f32, f32)) -> Option<usize> {
     let scale = tabs.scale as f32;
     let position = PhysicalPosition::new(f64::from(point.0), f64::from(point.1));
-    if panes::handle(tabs, position, scale).is_some() {
+    if panes::control(tabs, position, scale).is_some() {
         return None;
     }
     // The band is as thick as the gap between the cards, but never too thin to hit.

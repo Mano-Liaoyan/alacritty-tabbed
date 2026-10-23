@@ -150,6 +150,7 @@ impl Tabs {
             size,
             frame,
             clip: thumbnail.rect,
+            font: session.font(self.scale as f32),
         })
     }
 
@@ -159,7 +160,7 @@ impl Tabs {
         let palette = Palette::new(&config.colors);
         let Thumbnail { rect, radius, line, .. } = thumbnail;
         let mut edges = Layer::default();
-        edges.corners(rect, radius, palette.popup, palette.card_outline, line);
+        edges.corners(rect, [radius; 4], palette.popup, palette.card_outline, line);
         let r = radius.round();
         for edge in [
             Rect::new(rect.x + r, rect.y, rect.w - 2. * r, line),

@@ -96,6 +96,8 @@ pub enum Hit {
     New,
     Menu,
     Settings,
+    /// Pins the bar, or lets it slide in only when the pointer nears it.
+    Pin,
     Previous,
     Next,
     Minimize,
@@ -112,6 +114,11 @@ pub struct Layout {
     /// Height of a line of text.
     pub line: f32,
     pub bar: f32,
+    /// How far the bar is moved up out of the window while it slides in or out, at most `bar`.
+    #[allow(dead_code, reason = "lane B slides the bar")]
+    pub offset: f32,
+    /// Whether the bar is shown and takes the pointer: always, unless it is not pinned.
+    pub bar_live: bool,
     pub width: f32,
     pub first: usize,
     /// Whether corners are round.
@@ -142,7 +149,7 @@ impl Layout {
         let font = tabs.font.clone().expect("the bar is only shown with its font");
         let line = font.line;
         let (width, height) = (tabs.window.width as f32, tabs.window.height as f32);
-        let (bar, count, fullscreen) = (px(BAR), tabs.len(), tabs.frame == Frame::Fullscreen);
+        let (bar, count) = (px(BAR), tabs.len());
         let mac = MAC;
         let border = if tabs.frame == Frame::Normal && !mac { px(4.) } else { 0. };
         let (margin, control, chevron, pad, nav) =
@@ -161,6 +168,7 @@ impl Layout {
         };
         let controls = width - trailing - if mac { 0. } else { 3. * caption };
         let settings = controls - px(4.) - control;
+        let pin = settings - control;
 
         // The logo is set in from the window's edge as far as from its top, which keeps it clear
         // of the rounded corner and lines it up with the terminal's text below. macOS puts it
@@ -169,12 +177,11 @@ impl Layout {
         let left = if mac { lights + px(7.) } else { px(MARGIN + INSET) };
         let mark = Rect::new(left, 0., logo, bar).square(logo);
 
-        // Fullscreen gives the label's space to the tabs; the logo stays.
-        let label = !fullscreen && width >= px(780.);
+        let label = width >= px(780.);
         let label_width = px(114.);
         let brand = mark.right() + if label { px(15.) + label_width } else { px(21.) };
         let min_tab = px(124.);
-        let available = settings - px(48.) - brand - 2. * pad - px(6.) - control - chevron;
+        let available = pin - px(48.) - brand - 2. * pad - px(6.) - control - chevron;
         let overflow = count as f32 > (available / min_tab).floor().max(1.);
         let available = (available - if overflow { 2. * nav + px(6.) } else { 0. }).max(1.);
         let capacity = ((available / min_tab) as usize).max(1);
@@ -205,6 +212,7 @@ impl Layout {
         }
         buttons.push((Hit::New, button(x, control)));
         buttons.push((Hit::Menu, button(x + control, chevron)));
+        buttons.push((Hit::Pin, button(pin, control)));
         buttons.push((Hit::Settings, button(settings, control)));
         if !mac {
             for (index, hit) in
@@ -216,13 +224,11 @@ impl Layout {
 
         let brand = label.then(|| Rect::new(mark.right() + px(11.), 0., label_width, bar));
 
-        let panel = tabs.panel && !fullscreen;
-        let card = if panel {
-            Rect::new(margin, bar, width - 2. * margin, height - bar - margin)
-        } else {
-            Rect::new(0., bar, width, height - bar)
+        let panel = tabs.panel;
+        let terminal = match panel {
+            true => tabs.area().inset(margin + px(INSET)),
+            false => tabs.area(),
         };
-        let terminal = if panel { card.inset(px(INSET)) } else { card };
 
         // The menu drops from the new-tab button over the terminal.
         let new = buttons.iter().find(|(hit, _)| *hit == Hit::New).map_or(track, |(_, rect)| *rect);
@@ -241,6 +247,8 @@ impl Layout {
             font,
             line,
             bar,
+            offset: tabs.autohide.offset(bar, Instant::now()),
+            bar_live: tabs.autohide.live(),
             width,
             first,
             round: tabs.corners.unwrap_or_default() == Corners::Round,
@@ -306,7 +314,7 @@ impl Layout {
 
     pub fn hit(&self, point: PhysicalPosition<f64>) -> Hit {
         let (x, y) = (point.x as f32, point.y as f32);
-        if let Some((menu, row)) = self.menu {
+        if let Some((menu, row)) = self.menu.filter(|_| self.bar_live) {
             if !menu.contains(point) {
                 return Hit::None;
             }
@@ -346,6 +354,15 @@ impl Layout {
         };
         if let Some(direction) = direction {
             return Hit::Resize(direction);
+        }
+
+        // A hidden bar leaves the panes the window, and the strip above them moves it.
+        if !self.bar_live {
+            return match self.terminal.contains(point) {
+                true => Hit::Terminal,
+                false if y < self.terminal.y => Hit::Drag,
+                false => Hit::None,
+            };
         }
 
         // A fanned deck covers what is beside it, the end of its tab and the buttons after it, and
@@ -513,6 +530,24 @@ fn chip(front: Rect, (width, height): (f32, f32), scale: f32) -> Rect {
     Rect::new((edge - tuck).round(), y.round(), width + tuck.round(), height)
 }
 
+/// Strokes of a pushpin, in units of half its size: upright when `pinned`, else laid over.
+fn pin_glyph(pinned: bool) -> Vec<[f32; 4]> {
+    let upright = [
+        [-0.45, -1., 0.45, -1.],
+        [-0.3, -1., -0.3, 0.1],
+        [0.3, -1., 0.3, 0.1],
+        [-0.75, 0.1, 0.75, 0.1],
+        [0., 0.1, 0., 1.],
+    ];
+    let (sin, cos) = if pinned { (0., 1.) } else { std::f32::consts::FRAC_PI_4.sin_cos() };
+    let turn = |x: f32, y: f32| (x * cos - y * sin, x * sin + y * cos);
+    let turned = upright.map(|[x0, y0, x1, y1]| {
+        let ((x0, y0), (x1, y1)) = (turn(x0, y0), turn(x1, y1));
+        [x0, y0, x1, y1]
+    });
+    turned.to_vec()
+}
+
 /// How opaque the icon `order`th from the front of a deck of `count` is, fanned out by `fan`: the
 /// cards fade with their depth, and the panes left out of them show only as the deck fans out.
 fn opacity(order: usize, count: usize, fan: f32) -> f32 {
@@ -662,10 +697,12 @@ impl Tabs {
             _ => false,
         };
         let now = Instant::now();
-        if panes > 1 || fanned || self.animating(now) || self.peeking.visible(now) {
+        // A bar that is not pinned lies over the panes, which it uncovers as it hides.
+        let overlay = !self.autohide.pinned;
+        if panes > 1 || fanned || overlay || self.animating(now) || self.peeking.visible(now) {
             return vec![DamageRect::new(0, 0, width, height)];
         }
-        if self.height > 0 {
+        if self.caption {
             let bar = (BAR * self.scale as f32).round() as i32;
             damage.push(DamageRect::new(0, height - bar, width, bar));
         }
@@ -689,7 +726,7 @@ impl Tabs {
         size: &SizeInfo,
         config: &UiConfig,
     ) {
-        if self.height == 0 {
+        if !self.caption {
             return;
         }
 
@@ -703,14 +740,15 @@ impl Tabs {
         let px = |value: f32| layout.px(value);
         let line = px(1.).max(1.);
         let icon = (1.3 * layout.scale).max(1.);
+        let mut chrome = Layer::default();
         let mut base = Layer::default();
         let mut top = Layer::default();
         // What a drag holds, which fades while it would leave the window.
         let mut lifted = Layer::default();
 
         // Chrome around the panels that hold the terminals.
+        panes::draw(self, &layout, &palette, &mut chrome, now);
         base.rect(Rect::new(0., 0., width, bar), palette.chrome);
-        panes::draw(self, &layout, &palette, &mut base, now);
 
         // Logo, with the application and computer name beside it.
         base.image(layout.mark, &icons::logo(), palette.foreground);
@@ -991,9 +1029,13 @@ impl Tabs {
             lifted.fade(0.5, track);
         }
         let card = peek::draw(self, &layout, &palette, window.title(), now);
-        let mut layers = vec![base, fanned, lifted];
-        layers.extend(card);
-        layers.push(top);
+        let mut layers = vec![chrome];
+        // A hidden bar is not drawn.
+        if layout.bar_live {
+            layers.extend([base, fanned, lifted]);
+            layers.extend(card);
+            layers.push(top);
+        }
         layers.extend(context::draw(self, &layout, &palette, now));
         if let Some(settings) = &self.settings {
             layers.extend(settings.draw(&layout, &palette, config, window));
@@ -1088,6 +1130,17 @@ impl Tabs {
                     Hit::Menu => (4., &[[-1., -0.5, 0., 0.5], [0., 0.5, 1., -0.5]]),
                     Hit::Previous => (4., &[[0.5, -1., -0.5, 0.], [-0.5, 0., 0.5, 1.]]),
                     Hit::Next => (4., &[[-0.5, -1., 0.5, 0.], [0.5, 0., -0.5, 1.]]),
+                    // A pushpin, upright while pinned and laid over while not.
+                    Hit::Pin => {
+                        let pin = pin_glyph(self.autohide.pinned);
+                        return layer.icon(
+                            center,
+                            px(6.),
+                            (1.3 * layout.scale).max(1.),
+                            &pin,
+                            color,
+                        );
+                    },
                     _ => {
                         let background = if hovered { palette.hover } else { palette.chrome };
                         return layer.gear(center, px(8.), color, background);

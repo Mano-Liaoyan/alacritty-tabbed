@@ -71,6 +71,22 @@ pub fn mix(from: Rgb, to: Rgb, amount: f32) -> Rgb {
 pub const WHITE: Rgb = Rgb::new(255, 255, 255);
 pub const BLACK: Rgb = Rgb::new(0, 0, 0);
 
+/// Strokes of the zoom glyph, in units of half its size, for [`Layer::icon`]: arrows out to two
+/// corners.
+pub const ZOOM_GLYPH: &[[f32; 4]] =
+    &[[-1., 1., 1., -1.], [0.2, -1., 1., -1.], [1., -1., 1., -0.2], [-1., 0.2, -1., 1.], [
+        -1., 1., -0.2, 1.,
+    ]];
+/// Strokes of the unzoom glyph: arrows back in from the corners.
+pub const UNZOOM_GLYPH: &[[f32; 4]] = &[
+    [-1., 1., -0.15, 0.15],
+    [-0.85, 0.15, -0.15, 0.15],
+    [-0.15, 0.15, -0.15, 0.85],
+    [1., -1., 0.15, -0.15],
+    [0.85, -0.15, 0.15, -0.15],
+    [0.15, -0.15, 0.15, -0.85],
+];
+
 /// Colors of the tabs' chrome, derived from the terminal's colors.
 pub struct Palette {
     pub terminal: Rgb,
@@ -413,14 +429,15 @@ impl Layer {
         self.circle((x, y), radius * 0.32, background);
     }
 
-    /// The outside of a rounded rectangle in `color`, and its outline, near its corners.
-    pub fn corners(&mut self, rect: Rect, radius: f32, color: Rgb, outline: Rgb, width: f32) {
-        let r = radius.round();
-        for (cx, cy, x0, y0) in [
-            (rect.x + r, rect.y + r, rect.x, rect.y),
-            (rect.right() - r, rect.y + r, rect.right() - r, rect.y),
-            (rect.x + r, rect.bottom() - r, rect.x, rect.bottom() - r),
-            (rect.right() - r, rect.bottom() - r, rect.right() - r, rect.bottom() - r),
+    /// The outside of a rounded rectangle in `color`, and its outline, near its corners, each
+    /// rounded by its own of `radii`: top left, top right, bottom left, bottom right.
+    pub fn corners(&mut self, rect: Rect, radii: [f32; 4], color: Rgb, outline: Rgb, width: f32) {
+        let [tl, tr, bl, br] = radii.map(f32::round);
+        for (r, cx, cy, x0, y0) in [
+            (tl, rect.x + tl, rect.y + tl, rect.x, rect.y),
+            (tr, rect.right() - tr, rect.y + tr, rect.right() - tr, rect.y),
+            (bl, rect.x + bl, rect.bottom() - bl, rect.x, rect.bottom() - bl),
+            (br, rect.right() - br, rect.bottom() - br, rect.right() - br, rect.bottom() - br),
         ] {
             for y in 0..r as u32 {
                 for x in 0..r as u32 {

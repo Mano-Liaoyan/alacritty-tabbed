@@ -20,7 +20,7 @@ use crate::window_context::WindowContext;
 use super::anim::{Curve, Tween};
 use super::bar::{Hit, ITEM_RADIUS, Layout, MARGIN, TRACK_RADIUS};
 use super::dnd::{Source, Target};
-use super::paint::{BLACK, Layer, Palette, Rect, mix};
+use super::paint::{BLACK, Layer, Palette, Rect, UNZOOM_GLYPH, ZOOM_GLYPH, mix};
 use super::split::{Axis, Side, Split};
 use super::tear::{can_tear, tear_off};
 use super::{
@@ -78,22 +78,8 @@ impl Item {
         match self {
             Item::SplitVertically => &[BOX[0], BOX[1], BOX[2], BOX[3], [0., -1., 0., 1.]],
             Item::SplitHorizontally => &[BOX[0], BOX[1], BOX[2], BOX[3], [-1., 0., 1., 0.]],
-            // Arrows out to two corners, and back in from them.
-            Item::Zoom => &[
-                [-1., 1., 1., -1.],
-                [0.2, -1., 1., -1.],
-                [1., -1., 1., -0.2],
-                [-1., 0.2, -1., 1.],
-                [-1., 1., -0.2, 1.],
-            ],
-            Item::Unzoom => &[
-                [-1., 1., -0.15, 0.15],
-                [-0.85, 0.15, -0.15, 0.15],
-                [-0.15, 0.15, -0.15, 0.85],
-                [1., -1., 0.15, -0.15],
-                [0.85, -0.15, 0.15, -0.15],
-                [0.15, -0.15, 0.15, -0.85],
-            ],
+            Item::Zoom => ZOOM_GLYPH,
+            Item::Unzoom => UNZOOM_GLYPH,
             // An arrow leaving a box by its open corner.
             Item::MoveToNewTab => &[
                 [0., -1., -1., -1.],

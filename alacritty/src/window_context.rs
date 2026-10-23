@@ -314,6 +314,7 @@ impl WindowContext {
             master_fd,
             #[cfg(not(windows))]
             shell_pid,
+            zoom: None,
         }))
     }
 
