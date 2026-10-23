@@ -734,6 +734,7 @@ pub fn window_event(
             return Some(WindowEvent::CursorLeft { device_id });
         },
         WindowEvent::CursorLeft { .. } => hover(ctx, Hit::None),
+        WindowEvent::Focused(false) => context::unfocused(ctx),
         WindowEvent::MouseInput { state: ElementState::Released, .. } => {
             if let Some(settings) = &mut tabs.settings {
                 settings.release();

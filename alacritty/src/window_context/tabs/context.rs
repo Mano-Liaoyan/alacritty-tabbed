@@ -7,7 +7,7 @@ use winit::dpi::PhysicalPosition;
 use winit::event::{KeyEvent, MouseButton};
 use winit::event_loop::EventLoopProxy;
 use winit::keyboard::{Key, NamedKey};
-use winit::window::CursorIcon;
+use winit::window::{CursorIcon, WindowId};
 
 use alacritty_terminal::term::TermMode;
 
@@ -126,6 +126,8 @@ fn row_at(rows: &[Rect], point: PhysicalPosition<f64>) -> Option<usize> {
 /// The open context menu.
 pub struct Menu {
     items: Vec<Item>,
+    /// Id of the pane it was opened on, which it acts on.
+    pane: WindowId,
     /// Where the pointer opened it.
     at: (f32, f32),
     /// The row under the pointer or chosen by the keyboard.
@@ -135,10 +137,15 @@ pub struct Menu {
 }
 
 impl Menu {
-    fn new(items: Vec<Item>, at: (f32, f32)) -> Self {
+    fn new(items: Vec<Item>, pane: WindowId, at: (f32, f32)) -> Self {
         let mut pop = Tween::new(0.);
         pop.to(1., Instant::now(), 140, Curve::EASE_OUT);
-        Self { items, at, selected: None, pop }
+        Self { items, pane, at, selected: None, pop }
+    }
+
+    /// Whether the pane it was opened on is no longer live, such as after it exited.
+    fn stale(&self, tabs: &Tabs) -> bool {
+        tabs.tabs.get(tabs.active).is_none_or(|tab| tab.pane().id != self.pane)
     }
 
     /// Whether the menu is still animating at `now`.
@@ -170,6 +177,7 @@ pub fn press(
     config: &Rc<UiConfig>,
     proxy: &EventLoopProxy<Event>,
 ) -> bool {
+    close_stale(ctx);
     let tabs = &mut ctx.display.tabs;
     let pointer = tabs.pointer;
     let layout = Layout::new(tabs);
@@ -191,14 +199,17 @@ pub fn press(
     let modifiers = tabs.modifiers;
     let pane = tabs.pane_at(pointer).filter(|_| layout.hit(pointer) == Hit::Terminal);
     let (Some(pane), MouseButton::Right, None) = (pane, button, &tabs.menu) else { return false };
-    if modifiers.control_key() {
+    // Not while another button is down, such as for dragging a tab.
+    if modifiers.control_key() || tabs.press != Press::None {
         return false;
     }
     let (active, focus) = tabs.live();
     if pane != focus {
         focus_pane(ctx, active, pane, config);
     }
-    let mouse = ctx.terminal.lock().mode().intersects(TermMode::MOUSE_MODE);
+    // The terminal takes the mouse like it does for the bindings, which vi mode keeps.
+    let mode = *ctx.terminal.lock().mode();
+    let mouse = mode.intersects(TermMode::MOUSE_MODE) && !mode.contains(TermMode::VI);
     let tabs = &mut ctx.display.tabs;
     if mouse && !modifiers.shift_key() {
         if pane == focus {
@@ -209,8 +220,9 @@ pub fn press(
         return true;
     }
 
-    let panes = tabs.tabs.get(tabs.active).map_or(1, |tab| tab.panes.len());
-    tabs.context = Some(Menu::new(items(panes), (pointer.x as f32, pointer.y as f32)));
+    let Some(tab) = tabs.tabs.get(tabs.active) else { return false };
+    let (items, at) = (items(tab.panes.len()), (pointer.x as f32, pointer.y as f32));
+    tabs.context = Some(Menu::new(items, tab.pane().id, at));
     tabs.press = Press::Swallowed;
     ctx.display.window.set_mouse_cursor(CursorIcon::Default);
     repaint(ctx);
@@ -224,6 +236,7 @@ pub fn key(
     config: &Rc<UiConfig>,
     proxy: &EventLoopProxy<Event>,
 ) -> bool {
+    close_stale(ctx);
     let Some(menu) = &mut ctx.display.tabs.context else { return false };
     let rows = menu.items.len();
     match key.logical_key {
@@ -252,7 +265,11 @@ pub fn key(
 
 /// Follow the pointer, returning whether the menu used the movement.
 pub fn moved(ctx: &mut WindowContext, position: PhysicalPosition<f64>) -> bool {
+    close_stale(ctx);
     let tabs = &mut ctx.display.tabs;
+    if tabs.context.is_none() {
+        return false;
+    }
     let layout = Layout::new(tabs);
     let Some(menu) = &mut tabs.context else { return false };
     let row = row_at(&menu.geometry(&layout).1, position);
@@ -294,6 +311,21 @@ fn close(ctx: &mut WindowContext) {
     repaint(ctx);
 }
 
+/// Close the menu once the pane it was opened on is no longer live.
+fn close_stale(ctx: &mut WindowContext) {
+    let tabs = &ctx.display.tabs;
+    if tabs.context.as_ref().is_some_and(|menu| menu.stale(tabs)) {
+        close(ctx);
+    }
+}
+
+/// Close the menu as the window loses the focus, like a native one.
+pub fn unfocused(ctx: &mut WindowContext) {
+    if ctx.display.tabs.context.is_some() {
+        close(ctx);
+    }
+}
+
 /// Redraw the whole window, since the menu covers the terminal, which only repaints its changes.
 fn repaint(ctx: &mut WindowContext) {
     ctx.display.damage_tracker.frame().mark_fully_damaged();
@@ -304,7 +336,7 @@ fn repaint(ctx: &mut WindowContext) {
 ///
 /// It pops in from the pointer, growing from 92% while it fades in.
 pub fn draw(tabs: &Tabs, layout: &Layout, palette: &Palette, now: Instant) -> Option<Layer> {
-    let menu = tabs.context.as_ref()?;
+    let menu = tabs.context.as_ref().filter(|menu| !menu.stale(tabs))?;
     let (rect, rows) = menu.geometry(layout);
     let shown = menu.pop.get(now).clamp(0., 1.);
     let scale = 0.92 + 0.08 * shown;
