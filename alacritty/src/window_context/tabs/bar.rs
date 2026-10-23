@@ -116,8 +116,8 @@ pub struct Layout {
     mark: Rect,
     track: Rect,
     tabs: Vec<(usize, Rect)>,
-    /// Icons of the grouped tabs' panes, by tab, as they settle: see [`stack`].
-    stacks: Vec<(usize, Vec<(usize, Rect)>)>,
+    /// Icons of the grouped tabs' panes fanned out, by tab, with where the stack ends.
+    stacks: Vec<(usize, f32, Vec<(usize, Rect)>)>,
     buttons: Vec<(Hit, Rect)>,
     terminal: Rect,
     /// The menu and the height of its rows.
@@ -247,18 +247,20 @@ impl Layout {
             menu,
         };
 
-        // A stack fans out under the pointer, the icon there lifted from it.
-        let hover = tabs.hover;
-        let fanned = |index| f32::from(matches!(hover, Hit::Icon(i, _) if i == index));
-        let lifted = |index, pane| f32::from(hover == Hit::Icon(index, pane));
+        // A stack is entered at rest and fans out under the pointer; its icons are told apart as
+        // they are fanned, so the icon picked stays under a pointer that does not move.
         layout.stacks = layout
             .tabs
             .iter()
             .filter_map(|&(index, rect)| {
                 let tab = tabs.tabs.get(index).filter(|tab| tab.panes.len() > 1)?;
-                let motion = |pane| (fanned(index), lifted(index, pane));
-                let icons = stack(layout.badge(rect), tab.panes.len(), tab.focus, scale, motion);
-                Some((index, icons))
+                let icons = |fan| {
+                    let front = layout.badge(rect);
+                    stack(front, tab.panes.len(), tab.focus, scale, |_| (fan, 0.))
+                };
+                let hovered = matches!(tabs.hover, Hit::Icon(i, _) if i == index);
+                let end = icons(f32::from(hovered)).into_iter().map(|(_, r)| r.right());
+                Some((index, end.fold(f32::MIN, f32::max), icons(1.)))
             })
             .collect();
         layout
@@ -336,8 +338,8 @@ impl Layout {
         }
         // A fanned stack covers the end of its tab, close button included.
         let row = self.tabs.first().is_some_and(|(_, rect)| y >= rect.y && y < rect.bottom());
-        for (index, icons) in self.stacks.iter().filter(|_| row) {
-            if let Some(pane) = icon_at(icons, x) {
+        for (index, end, icons) in self.stacks.iter().filter(|_| row) {
+            if let Some(pane) = icon_at(icons, x).filter(|_| x < *end) {
                 return Hit::Icon(*index, pane);
             }
         }
@@ -364,8 +366,8 @@ impl Layout {
 
     /// Where the title of a tab with `panes` panes begins, after its badge or stack of icons.
     fn title(&self, tab: Rect, panes: usize) -> f32 {
-        let behind = panes.clamp(1, STACK) - 1;
-        self.badge(tab).right() + behind as f32 * self.px(6.) + self.px(8.)
+        let behind = (panes.clamp(1, STACK) - 1) as f32;
+        (self.badge(tab).right() + behind * 6. * self.scale).round() + self.px(8.)
     }
 
     /// Where the gap before the tab at `index` is, or after the last tab shown.
@@ -445,20 +447,25 @@ struct Motion {
 }
 
 impl Effects {
-    /// Follow the tabs to their places and the icon under the pointer, at `now`.
-    fn update(&mut self, tabs: &[Tab], hover: Hit, now: Instant) {
+    /// Follow the tabs to their places and the icon under the pointer, at `now`; a tab `held` by
+    /// a drag stays at its slot there, to slide on from it once dropped.
+    fn update(&mut self, tabs: &[Tab], hover: Hit, held: Option<(usize, f32)>, now: Instant) {
         self.panes.retain(|id, _| tabs.iter().any(|tab| tab.position(*id).is_some()));
         for (index, tab) in tabs.iter().enumerate() {
             let fanned = matches!(hover, Hit::Icon(i, _) if i == index);
             for (position, pane) in tab.panes.iter().enumerate() {
-                let slot = index as f32;
+                let held = held.filter(|&(tab, _)| tab == index).map(|(_, slot)| slot);
+                let slot = held.unwrap_or(index as f32);
                 let motion = self.panes.entry(pane.id).or_insert_with(|| Motion {
                     slot: Tween::new(slot),
                     fan: Tween::new(0.),
                     lift: Tween::new(0.),
                 });
                 let lifted = hover == Hit::Icon(index, position);
-                motion.slot.to(slot, now, 200, Curve::SNAP);
+                match held {
+                    Some(_) => motion.slot = Tween::new(slot),
+                    None => motion.slot.to(slot, now, 200, Curve::SNAP),
+                }
                 motion.fan.to(f32::from(fanned), now, 160, Curve::EASE_OUT);
                 motion.lift.to(f32::from(lifted), now, 160, Curve::EASE_OUT);
             }
@@ -590,24 +597,33 @@ impl Tabs {
                 );
             }
         }
-        self.bar_effects.update(&self.tabs, self.hover, now);
         let dragging = self.drag.as_ref().filter(|drag| drag.moving);
         let source = dragging.map(|drag| drag.source);
         let target = dragging.and_then(|drag| drag.target);
+        // Tabs slide along the track, the dragged one following the pointer.
+        let (first, last) = match (layout.tabs.first(), layout.tabs.last()) {
+            (Some((_, first)), Some((_, last))) => (first.x, last.x),
+            _ => (0., 0.),
+        };
+        let held = match (source, dragging) {
+            (Some(Source::Tab(index)), Some(drag)) => {
+                let x = ((self.pointer.x - drag.grab) as f32).clamp(first, last);
+                Some((index, layout.first as f32 + (x - first) / layout.step))
+            },
+            _ => None,
+        };
+        self.bar_effects.update(&self.tabs, self.hover, held, now);
         // Stacks fanned out cover what is beside them.
         let mut fanned = Layer::default();
         for &(index, mut rect) in &layout.tabs {
             let tab = &self.tabs[index];
             let active = index == self.active;
-            // Tabs slide to new places.
             let (slot, ..) = self.bar_effects.get(tab.pane().id, now);
-            rect.x = (rect.x + (slot - index as f32) * layout.step).round();
-            let layer = match dragging {
-                // The dragged tab follows the pointer, above the others.
-                Some(drag) if source == Some(Source::Tab(index)) => {
-                    let (first, last) =
-                        (layout.tabs[0].1.x, layout.tabs[layout.tabs.len() - 1].1.x);
-                    rect.x = ((self.pointer.x - drag.grab) as f32).clamp(first, last).round();
+            let x = rect.x + (slot - index as f32) * layout.step;
+            rect.x = x.clamp(first, last).round();
+            let layer = match held {
+                // The dragged tab is above the others.
+                Some((held, _)) if held == index => {
                     let shadow = Rect::new(rect.x, rect.y + px(1.), rect.w, rect.h + px(2.));
                     let radius = layout.radius(TAB_RADIUS + 1.);
                     top.rounded(shadow, radius, mix(palette.chrome, BLACK, 0.5));
@@ -649,10 +665,11 @@ impl Tabs {
                 };
                 let icons = stack(front, tab.panes.len(), tab.focus, layout.scale, motion);
                 let fan = motion(tab.focus).0;
-                let into = if fan > 0.001 { &mut fanned } else { &mut *layer };
-                if fan > 0.001 {
+                let fanned_out = fan > 0.001;
+                let into = if fanned_out { &mut fanned } else { &mut *layer };
+                if fanned_out {
                     let left = icons.iter().map(|(_, icon)| icon.x).fold(f32::MAX, f32::min);
-                    let right = icons.iter().map(|(_, icon)| icon.right()).fold(0., f32::max);
+                    let right = icons.iter().map(|(_, icon)| icon.right()).fold(f32::MIN, f32::max);
                     let (x, y) = (left - px(3.), rect.y + px(2.));
                     let plate = Rect::new(x, y, right - left + px(6.), rect.h - px(4.));
                     into.rounded_alpha(plate, layout.radius(TAB_RADIUS - 2.), surface, fan.min(1.));
@@ -941,6 +958,23 @@ mod tests {
         assert_eq!(icon_at(&icons, 120.), Some(1));
         assert_eq!(icon_at(&icons, 128.), Some(2));
         assert_eq!(icon_at(&icons, 130.), None);
+    }
+
+    #[test]
+    fn icon_entered_at_rest_stays_under_a_still_pointer() {
+        for scale in [1., 1.25, 2.] {
+            let front = Rect::new(100., 15., (18. * scale as f32).round(), 18.);
+            let rest = stack(front, 4, 1, scale, at_rest);
+            let fanned = stack(front, 4, 1, scale, |_| (1., 0.));
+            let left = rest.last().unwrap().1.x;
+            let end = rest.iter().map(|(_, rect)| rect.right()).fold(f32::MIN, f32::max);
+            for x in (left as i32..end as i32).map(|x| x as f32 + 0.5) {
+                let pane = icon_at(&fanned, x).unwrap();
+                // Lifting the icon picked keeps it the one under the pointer.
+                let lifted = stack(front, 4, 1, scale, |p| (1., f32::from(p == pane)));
+                assert_eq!(icon_at(&lifted, x), Some(pane), "{scale} {x}");
+            }
+        }
     }
 
     #[test]
