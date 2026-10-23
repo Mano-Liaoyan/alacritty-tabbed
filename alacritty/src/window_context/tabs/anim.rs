@@ -205,6 +205,16 @@ mod tests {
     }
 
     #[test]
+    fn tween_without_duration_jumps() {
+        // As every tween does with `ALACRITTY_ANIMATION_SCALE=0`.
+        let now = Instant::now();
+        let mut tween = Tween::new(0f32);
+        tween.to(10., now, 0, Curve::EASE_OUT);
+        assert_eq!(tween.get(now), 10.);
+        assert!(!tween.running(now));
+    }
+
+    #[test]
     fn tween_retargets_from_current_value() {
         let now = Instant::now();
         let mut tween = Tween::new(Rect::new(0., 0., 100., 100.));

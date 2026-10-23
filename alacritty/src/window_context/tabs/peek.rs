@@ -715,6 +715,11 @@ mod tests {
         // Shortly after, the next card shows at once too.
         state.update(Some((2, 0)), HERE, false, at(start, 1000));
         assert_eq!((state.target, state.shown.get(at(start, 1000))), (Some((2, 0)), 1.));
+        // Nothing moves then, so another frame comes only while its preview font is measured.
+        assert!(!state.running(at(start, 1000)));
+        state.measuring = true;
+        assert!(state.running(at(start, 1000)));
+        state.measuring = false;
         // Long after, it waits again.
         state.update(None, HERE, false, at(start, 1100));
         state.update(Some((3, 0)), HERE, false, at(start, 3000));
