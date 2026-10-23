@@ -188,3 +188,48 @@ pub fn pick(folder: bool, title: &str) -> Option<String> {
         Some(Some(path.trim_end_matches('\n').to_owned()).filter(|path| !path.is_empty()))
     })?
 }
+
+/// Font families installed, with whether each is monospaced, as fontconfig lists them.
+#[cfg(not(target_os = "macos"))]
+pub fn fonts() -> Vec<(String, bool)> {
+    use std::ffi::CStr;
+    use std::ptr;
+
+    use fontconfig_sys::constants::{FC_DUAL, FC_FAMILY, FC_FAMILYLANG, FC_SPACING};
+    use fontconfig_sys::*;
+
+    let mut fonts = Vec::new();
+    unsafe {
+        let pattern = FcPatternCreate();
+        let objects = FcObjectSetCreate();
+        for object in [FC_FAMILY, FC_FAMILYLANG, FC_SPACING] {
+            FcObjectSetAdd(objects, object.as_ptr());
+        }
+        let set = FcFontList(ptr::null_mut(), pattern, objects);
+        FcObjectSetDestroy(objects);
+        FcPatternDestroy(pattern);
+        let Some(set) = set.as_mut() else { return fonts };
+
+        let string = |font, object: &CStr, index| {
+            let mut value = ptr::null_mut();
+            (FcPatternGetString(font, object.as_ptr(), index, &mut value) == FcResultMatch)
+                .then(|| CStr::from_ptr(value.cast()).to_string_lossy().into_owned())
+        };
+        for &font in std::slice::from_raw_parts(set.fonts, set.nfont.max(0) as usize) {
+            // Families have a name per language; the English one is the one most people know.
+            let names = (0..).map_while(|index| string(font, FC_FAMILY, index));
+            let languages = (0..).map(|index| string(font, FC_FAMILYLANG, index));
+            let mut names = names.zip(languages).peekable();
+            let first = names.peek().map(|(name, _)| name.clone());
+            let english = names.find(|(_, language)| language.as_deref() == Some("en"));
+            let Some(name) = english.map(|(name, _)| name).or(first) else { continue };
+            let mut spacing = 0;
+            let mono = FcPatternGetInteger(font, FC_SPACING.as_ptr(), 0, &mut spacing)
+                == FcResultMatch
+                && spacing >= FC_DUAL;
+            fonts.push((name, mono));
+        }
+        FcFontSetDestroy(set);
+    }
+    fonts
+}

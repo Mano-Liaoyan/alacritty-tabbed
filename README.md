@@ -31,8 +31,10 @@ About 40 common shells, tools, languages and WSL distributions have bundled logo
 where the system has none, and other programs get a terminal. A profile can set its own SVG or PNG, or an emoji.
 
 **Settings panel.** The gear opens the profile settings: name, icon, command
-line, starting directory, environment variables, configuration overrides, the
-default profile, and whether a profile shows in the menu. Browse buttons use the
+line, starting directory, font, environment variables, configuration overrides,
+the default profile, and whether a profile shows in the menu. The font field
+lists the system's monospaced fonts as you type; "Show all fonts" lists every
+font. Browse buttons use the
 system's file pickers. Profiles can be added, duplicated, deleted, and dragged
 to reorder them. They are saved to `profiles.toml` beside `alacritty.toml`,
 which can also be edited by hand.
@@ -80,6 +82,7 @@ name = "Bash"
 command = "bash --login"              # Empty uses the shell from alacritty.toml.
 directory = "~/projects"              # Empty starts in the home directory.
 icon = "~/icons/bash.png"             # An image, or text such as "🐧"; empty uses the program's icon.
+font = "JetBrains Mono"               # Font family; empty uses the font from alacritty.toml.
 env = { EDITOR = "vim" }
 options = ["font.size=14"]            # Configuration overrides for this profile's tabs.
 hidden = false                        # Leave out of the menu.

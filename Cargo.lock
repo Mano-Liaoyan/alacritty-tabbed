@@ -42,8 +42,10 @@ dependencies = [
  "clap",
  "clap_complete",
  "copypasta",
+ "core-text",
  "crossfont",
  "dirs",
+ "dwrote",
  "embed-resource",
  "gl_generator",
  "glutin",
@@ -69,6 +71,7 @@ dependencies = [
  "windows-sys 0.59.0",
  "winit",
  "xdg",
+ "yeslogic-fontconfig-sys",
 ]
 
 [[package]]

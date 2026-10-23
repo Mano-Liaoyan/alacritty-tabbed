@@ -70,3 +70,16 @@ pub fn pick(folder: bool, title: &str) -> Option<String> {
     let path = String::from_utf8(output.stdout).ok()?;
     Some(path.trim_end_matches('\n').to_owned()).filter(|path| !path.is_empty())
 }
+
+/// Font families installed, with whether each is monospaced, as Core Text lists them.
+pub fn fonts() -> Vec<(String, bool)> {
+    use core_text::font_collection;
+    use core_text::font_descriptor::{SymbolicTraitAccessors, TraitAccessors};
+
+    let Some(descriptors) = font_collection::create_for_all_families().get_descriptors() else {
+        return Vec::new();
+    };
+    let mono =
+        |traits: core_text::font_descriptor::CTFontTraits| traits.symbolic_traits().is_monospace();
+    descriptors.iter().map(|font| (font.family_name(), mono(font.traits()))).collect()
+}
