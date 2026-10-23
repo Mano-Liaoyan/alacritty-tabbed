@@ -94,7 +94,6 @@ pub struct Palette {
     /// The main action, from the terminal's blue.
     pub primary: Rgb,
     /// Accent of the panes: the focused one's border and where a pane would drop.
-    #[allow(dead_code)] // Taken up by the panes with its setting.
     pub highlight: Rgb,
     /// Backing out of changes, from the terminal's red.
     pub caution: Rgb,

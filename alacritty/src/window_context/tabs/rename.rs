@@ -242,7 +242,6 @@ pub fn commit(ctx: &mut WindowContext) {
 
 /// Draw the field of the tab at `tab`, whose title is at `rect`; returns whether it did, in which
 /// case the bar draws neither the title nor the close button.
-#[allow(dead_code, reason = "the bar draws the field next")]
 pub fn draw(
     tabs: &Tabs,
     layout: &Layout,

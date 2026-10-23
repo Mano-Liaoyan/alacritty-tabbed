@@ -90,7 +90,6 @@ pub use paint::Rect;
 use profiles::{Profile, Profiles};
 use settings::{Page, Settings};
 use split::{Axis, Divider, Side, Split};
-#[allow(unused_imports, reason = "torn tabs get windows next")]
 pub use tear::{Live, Torn, adopt, take as take_torn};
 use text::UiFont;
 
@@ -197,7 +196,6 @@ struct Tab<S = Session> {
     /// Whether only the focused pane is shown, over the whole area.
     zoom: bool,
     /// Name given to the tab, shown instead of its focused pane's title.
-    #[allow(dead_code, reason = "the bar shows it next")]
     name: Option<String>,
 }
 
@@ -226,7 +224,6 @@ pub struct PaneDraw {
     /// Where to draw it in the window, in pixels from the top left.
     pub frame: Rect,
     /// The pane's card, which nothing of it is drawn outside of.
-    #[allow(dead_code, reason = "panes are clipped to it next")]
     pub clip: Rect,
 }
 
@@ -239,6 +236,8 @@ enum Press {
     Terminal,
     /// On a divider between panes, which it drags.
     Divider,
+    /// On the close button of the tab at this index, which closes it if released there.
+    Close(usize),
     /// Over something that used the press, such as a pane it focused, so the terminal gets
     /// neither it nor its release.
     Swallowed,
@@ -378,7 +377,6 @@ impl Tabs {
     }
 
     /// The dividers between the active tab's panes; none while it is zoomed.
-    #[allow(dead_code, reason = "dividers are dragged next")]
     pub fn dividers(&self) -> Vec<Divider> {
         match self.tabs.get(self.active) {
             Some(tab) if !tab.zoom => tab.layout.dividers(self.area(), self.spacing()),
@@ -409,7 +407,6 @@ impl Tabs {
     }
 
     /// The card of the live terminal at `now`, which nothing of it is drawn outside of.
-    #[allow(dead_code, reason = "panes are clipped to it next")]
     pub fn focused_clip(&self, now: Instant) -> Rect {
         self.card(self.focused_frame(now))
     }
@@ -578,7 +575,6 @@ fn nearest(rects: &[(usize, Rect)], point: PhysicalPosition<f64>, margin: f32) -
 }
 
 /// The name a tab is given for `name`: trimmed, and none when that leaves nothing.
-#[allow(dead_code, reason = "tabs are renamed next")]
 fn tidy(name: Option<String>) -> Option<String> {
     let name = name?;
     let name = name.trim();
@@ -910,7 +906,8 @@ pub fn window_event(
             }
             // Panes take the pointer only where nothing above them, nor a selection, has it.
             let free = tabs.press != Press::Terminal && tabs.menu.is_none();
-            let over_panes = free && layout.hit(position) == Hit::Terminal;
+            let under = layout.hit(position);
+            let over_panes = free && under == Hit::Terminal;
             if (tabs.press == Press::Divider || over_panes) && divider::moved(ctx, position) {
                 return Some(WindowEvent::CursorLeft { device_id });
             }
@@ -921,8 +918,10 @@ pub fn window_event(
                 return None;
             }
 
-            // A pane is grabbed by its handle, or anywhere with the modifiers that drag it.
-            let handle = panes::handle_at(tabs, &layout, position).filter(|_| free);
+            // A pane is grabbed by its handle, or anywhere with the modifiers that drag it; a
+            // fanned shelf covers the handles under it.
+            let shelf = matches!(under, Hit::Icon(..));
+            let handle = panes::handle_at(tabs, &layout, position).filter(|_| free && !shelf);
             if tabs.handle != handle {
                 tabs.handle = handle;
                 redraw(ctx);
@@ -1002,6 +1001,12 @@ pub fn window_event(
                     divider::release(ctx);
                     return None;
                 },
+                Press::Close(index) => {
+                    if layout.hit(tabs.pointer) == Hit::Close(index) {
+                        close(ctx, index, config);
+                    }
+                    return None;
+                },
                 Press::Swallowed => return None,
                 _ => (),
             }
@@ -1057,6 +1062,12 @@ pub fn window_event(
                 return None;
             } else if terminal {
                 tabs.press = Press::Terminal;
+            } else if let (Hit::Close(index), MouseButton::Left) = (layout.hit(pointer), button) {
+                // Like a native button, × acts on release, so a press there that moves away
+                // closes nothing.
+                tabs.press = Press::Close(index);
+                tabs.last_click = None;
+                return None;
             } else {
                 tabs.press = Press::Bar;
                 click(ctx, &layout, button, config, proxy);
@@ -1087,8 +1098,12 @@ pub fn window_event(
             }
             return None;
         },
-        // Only the live terminal scrolls.
-        WindowEvent::MouseWheel { .. } if over_other_pane => return None,
+        // Only the live terminal scrolls, and not under a fanned shelf.
+        WindowEvent::MouseWheel { .. }
+            if over_other_pane || matches!(layout.hit(tabs.pointer), Hit::Icon(..)) =>
+        {
+            return None;
+        },
         WindowEvent::Touch(mut touch) => {
             touch.location.x -= left;
             touch.location.y -= top;
@@ -1487,8 +1502,7 @@ fn click(
             focus_pane(ctx, index, pane, config);
             dnd::start(ctx, layout, Source::Pane(index, pane), previous);
         },
-        (Hit::Close(index), MouseButton::Left)
-        | (Hit::Tab(index) | Hit::Icon(index, _) | Hit::Close(index), MouseButton::Middle) => {
+        (Hit::Tab(index) | Hit::Icon(index, _) | Hit::Close(index), MouseButton::Middle) => {
             close(ctx, index, config)
         },
         (Hit::Tab(index) | Hit::Icon(index, _) | Hit::Close(index), MouseButton::Right) => {
@@ -1713,7 +1727,6 @@ pub fn min_pane(size: &SizeInfo) -> (f32, f32) {
 
 /// Give the pair of panes `index` of the active tab, in the order of its tree, `ratio` of their
 /// space, as far as every pane keeps its smallest size.
-#[allow(dead_code, reason = "dividers are dragged next")]
 pub fn set_ratio(ctx: &mut WindowContext, index: usize, ratio: f32) {
     let min = min_pane(&ctx.display.size_info);
     let tabs = &mut ctx.display.tabs;
@@ -1737,7 +1750,6 @@ pub fn toggle_zoom(ctx: &mut WindowContext) {
 }
 
 /// Name the tab at `tab`, or give it back its focused pane's title with none.
-#[allow(dead_code, reason = "tabs are renamed next")]
 pub fn rename(ctx: &mut WindowContext, tab: usize, name: Option<String>) {
     let Some(tab) = ctx.display.tabs.tabs.get_mut(tab) else { return };
     tab.name = tidy(name);

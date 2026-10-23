@@ -27,7 +27,8 @@ with × or a middle click, and scroll over the bar to switch.
 or stacked, like tmux's windows. Each pane is its own terminal with its own
 profile; panes in the background keep running and drawing. The focused pane has
 a lit border, and a grouped tab shows its panes' logos stacked like cards, the
-focused one in front.
+focused one in front. Groups have no size limit: past four panes the stack
+shows three cards and a "+N" count.
 
 - **Group** tabs by dragging one onto the middle of another, or of a group.
 - **Split** by dragging a tab into the terminal: it docks beside the pane under
@@ -35,17 +36,39 @@ focused one in front.
   stacked; a preview shows where it will land. A group dragged there docks as it
   is. The tab dragged is shown while it is pressed, so pick the tab to dock into
   first.
-- **Rearrange** by dragging a pane's logo from its tab's stack: into the
-  terminal to dock it beside another pane, onto another tab to move it there,
-  or between tabs to make it a tab of its own again.
-- **Hover** a tab's stack to fan its logos out; the logo under the pointer grows
-  and its pane is highlighted. Click a logo to focus its pane.
+- **Rearrange** by dragging a pane's logo from its tab's stack, the ••• handle
+  on top of a pane, or anywhere on a pane with Ctrl+Alt held (⌘⌥ on macOS;
+  plain Ctrl+drag still selects a block): into the terminal to dock it beside
+  another pane, onto another tab to move it there, or between tabs to make it a
+  tab of its own again. Merging is refused when a pane would get too small.
+- **Tear off** a tab or a pane by dropping it outside the window: it opens in a
+  new window and keeps running. "Move … to New Window" in the menus does the
+  same.
+- **Resize** by dragging the divider between two panes; double-click it to go
+  back to half and half. Ctrl+Shift+Z (Cmd+Shift+Enter on macOS) or "Zoom
+  Pane" zooms the focused pane to the whole tab and back.
+- **Hover** a tab's stack to fan its logos out; large groups wrap into a shelf
+  below the bar. Resting on a logo shows its pane's own title, and for a pane
+  that is not on screen a live preview of it. Click a logo to focus its pane.
 - **Right-click** a pane for its menu: Split Vertically (side by side), Split
-  Horizontally (stacked), Move Pane to New Tab and Close Pane. Arrow keys,
-  Enter and Escape work. When the program in the pane takes the mouse, hold
-  Shift; Ctrl+right-click still expands the selection.
+  Horizontally (stacked), Zoom Pane, Move Pane to New Tab, Move Pane to New
+  Window and Close Pane. Arrow keys, Enter and Escape work. When the program in
+  the pane takes the mouse, hold Shift; Ctrl+right-click still expands the
+  selection.
+- **Right-click** a tab for its menu: Rename Group… (or double-click the
+  title), Reset Name, Ungroup, Move Tab to New Window and Close Tab.
 - Click a pane to focus it. Ctrl+Shift+W closes the focused pane; × and a
   middle click close the whole tab.
+
+Under Appearance in the settings, or in `alacritty.toml`, set the space between
+panes and the focused pane's border colour, which the settings pick with a
+colour picker:
+
+```toml
+[window]
+pane_gap = 16                # Logical pixels between panes, 0 to 48.
+pane_highlight = "#ff9500"   # Leave out for the terminal's blue.
+```
 
 Panes slide and pop into place with Hyprland-like curves. Set
 `ALACRITTY_ANIMATION_SCALE` to slow them down (`4` is four times slower) or to
@@ -60,7 +83,8 @@ where the system has none, and other programs get a terminal. A profile can set 
 
 **Settings panel.** Like Windows Terminal's, the settings list the
 application's pages above the profiles. The gear opens **Appearance**: the
-corners, the interface font and its size, and the background opacity, saved to
+corners, the interface font and its size, the background opacity, the
+terminal panel, the pane gap, the focus highlight and the tab track, saved to
 `alacritty.toml` (changing only those keys, and keeping its comments) and
 applied to every window. "Edit profiles…" in the ⌄ menu opens the profiles:
 name, icon, command line, starting directory, font, environment variables, configuration overrides,
@@ -122,14 +146,16 @@ Restart Alacritty after changing `window.tabs`.
 | Ctrl+1 to Ctrl+8, Ctrl+9 | Cmd+1 to Cmd+8, Cmd+9 | Select a tab, or the last tab |
 | Ctrl+Shift+W | Cmd+W | Close the focused pane, or its tab when it is the only one |
 | ×, middle click | ×, middle click | Close a tab with all its panes |
-| Right click in a pane | Right click in a pane | Split, move or close the pane |
+| Right click in a pane | Right click in a pane | Split, zoom, move or close the pane |
+| Ctrl+Shift+Z | Cmd+Shift+Enter | Zoom the focused pane, or unzoom |
+| Right click a tab | Right click a tab | Rename, ungroup, move or close the tab |
 | Ctrl+Shift+U (Windows) | | New tab with the default WSL distribution |
 | F11 | Ctrl+Cmd+F | Toggle fullscreen |
 
 Keys bound in `keyboard.bindings` keep their meaning, and the `CreateNewTab`,
-`SelectNextTab`, `SelectPreviousTab`, `SelectTab1`-`SelectTab9` and
-`SelectLastTab` actions work on every platform. The window's close button closes
-all of its tabs.
+`SelectNextTab`, `SelectPreviousTab`, `SelectTab1`-`SelectTab9`,
+`SelectLastTab` and `TogglePaneZoom` actions work on every platform. The
+window's close button closes all of its tabs.
 
 ## Profiles
 

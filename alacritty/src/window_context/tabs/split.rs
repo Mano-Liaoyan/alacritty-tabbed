@@ -91,7 +91,6 @@ impl<P: Copy + PartialEq> Split<P> {
     }
 
     /// The divider of each pair of parts laid out in `area`, in the order of the tree.
-    #[allow(dead_code, reason = "dividers are dragged next")]
     pub fn dividers(&self, area: Rect, spacing: f32) -> Vec<Divider> {
         let mut dividers = Vec::new();
         self.walk(area, spacing, &mut |split, area| {
@@ -109,7 +108,6 @@ impl<P: Copy + PartialEq> Split<P> {
 
     /// Give the pair `index`, in the order of the tree, `ratio` of its space; false when there is
     /// no such pair.
-    #[allow(dead_code, reason = "dividers are dragged next")]
     pub fn set_ratio(&mut self, index: usize, ratio: f32) -> bool {
         let mut index = index;
         match self.pair_mut(&mut index) {
@@ -123,7 +121,6 @@ impl<P: Copy + PartialEq> Split<P> {
 
     /// Smallest size this can be laid out in, keeping its ratios, with every pane at least
     /// `min`, `spacing` apart.
-    #[allow(dead_code, reason = "dividers are dragged next")]
     pub fn min_size(&self, min: (f32, f32), spacing: f32) -> (f32, f32) {
         match self {
             Split::Pane(_) => min,
@@ -140,7 +137,6 @@ impl<P: Copy + PartialEq> Split<P> {
 
     /// The ratios the pair `index` may take in `area` with every pane at least `min`, from
     /// lowest to highest; the middle when it cannot leave them that.
-    #[allow(dead_code, reason = "dividers are dragged next")]
     pub fn ratio_range(
         &self,
         index: usize,
@@ -204,7 +200,6 @@ impl<P: Copy + PartialEq> Split<P> {
     }
 
     /// The pair `index` counts down to, in the order of the tree.
-    #[allow(dead_code, reason = "dividers are dragged next")]
     fn pair_mut(&mut self, index: &mut usize) -> Option<&mut Self> {
         if let Split::Pane(_) = self {
             return None;
