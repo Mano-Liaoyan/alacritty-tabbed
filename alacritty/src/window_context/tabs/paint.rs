@@ -510,6 +510,12 @@ impl Layer {
         self.texts.iter_mut().for_each(|text| text.3 = mix(under, text.3, opacity));
     }
 
+    /// Draw what `other` holds over what this one does.
+    pub fn extend(&mut self, other: Layer) {
+        self.rects.extend(other.rects);
+        self.texts.extend(other.texts);
+    }
+
     /// Move everything drawn by `dx`, `dy`, kept on whole pixels so text stays sharp.
     pub fn translate(&mut self, dx: f32, dy: f32) {
         let (dx, dy) = (dx.round(), dy.round());

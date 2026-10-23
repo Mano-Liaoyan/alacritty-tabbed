@@ -289,6 +289,7 @@ pub fn draw(
         || tabs.press != Press::None
         || tabs.menu.is_some()
         || tabs.context.is_some()
+        || tabs.confirm.is_some()
         || tabs.settings.is_some()
         || tabs.rename.is_some();
     let hover = match tabs.hover {

@@ -16,11 +16,13 @@ mod anim;
 mod app_settings;
 mod autohide;
 mod bar;
+mod confirm;
 mod context;
 mod divider;
 mod dnd;
 mod fonts;
 mod icons;
+mod job;
 mod paint;
 mod panes;
 mod peek;
@@ -201,6 +203,8 @@ pub struct Tabs {
     menu: Option<Menu>,
     /// The open context menu of a pane.
     context: Option<context::Menu>,
+    /// The open popup asking whether to close a pane running a job.
+    confirm: Option<confirm::Dialog>,
     settings: Option<Settings>,
     pane_effects: panes::Effects,
     bar_effects: bar::Effects,
@@ -296,8 +300,8 @@ enum Press {
     Divider,
     /// On the close button of the tab at this index, which closes it if released there.
     Close(usize),
-    /// On the zoom control of the pane at this index, which zooms it if released there.
-    Control(usize),
+    /// On the zoom or close control of the pane at this index, which acts if released there.
+    Control(usize, Control),
     /// Over something that used the press, such as a pane it focused, so the terminal gets
     /// neither it nor its release.
     Swallowed,
@@ -321,7 +325,6 @@ struct Session {
     window_config: ParsedOptions,
     #[cfg(not(windows))]
     master_fd: RawFd,
-    #[cfg(not(windows))]
     shell_pid: u32,
     /// The pane's configuration, with its profile's overrides and padding.
     config: Rc<UiConfig>,
@@ -511,6 +514,7 @@ impl Tabs {
         self.pane_effects.running(now)
             || self.bar_effects.running(now)
             || self.context.as_ref().is_some_and(|menu| menu.running(now))
+            || self.confirm.as_ref().is_some_and(|dialog| dialog.running(now))
             || self.divider.running(now)
             || self.peeking.running(now)
             || self.autohide.running(now)
@@ -787,6 +791,8 @@ impl Session {
         let pty = tty::new(&pty_config, size.into(), ctx.id().into())?;
         #[cfg(not(windows))]
         let (master_fd, shell_pid) = (pty.file().as_raw_fd(), pty.child().id());
+        #[cfg(windows)]
+        let shell_pid = pty.child_watcher().pid().map_or(0, |pid| pid.get());
         let event_loop =
             PtyEventLoop::new(terminal.clone(), event_proxy, pty, pty_config.drain_on_exit, false)?;
         let notifier = Notifier(event_loop.channel());
@@ -803,7 +809,6 @@ impl Session {
             preserve_title: false,
             #[cfg(not(windows))]
             master_fd,
-            #[cfg(not(windows))]
             shell_pid,
             config,
             size,
@@ -832,10 +837,8 @@ impl Session {
         mem::swap(&mut self.preserve_title, &mut ctx.preserve_title);
         mem::swap(&mut self.window_config, &mut ctx.window_config);
         #[cfg(not(windows))]
-        {
-            mem::swap(&mut self.master_fd, &mut ctx.master_fd);
-            mem::swap(&mut self.shell_pid, &mut ctx.shell_pid);
-        }
+        mem::swap(&mut self.master_fd, &mut ctx.master_fd);
+        mem::swap(&mut self.shell_pid, &mut ctx.shell_pid);
         self.config = ctx.config.clone();
         self.size = ctx.display.size_info;
         let live = mem::replace(&mut ctx.display.font_size, incoming);
@@ -854,7 +857,6 @@ impl Session {
             preserve_title: self.preserve_title,
             #[cfg(not(windows))]
             master_fd: self.master_fd,
-            #[cfg(not(windows))]
             shell_pid: self.shell_pid,
             zoom: self.zoom,
         }
@@ -961,6 +963,7 @@ pub fn window_event(
     let modal = tabs.settings.is_some()
         || tabs.menu.is_some()
         || tabs.context.is_some()
+        || tabs.confirm.is_some()
         || tabs.rename.is_some();
     // The live terminal's pane, which pointer positions are given relative to.
     let pane = tabs.focused_rect();
@@ -1010,6 +1013,7 @@ pub fn window_event(
                 return None;
             }
             if divider::key(ctx, key)
+                || confirm::key(ctx, key, config)
                 || context::key(ctx, key, config, proxy)
                 || dnd::key(ctx, key, config)
             {
@@ -1038,7 +1042,7 @@ pub fn window_event(
                 ctx.display.window.set_mouse_cursor(CursorIcon::Default);
                 return None;
             }
-            if context::moved(ctx, position) {
+            if confirm::moved(ctx, position) || context::moved(ctx, position) {
                 return None;
             }
             let tabs = &mut ctx.display.tabs;
@@ -1067,8 +1071,11 @@ pub fn window_event(
                 return None;
             }
 
-            // A pane is grabbed by its grip, or anywhere with the modifiers that drag it.
-            let control = panes::control_at(tabs, &layout, position).filter(|_| free && !shelf);
+            // A pane is grabbed by its grip, or anywhere with the modifiers that drag it. The
+            // window's resize borders keep the pointer over the controls near them.
+            let resize = matches!(under, Hit::Resize(_));
+            let control =
+                panes::control_at(tabs, &layout, position).filter(|_| free && !shelf && !resize);
             if mem::replace(&mut tabs.control, control) != control {
                 redraw(ctx);
             }
@@ -1077,7 +1084,7 @@ pub fn window_event(
             if control.is_some() || over_pane && tabs.pane_drag() {
                 hover(ctx, Hit::None);
                 let cursor = match control {
-                    Some((_, Control::Zoom)) => CursorIcon::Pointer,
+                    Some((_, Control::Zoom | Control::Close)) => CursorIcon::Pointer,
                     _ => CursorIcon::Grab,
                 };
                 ctx.display.window.set_mouse_cursor(cursor);
@@ -1161,14 +1168,18 @@ pub fn window_event(
                     }
                     return None;
                 },
-                // Like a native button, the zoom control acts on release.
-                Press::Control(index) => {
-                    if panes::control_at(tabs, &layout, tabs.pointer)
-                        == Some((index, Control::Zoom))
-                    {
-                        let active = tabs.active;
-                        focus_pane(ctx, active, index, config);
-                        toggle_zoom(ctx);
+                // Like native buttons, the zoom and close controls act on release.
+                Press::Control(index, control) => {
+                    let active = tabs.active;
+                    if panes::control_at(tabs, &layout, tabs.pointer) == Some((index, control)) {
+                        match control {
+                            Control::Zoom => {
+                                focus_pane(ctx, active, index, config);
+                                toggle_zoom(ctx);
+                            },
+                            Control::Close => confirm::request(ctx, active, index, config),
+                            Control::Grip => (),
+                        }
                     }
                     return None;
                 },
@@ -1196,7 +1207,7 @@ pub fn window_event(
                 redraw(ctx);
                 return None;
             }
-            if context::press(ctx, button, config, proxy) {
+            if confirm::press(ctx, button, config) || context::press(ctx, button, config, proxy) {
                 return None;
             }
             let tabs = &mut ctx.display.tabs;
@@ -1205,12 +1216,20 @@ pub fn window_event(
                 return None;
             }
             let tabs = &mut ctx.display.tabs;
-            if let (Some((index, Control::Zoom)), MouseButton::Left) = (tabs.control, button) {
-                tabs.press = Press::Control(index);
-                return None;
+            match (tabs.control, button) {
+                (Some((index, control @ (Control::Zoom | Control::Close))), MouseButton::Left) => {
+                    tabs.press = Press::Control(index, control);
+                    return None;
+                },
+                // Other buttons on a button do nothing, rather than reach the terminal under it.
+                (Some((_, Control::Zoom | Control::Close)), _) => {
+                    tabs.press = Press::Swallowed;
+                    return None;
+                },
+                _ => (),
             }
             let dragged = terminal && tabs.pane_drag();
-            let grip = tabs.control.map(|(index, _)| index);
+            let grip = tabs.control.filter(|&(_, c)| c == Control::Grip).map(|(index, _)| index);
             let grabbed = grip.or_else(|| tabs.pane_at(pointer).filter(|_| dragged));
             if let (Some(pane), MouseButton::Left) = (grabbed, button) {
                 // Like its icon in the bar, a pane is focused as it is pressed to drag it.
