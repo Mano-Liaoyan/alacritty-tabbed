@@ -253,6 +253,12 @@ unsafe fn icon_image(icon: HICON) -> Option<Arc<Image>> {
         let (lines, data) = (height as u32, pixels.as_mut_ptr().cast());
         let ok =
             ok && GetDIBits(dc, info.hbmColor, 0, lines, data, &mut header, DIB_RGB_COLORS) != 0;
+        // The AND mask, as the same top-down 32 bit rows: white where the icon is transparent.
+        let mut mask = vec![0u8; pixels.len()];
+        let data = mask.as_mut_ptr().cast();
+        let masked = ok
+            && !info.hbmMask.is_null()
+            && GetDIBits(dc, info.hbmMask, 0, lines, data, &mut header, DIB_RGB_COLORS) != 0;
         ReleaseDC(ptr::null_mut(), dc);
         DeleteObject(info.hbmColor);
         DeleteObject(info.hbmMask);
@@ -260,15 +266,27 @@ unsafe fn icon_image(icon: HICON) -> Option<Arc<Image>> {
             return None;
         }
 
-        // BGRA to RGBA; icons without an alpha channel are opaque.
-        let opaque = pixels.chunks_exact(4).all(|pixel| pixel[3] == 0);
-        for pixel in pixels.chunks_exact_mut(4) {
-            pixel.swap(0, 2);
-            if opaque {
+        rgba(&mut pixels, masked.then_some(&mask[..]));
+        Image::new(width as u32, height as u32, pixels)
+    }
+}
+
+/// Turn an icon's BGRA pixels into RGBA. Icons without an alpha channel are opaque where their
+/// AND `mask`, in the same layout, is black, and transparent where it is white.
+fn rgba(pixels: &mut [u8], mask: Option<&[u8]>) {
+    let opaque = pixels.chunks_exact(4).all(|pixel| pixel[3] == 0);
+    let mut mask = mask.map(|mask| mask.chunks_exact(4));
+    for pixel in pixels.chunks_exact_mut(4) {
+        pixel.swap(0, 2);
+        let hidden = mask.as_mut().and_then(Iterator::next).is_some_and(|bits| bits[0] != 0);
+        if opaque {
+            // Transparent pixels keep no color, so scaling them in leaves no dark fringe.
+            if hidden {
+                pixel.fill(0);
+            } else {
                 pixel[3] = 255;
             }
         }
-        Image::new(width as u32, height as u32, pixels)
     }
 }
 
@@ -360,4 +378,31 @@ pub fn advances(
         let metrics = face.design_glyph_metrics(&[index], false).ok()?;
         (index != 0).then(|| metrics.first().map(|glyph| glyph.advanceWidth as f32 * scale))?
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::rgba;
+
+    #[test]
+    fn icons_without_alpha_honor_their_and_mask() {
+        // Two BGR pixels without alpha: the first masked out, the second shown.
+        let mut pixels = [10, 20, 30, 0, 40, 50, 60, 0];
+        let mask = [255, 255, 255, 0, 0, 0, 0, 0];
+        rgba(&mut pixels, Some(&mask));
+        assert_eq!(pixels, [0, 0, 0, 0, 60, 50, 40, 255]);
+
+        // Without a mask such pixels are opaque.
+        let mut pixels = [10, 20, 30, 0];
+        rgba(&mut pixels, None);
+        assert_eq!(pixels, [30, 20, 10, 255]);
+    }
+
+    #[test]
+    fn icons_with_alpha_ignore_their_and_mask() {
+        let mut pixels = [10, 20, 30, 128, 0, 0, 0, 0];
+        let mask = [255, 255, 255, 0, 255, 255, 255, 0];
+        rgba(&mut pixels, Some(&mask));
+        assert_eq!(pixels, [30, 20, 10, 128, 0, 0, 0, 0]);
+    }
 }
