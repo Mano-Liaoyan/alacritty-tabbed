@@ -706,7 +706,7 @@ pub fn window_event(
             }
             let tabs = &mut ctx.display.tabs;
             if tabs.drag.is_some() {
-                dnd::moved(ctx, &layout);
+                dnd::moved(ctx, &layout, config);
                 return None;
             }
             let moved = |g: &PhysicalPosition<f64>| (g.x - position.x).hypot(g.y - position.y) > 4.;
@@ -1447,7 +1447,6 @@ pub fn focus_pane(ctx: &mut WindowContext, tab: usize, pane: usize, config: &Rc<
 }
 
 /// Move the pane `from`, a tab and a pane index, to `target`, and focus it there.
-#[allow(dead_code)] // Until panes are dragged.
 pub fn move_pane(
     ctx: &mut WindowContext,
     (tab, pane): (usize, usize),
@@ -1469,7 +1468,6 @@ pub fn move_pane(
 
 /// Group the tab `from` with the tab `into`: its panes join the others beside them, keeping the
 /// focus.
-#[allow(dead_code)] // Until tabs are dragged onto each other.
 pub fn merge(ctx: &mut WindowContext, from: usize, into: usize, config: &Rc<UiConfig>) {
     select(ctx, from, config);
     let tabs = &mut ctx.display.tabs;
