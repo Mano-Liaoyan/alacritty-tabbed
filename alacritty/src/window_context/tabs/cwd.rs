@@ -163,9 +163,8 @@ mod wsl {
 
         /// Index after the value starting at word `index`, which may be quoted across words.
         fn value_end(&self, index: usize) -> usize {
-            let open = |word: &str| {
-                word.starts_with('"') && (word.len() == 1 || !word.ends_with('"'))
-            };
+            let open =
+                |word: &str| word.starts_with('"') && (word.len() == 1 || !word.ends_with('"'));
             match self.words.get(index) {
                 Some(word) if open(word) => {
                     let rest = self.words[index + 1..].iter().position(|word| word.ends_with('"'));
@@ -179,9 +178,9 @@ mod wsl {
         /// The distribution the command starts, unless it starts the default one.
         fn distribution(&self) -> Option<&str> {
             let end = self.command_start();
-            let option = self.words[..end].iter().position(|word| {
-                matches!(word.as_str(), "-d" | "--distribution")
-            })?;
+            let option = self.words[..end]
+                .iter()
+                .position(|word| matches!(word.as_str(), "-d" | "--distribution"))?;
             self.words.get(option + 1).map(|name| name.trim_matches('"'))
         }
 
@@ -411,9 +410,8 @@ mod marker {
     use std::io::{Read, Write};
     use std::os::windows::process::CommandExt;
     use std::process::{Command, Stdio};
-    use std::sync::Mutex;
     use std::sync::atomic::{AtomicU64, Ordering};
-    use std::sync::mpsc;
+    use std::sync::{Mutex, mpsc};
     use std::thread;
     use std::time::{Duration, Instant};
 
@@ -618,8 +616,8 @@ done
         #[test]
         fn the_foreground_program_or_else_the_shell_is_chosen() {
             // The shell 100 runs `vim` (120) in the foreground, and `sleep` (110) in the back.
-            let output = "100 99 120 5000 /home/me\n110 100 120 5100 /tmp\n\
-                          120 100 120 5200 /home/me/containers/a b\r\n";
+            let output = "100 99 120 5000 /home/me\n110 100 120 5100 /tmp\n120 100 120 5200 \
+                          /home/me/containers/a b\r\n";
             let processes = parse(output);
             assert_eq!(processes.len(), 3);
             assert_eq!(processes[2].directory, "/home/me/containers/a b");

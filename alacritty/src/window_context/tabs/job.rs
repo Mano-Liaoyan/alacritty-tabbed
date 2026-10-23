@@ -141,9 +141,9 @@ mod windows {
         let zero = FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
         let [mut created, mut exited, mut kernel, mut user] = [zero; 4];
         // SAFETY: `process` is valid and the times are written to.
-        let ok = unsafe {
-            GetProcessTimes(process, &mut created, &mut exited, &mut kernel, &mut user)
-        } != 0;
+        let ok =
+            unsafe { GetProcessTimes(process, &mut created, &mut exited, &mut kernel, &mut user) }
+                != 0;
         // SAFETY: the handle is no longer used.
         unsafe { CloseHandle(process) };
         ok.then(|| (u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime))

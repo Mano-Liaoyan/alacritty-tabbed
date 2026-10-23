@@ -109,7 +109,8 @@ pub fn before_draw(
         return;
     }
     let size = ctx.display.window.inner_size();
-    if let Some(event) = super::window_event(ctx, WindowEvent::Resized(size), config, proxy, clipboard)
+    if let Some(event) =
+        super::window_event(ctx, WindowEvent::Resized(size), config, proxy, clipboard)
     {
         let window_id = ctx.id();
         ctx.event_queue.push(WinitEvent::WindowEvent { window_id, event });
@@ -238,8 +239,10 @@ mod windows {
         let mut placement = placement(hwnd)?;
         let normal = rect(placement.rcNormalPosition);
 
-        let mut info =
-            MONITORINFO { cbSize: mem::size_of::<MONITORINFO>() as u32, ..unsafe { mem::zeroed() } };
+        let mut info = MONITORINFO {
+            cbSize: mem::size_of::<MONITORINFO>() as u32,
+            ..unsafe { mem::zeroed() }
+        };
         let monitor = unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) };
         if unsafe { GetMonitorInfoW(monitor, &mut info) } == 0 {
             return None;
@@ -247,7 +250,8 @@ mod windows {
 
         placement.flags = 0;
         placement.showCmd = SW_SHOWNORMAL as u32;
-        placement.rcNormalPosition = win_rect(in_workspace(rect(info.rcMonitor), rect(info.rcWork)));
+        placement.rcNormalPosition =
+            win_rect(in_workspace(rect(info.rcMonitor), rect(info.rcWork)));
         unsafe { SetWindowPlacement(hwnd, &placement) };
         Some(normal)
     }
