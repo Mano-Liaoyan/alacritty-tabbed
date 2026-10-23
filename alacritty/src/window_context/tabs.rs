@@ -1444,6 +1444,11 @@ pub fn focus_pane(ctx: &mut WindowContext, tab: usize, pane: usize, config: &Rc<
     ctx.display.pending_update.dirty = true;
     ctx.display.damage_tracker.frame().mark_fully_damaged();
     relayout(ctx);
+    // Input reads the terminal through the display's size before the queued resize reaches it.
+    if size != ctx.display.size_info {
+        ctx.display.size_info = size;
+        ctx.display.damage_tracker.resize(size.screen_lines(), size.columns());
+    }
 }
 
 /// Move the pane `from`, a tab and a pane index, to `target`, and focus it there.
