@@ -516,7 +516,8 @@ impl WindowContext {
                 // Only the live terminal has the focus, so the others show a hollow cursor.
                 let mut terminal = pane.terminal.lock();
                 terminal.is_focused = false;
-                self.display.draw_pane(terminal, pane.size, &pane.config, frame);
+                let font = self.config.font.clone().with_size(self.display.font_size);
+                self.display.draw_pane(terminal, pane.size, &pane.config, frame, &font);
             }
             let frame = framed(&size, rect, self.display.tabs.focused_clip(now));
             self.display.draw_terminal(

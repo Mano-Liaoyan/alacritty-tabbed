@@ -39,10 +39,23 @@ pub struct Glyph {
     pub uv_height: f32,
 }
 
+/// Fonts kept loaded at once before a font change clears the atlas, which bounds its growth.
+const MAX_FACES: usize = 8;
+
+/// The font keys and metrics of one [`Font`].
+#[derive(Copy, Clone, Debug)]
+struct Faces {
+    regular: FontKey,
+    bold: FontKey,
+    italic: FontKey,
+    bold_italic: FontKey,
+    metrics: Metrics,
+}
+
 /// Naïve glyph cache.
 ///
-/// Currently only keyed by `char`, and thus not possible to hold different
-/// representations of the same code point.
+/// Glyphs are keyed by face, size and `char`, so several fonts share the cache and its atlas;
+/// [`Self::select`] picks the one the next glyphs are drawn with.
 pub struct GlyphCache {
     /// Cache of buffered glyphs.
     cache: HashMap<GlyphKey, Glyph, RandomState>,
@@ -76,26 +89,75 @@ pub struct GlyphCache {
 
     /// Whether to use the built-in font for box drawing characters.
     builtin_box_drawing: bool,
+
+    /// Every font loaded since the atlas was last cleared; the selected one is at `active`.
+    faces: Vec<(Font, Faces)>,
+    active: usize,
 }
 
 impl GlyphCache {
     pub fn new(mut rasterizer: Rasterizer, font: &Font) -> Result<GlyphCache, crossfont::Error> {
-        let (regular, bold, italic, bold_italic) = Self::compute_font_keys(font, &mut rasterizer)?;
-
-        let metrics = GlyphCache::load_font_metrics(&mut rasterizer, font, regular)?;
+        let faces = Self::load_faces(&mut rasterizer, font)?;
         Ok(Self {
             cache: Default::default(),
             rasterizer,
             font_size: font.size(),
-            font_key: regular,
-            bold_key: bold,
-            italic_key: italic,
-            bold_italic_key: bold_italic,
+            font_key: faces.regular,
+            bold_key: faces.bold,
+            italic_key: faces.italic,
+            bold_italic_key: faces.bold_italic,
             font_offset: font.offset,
             glyph_offset: font.glyph_offset,
-            metrics,
+            metrics: faces.metrics,
             builtin_box_drawing: font.builtin_box_drawing,
+            faces: vec![(font.clone(), faces)],
+            active: 0,
         })
+    }
+
+    /// Load the font keys and metrics of `font`.
+    fn load_faces(rasterizer: &mut Rasterizer, font: &Font) -> Result<Faces, crossfont::Error> {
+        let (regular, bold, italic, bold_italic) = Self::compute_font_keys(font, rasterizer)?;
+        let metrics = Self::load_font_metrics(rasterizer, font, regular)?;
+        Ok(Faces { regular, bold, italic, bold_italic, metrics })
+    }
+
+    /// The font the next glyphs are drawn with.
+    pub fn font(&self) -> &Font {
+        &self.faces[self.active].0
+    }
+
+    /// Draw the next glyphs with `font`, loading it unless it was used before.
+    ///
+    /// The atlas is kept: glyphs of another size or face have their own keys. Fonts that differ
+    /// only in offsets or built-in box drawing share keys, see [`Self::update_font`].
+    pub fn select(&mut self, font: &Font) -> Result<(), crossfont::Error> {
+        if self.font() == font {
+            return Ok(());
+        }
+
+        let index = match faces_index(&self.faces, font) {
+            Some(index) => index,
+            None => {
+                let faces = Self::load_faces(&mut self.rasterizer, font)?;
+                self.faces.push((font.clone(), faces));
+                self.faces.len() - 1
+            },
+        };
+
+        let (font, faces) = &self.faces[index];
+        self.font_size = font.size();
+        self.font_key = faces.regular;
+        self.bold_key = faces.bold;
+        self.italic_key = faces.italic;
+        self.bold_italic_key = faces.bold_italic;
+        self.metrics = faces.metrics;
+        self.font_offset = font.offset;
+        self.glyph_offset = font.glyph_offset;
+        self.builtin_box_drawing = font.builtin_box_drawing;
+        self.active = index;
+
+        Ok(())
     }
 
     // Load font metrics and adjust for glyph offset.
@@ -272,36 +334,24 @@ impl GlyphCache {
     pub fn reset_glyph_cache<L: LoadGlyph>(&mut self, loader: &mut L) {
         loader.clear();
         self.cache = Default::default();
+        self.faces.swap(0, self.active);
+        self.faces.truncate(1);
+        self.active = 0;
 
         self.load_common_glyphs(loader);
     }
 
-    /// Update the inner font size.
+    /// Change the window's font.
     ///
-    /// NOTE: To reload the renderers's fonts [`Self::reset_glyph_cache`] should be called
-    /// afterwards.
-    pub fn update_font_size(&mut self, font: &Font) -> Result<(), crossfont::Error> {
-        // Update dpi scaling.
-        self.font_offset = font.offset;
-        self.glyph_offset = font.glyph_offset;
-
-        // Recompute font keys.
-        let (regular, bold, italic, bold_italic) =
-            Self::compute_font_keys(font, &mut self.rasterizer)?;
-
-        let metrics = GlyphCache::load_font_metrics(&mut self.rasterizer, font, regular)?;
+    /// Returns whether the cached glyphs must be dropped with [`Self::reset_glyph_cache`]: when
+    /// they were drawn with other offsets, or when too many fonts were loaded since the last reset.
+    pub fn update_font(&mut self, font: &Font) -> Result<bool, crossfont::Error> {
+        let clear = needs_clear(self.font(), font);
+        self.select(font)?;
 
         info!("Font size changed to {:?} px", font.size().as_px());
 
-        self.font_size = font.size();
-        self.font_key = regular;
-        self.bold_key = bold;
-        self.italic_key = italic;
-        self.bold_italic_key = bold_italic;
-        self.metrics = metrics;
-        self.builtin_box_drawing = font.builtin_box_drawing;
-
-        Ok(())
+        Ok(clear || self.faces.len() > MAX_FACES)
     }
 
     pub fn font_metrics(&self) -> crossfont::Metrics {
@@ -314,5 +364,58 @@ impl GlyphCache {
         self.load_glyphs_for_font(self.bold_key, loader);
         self.load_glyphs_for_font(self.italic_key, loader);
         self.load_glyphs_for_font(self.bold_italic_key, loader);
+    }
+}
+
+/// The index of `font` in `faces`.
+fn faces_index<T>(faces: &[(Font, T)], font: &Font) -> Option<usize> {
+    faces.iter().position(|(face, _)| face == font)
+}
+
+/// Whether glyphs cached for `old` would be wrong for `new` under the same keys.
+fn needs_clear(old: &Font, new: &Font) -> bool {
+    old.offset != new.offset
+        || old.glyph_offset != new.glyph_offset
+        || old.builtin_box_drawing != new.builtin_box_drawing
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn font(size: f32) -> Font {
+        Font::default().with_size(Size::new(size))
+    }
+
+    #[test]
+    fn faces_index_matches_whole_font() {
+        let faces = [(font(11.), ()), (font(14.), ())];
+        assert_eq!(faces_index(&faces, &font(14.)), Some(1));
+        assert_eq!(faces_index(&faces, &font(12.)), None);
+
+        let mut offset = font(11.);
+        offset.glyph_offset = Delta { x: 1, y: 0 };
+        assert_eq!(faces_index(&faces, &offset), None);
+    }
+
+    #[test]
+    fn needs_clear_only_for_baked_settings() {
+        assert!(!needs_clear(&font(11.), &font(11.)));
+        assert!(!needs_clear(&font(11.), &font(22.)));
+
+        let family: Font = toml::from_str("normal = { family = \"Other Mono\" }").unwrap();
+        assert!(!needs_clear(&Font::default(), &family));
+
+        let mut glyph_offset = font(11.);
+        glyph_offset.glyph_offset = Delta { x: 0, y: 2 };
+        assert!(needs_clear(&font(11.), &glyph_offset));
+
+        let mut offset = font(11.);
+        offset.offset = Delta { x: 1, y: 0 };
+        assert!(needs_clear(&font(11.), &offset));
+
+        let mut builtin = font(11.);
+        builtin.builtin_box_drawing = false;
+        assert!(needs_clear(&font(11.), &builtin));
     }
 }

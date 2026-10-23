@@ -15,7 +15,7 @@ use glutin::error::ErrorKind;
 use glutin::prelude::*;
 use glutin::surface::{Surface, SwapInterval, WindowSurface};
 
-use log::{debug, info};
+use log::{debug, info, warn};
 use parking_lot::MutexGuard;
 use serde::{Deserialize, Serialize};
 use winit::dpi::PhysicalSize;
@@ -633,22 +633,46 @@ impl Display {
         }
     }
 
-    /// Update font size and cell dimensions.
+    /// Update the window's font and cell dimensions.
     ///
     /// This will return a tuple of the cell width and height.
-    fn update_font_size(
-        glyph_cache: &mut GlyphCache,
-        config: &UiConfig,
-        font: &Font,
-    ) -> (f32, f32) {
-        let _ = glyph_cache.update_font_size(font);
+    fn update_font(&mut self, config: &UiConfig, font: &Font) -> (f32, f32) {
+        if self.glyph_cache.update_font(font).unwrap_or(false) {
+            self.pending_renderer_update.get_or_insert(Default::default()).clear_font_cache = true;
+        }
 
         // Compute new cell sizes.
-        compute_cell_size(config, &glyph_cache.font_metrics())
+        compute_cell_size(config, &self.glyph_cache.font_metrics())
+    }
+
+    /// Cell width and height of `font`, with the cell offsets of `config`.
+    #[allow(dead_code, reason = "fits panes in their own font once tabs use it")]
+    pub fn cell_size(&mut self, config: &UiConfig, font: &Font) -> (f32, f32) {
+        self.with_font(font, |display| {
+            compute_cell_size(config, &display.glyph_cache.font_metrics())
+        })
+    }
+
+    /// Run `f` with `font` selected in the glyph cache, then select the window's font again.
+    fn with_font<R>(&mut self, font: &Font, f: impl FnOnce(&mut Self) -> R) -> R {
+        let window = (self.glyph_cache.font() != font).then(|| self.glyph_cache.font().clone());
+        if let Err(err) = self.glyph_cache.select(font) {
+            warn!("Could not load font {:?}: {err}", font.normal().family);
+        }
+
+        let result = f(self);
+
+        // The window's font is still loaded, so selecting it cannot fail.
+        if let Some(window) = window {
+            let _ = self.glyph_cache.select(&window);
+        }
+
+        result
     }
 
     /// Reset glyph cache.
     fn reset_glyph_cache(&mut self) {
+        debug!("Clearing the glyph cache");
         let cache = &mut self.glyph_cache;
         self.renderer.with_loader(|mut api| {
             cache.reset_glyph_cache(&mut api);
@@ -675,14 +699,14 @@ impl Display {
         let (mut cell_width, mut cell_height) =
             (self.size_info.cell_width(), self.size_info.cell_height());
 
-        if pending_update.font().is_some() || pending_update.cursor_dirty() {
+        if pending_update.cursor_dirty() {
             let renderer_update = self.pending_renderer_update.get_or_insert(Default::default());
             renderer_update.clear_font_cache = true
         }
 
-        // Update font size and cell dimensions.
+        // Update font size and cell dimensions, keeping the glyphs of other sizes.
         if let Some(font) = pending_update.font() {
-            let cell_dimensions = Self::update_font_size(&mut self.glyph_cache, config, font);
+            let cell_dimensions = self.update_font(config, font);
             cell_width = cell_dimensions.0;
             cell_height = cell_dimensions.1;
 
@@ -1069,13 +1093,14 @@ impl Display {
 
     /// Draw a terminal other than the window's own, which is `size` large, into `frame`.
     ///
-    /// Only its cells, lines and cursor are drawn, in the colors of `config`.
+    /// Only its cells, lines and cursor are drawn, in the colors of `config` and with `font`.
     pub fn draw_pane<T: EventListener>(
         &mut self,
         terminal: MutexGuard<'_, Term<T>>,
         size: SizeInfo,
         config: &UiConfig,
         frame: Frame,
+        font: &Font,
     ) {
         // Draw as if the terminal were the window's own, without its hints or input method.
         let colors = List::from(&config.colors);
@@ -1101,12 +1126,14 @@ impl Display {
         self.renderer.set_frame(Some(frame));
         self.renderer.resize(&size);
         self.renderer.clear_rect(&frame, background, config.window_opacity());
-        self.renderer.draw_cells(&size, &mut self.glyph_cache, cells.into_iter());
+        self.with_font(font, |display| {
+            display.renderer.draw_cells(&size, &mut display.glyph_cache, cells.into_iter());
 
-        let metrics = self.glyph_cache.font_metrics();
-        let mut rects = lines.rects(&metrics, &size);
-        rects.extend(cursor.rects(&size, config.cursor.thickness()));
-        self.renderer.draw_rects(&size, &metrics, rects);
+            let metrics = display.glyph_cache.font_metrics();
+            let mut rects = lines.rects(&metrics, &size);
+            rects.extend(cursor.rects(&size, config.cursor.thickness()));
+            display.renderer.draw_rects(&size, &metrics, rects);
+        });
 
         (self.size_info, self.colors, self.hint_state, self.ime, self.cursor_hidden) = own;
         self.renderer.set_frame(None);
@@ -1130,7 +1157,8 @@ impl Display {
                 .clipped([clip.x, clip.y, clip.w, clip.h], height);
             let mut terminal = peek.terminal.lock();
             terminal.is_focused = false;
-            self.draw_pane(terminal, peek.size, &peek.config, frame);
+            let font = config.font.clone().with_size(self.font_size);
+            self.draw_pane(terminal, peek.size, &peek.config, frame, &font);
             self.tabs.draw_over(&mut self.renderer, &size_info, config);
         }
 
