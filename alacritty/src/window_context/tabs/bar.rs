@@ -604,16 +604,23 @@ impl Tabs {
                 let color = if danger { WHITE } else { palette.muted };
                 window_icon(layer, px(5.), color);
             },
-            // Round buttons, like GNOME's and KDE's.
+            // Round buttons, like GNOME's and KDE's, that only show their shape under the pointer.
             _ if control => {
                 let danger = hovered && hit == Hit::CloseWindow;
-                let background = match (danger, hovered) {
-                    (true, _) => palette.danger,
-                    (_, true) => mix(palette.chrome, palette.foreground, 0.2),
-                    _ => mix(palette.chrome, palette.foreground, 0.1),
+                if hovered {
+                    let background = if danger {
+                        palette.danger
+                    } else {
+                        mix(palette.chrome, palette.foreground, 0.16)
+                    };
+                    layout.dot(layer, center, px(CONTROL_DOT), background);
+                }
+                let color = match (danger, hovered) {
+                    (true, _) => WHITE,
+                    (_, true) => palette.foreground,
+                    _ => palette.muted,
                 };
-                layout.dot(layer, center, px(CONTROL_DOT), background);
-                window_icon(layer, px(4.), if danger { WHITE } else { palette.foreground });
+                window_icon(layer, px(4.), color);
             },
             _ => {
                 if hovered {

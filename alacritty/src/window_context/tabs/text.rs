@@ -59,6 +59,8 @@ const STRONG: [&str; 3] = ["SemiBold", "Semibold", "Medium"];
 pub type Text = (f32, f32, String, Rgb, bool);
 
 pub struct UiFont {
+    /// Family the font was loaded from, as people know it.
+    pub family: String,
     /// Height of a line of text.
     pub line: f32,
     /// Distance from the top of a line to its baseline.
@@ -130,6 +132,8 @@ impl UiFont {
             glyphs: HashMap::new(),
         };
         Ok(Self {
+            // macOS hides its interface font's real name.
+            family: if family.starts_with('.') { "San Francisco".into() } else { family.into() },
             line,
             ascent: (line + metrics.descent).round(),
             metrics,
