@@ -12,10 +12,30 @@
 //! is restored straight onto the monitor with `SetWindowPlacement`, and maximized again in one
 //! placement which also gives it back its own normal position, with the DWM's transitions
 //! disabled meanwhile, so either way is a single switch between the two sizes.
+//!
+//! A single switch still blinks if the window shows at its new size before it is drawn at it:
+//! winit hands the resize over only after the switch, and the frame at the new size follows a
+//! turn or more of the event loop later, while the DWM shows the window's old frame cut down or
+//! stretched over the new size, or its surface blank where adding or removing the frame rebuilt
+//! it. Leaving fullscreen, to a much smaller window, that is most of the screen. The switch is
+//! therefore made right before the window is next drawn, just after a composition of the DWM, and
+//! the resize it makes taken in at once, so the next composition shows the window at its new size
+//! already drawn at it. A window covering its monitor does not take the screen over from the
+//! DWM, which could also blink in and out of it: winit's client area of a window without
+//! decorations but with a shadow starts a pixel below the window's top, so never matches the
+//! monitor.
 
 use std::cell::Cell;
+use std::rc::Rc;
 
+use winit::event::{Event as WinitEvent, WindowEvent};
+use winit::event_loop::EventLoopProxy;
 use winit::window::Window;
+
+use crate::clipboard::Clipboard;
+use crate::config::UiConfig;
+use crate::event::Event;
+use crate::window_context::WindowContext;
 
 /// What the window was before it went fullscreen, for when it leaves.
 #[derive(Debug, Default)]
@@ -25,15 +45,38 @@ pub struct FullscreenState {
     /// Where the window restores to from maximized, put aside while fullscreen.
     #[cfg(windows)]
     normal: Cell<Option<Rect>>,
+    /// Whether the window is to be fullscreen, switched to right before it is next drawn.
+    #[cfg(windows)]
+    pending: Cell<Option<bool>>,
 }
 
 impl FullscreenState {
-    /// Enter or leave fullscreen, returning whether that is done, or is left to the caller.
+    /// Enter or leave fullscreen, returning whether that is done, or is left to the caller. On
+    /// Windows the switch is made right before the window is next drawn, which is asked for.
     pub fn set(&self, window: &Window, fullscreen: bool) -> bool {
         #[cfg(windows)]
-        windows::set(self, window, fullscreen);
+        if window.is_minimized() == Some(true) {
+            // A minimized window is not drawn, and shows nothing of the switch.
+            self.pending.set(None);
+            windows::set(self, window, fullscreen);
+        } else {
+            self.pending.set(pending(fullscreen, window.fullscreen().is_some()));
+            window.request_redraw();
+        }
         let _ = (window, fullscreen);
         cfg!(windows)
+    }
+
+    /// Make the switch asked for, right before drawing the window, returning whether it is made.
+    fn apply(&self, window: &Window) -> bool {
+        #[cfg(windows)]
+        if let Some(fullscreen) = self.pending.take() {
+            windows::flush();
+            windows::set(self, window, fullscreen);
+            return true;
+        }
+        let _ = window;
+        false
     }
 
     /// Keep a window's maximized state for when it leaves fullscreen, returning whether it is
@@ -51,6 +94,33 @@ impl FullscreenState {
     pub fn is_maximized(&self, window: &Window) -> bool {
         window.is_maximized() || self.maximized.get()
     }
+}
+
+/// Make a switch to or from fullscreen asked for of `ctx` right before it is drawn, and take in
+/// the resize that makes now, rather than after winit hands it over, for the frame drawn next to
+/// be at the window's new size.
+pub fn before_draw(
+    ctx: &mut WindowContext,
+    config: &Rc<UiConfig>,
+    proxy: &EventLoopProxy<Event>,
+    clipboard: &mut Clipboard,
+) {
+    if !ctx.display.window.fullscreen.apply(ctx.display.window.winit()) {
+        return;
+    }
+    let size = ctx.display.window.inner_size();
+    if let Some(event) = super::window_event(ctx, WindowEvent::Resized(size), config, proxy, clipboard)
+    {
+        let window_id = ctx.id();
+        ctx.event_queue.push(WinitEvent::WindowEvent { window_id, event });
+    }
+}
+
+/// The switch to make for a window to be `fullscreen`, which is fullscreen `now` or not: none
+/// when it already is as asked, which also takes back a switch asked for before.
+#[cfg(any(windows, test))]
+fn pending(fullscreen: bool, now: bool) -> Option<bool> {
+    (fullscreen != now).then_some(fullscreen)
 }
 
 /// What to do around entering or leaving fullscreen, for a window that keeps its maximized state
@@ -109,7 +179,9 @@ mod windows {
 
     use alacritty_tabbed_deps::windows_sys;
     use windows_sys::Win32::Foundation::{BOOL, HWND, RECT};
-    use windows_sys::Win32::Graphics::Dwm::{DWMWA_TRANSITIONS_FORCEDISABLED, DwmSetWindowAttribute};
+    use windows_sys::Win32::Graphics::Dwm::{
+        DWMWA_TRANSITIONS_FORCEDISABLED, DwmFlush, DwmSetWindowAttribute,
+    };
     use windows_sys::Win32::Graphics::Gdi::{
         GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow,
     };
@@ -146,6 +218,11 @@ mod windows {
         if steps.maximize {
             window.set_maximized(true);
         }
+    }
+
+    /// Wait for the DWM's next composition, for what follows to be done by the one after.
+    pub fn flush() {
+        unsafe { DwmFlush() };
     }
 
     /// The window's handle.
@@ -232,6 +309,14 @@ mod windows {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn switch_only_to_what_the_window_is_not() {
+        assert_eq!(pending(true, false), Some(true));
+        assert_eq!(pending(false, true), Some(false));
+        assert_eq!(pending(true, true), None);
+        assert_eq!(pending(false, false), None);
+    }
 
     #[test]
     fn fullscreen_from_maximized_restores_first_and_maximizes_after() {
