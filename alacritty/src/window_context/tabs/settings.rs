@@ -14,7 +14,7 @@ use winit::keyboard::{Key, ModifiersState, NamedKey};
 use alacritty_terminal::index::{Column, Point};
 
 use crate::config::UiConfig;
-use crate::config::window::Corners;
+use crate::config::window::{Corners, MAX_PANE_GAP};
 use crate::display::SizeInfo;
 use crate::display::color::Rgb;
 use crate::display::window::Window;
@@ -27,6 +27,10 @@ use super::profiles::{self, Profile, Profiles};
 use super::text::UiFont;
 use super::{icons, platform};
 
+mod picker;
+
+use picker::{ColorPicker, Part, SWATCHES, parse_hex};
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Field {
     Name,
@@ -38,10 +42,11 @@ enum Field {
     Options,
     UiFont,
     UiFontSize,
+    PaneHighlight,
 }
 
 /// Number of fields, of the profiles and of the application.
-const FIELD_COUNT: usize = 9;
+const FIELD_COUNT: usize = 10;
 
 /// Fields of a profile.
 const FIELDS: [Field; 7] = [
@@ -55,7 +60,7 @@ const FIELDS: [Field; 7] = [
 ];
 
 /// Fields of the application's appearance.
-const APP_SETTING_FIELDS: [Field; 2] = [Field::UiFont, Field::UiFontSize];
+const APP_SETTING_FIELDS: [Field; 3] = [Field::UiFont, Field::UiFontSize, Field::PaneHighlight];
 
 /// Smallest and largest size of the interface's font, in points.
 const UI_FONT_SIZES: (f32, f32) = (4., 72.);
@@ -93,6 +98,7 @@ impl Field {
             "Configuration overrides",
             "Interface font",
             "Font size",
+            "Focus highlight",
         ][self.index()]
     }
 
@@ -107,6 +113,7 @@ impl Field {
             "e.g. font.size=14",
             "Of the tab bar, menus and settings",
             "In points",
+            "Border of the focused pane",
         ][self.index()]
     }
 }
@@ -130,6 +137,11 @@ enum Target {
     Step(bool),
     /// Slider of the background's opacity.
     Opacity,
+    /// Slider of the space between panes.
+    Gap,
+    /// Well of the focused pane's highlight, which opens the color picker.
+    Well,
+    Picker(Part),
     /// Switch of the terminal's panel, or of the tabs' track.
     Backdrop(Backdrop),
     Row(usize),
@@ -336,6 +348,8 @@ struct Panel {
     font_list: Option<(Rect, Rect, f32)>,
     /// The logo picker, its cells' area, the size of a cell and the cells in a row.
     logos: Option<(Rect, Rect, f32, usize)>,
+    /// The color picker, dropped from its well.
+    picker: Option<picker::Parts>,
 }
 
 /// The appearance page: settings in a group of rows, each named at the left with its control at
@@ -343,24 +357,32 @@ struct Panel {
 struct AppearancePanel {
     heading: Rect,
     group: Rect,
-    /// Rows for the corners, the font, its size, the opacity, the panel and the tabs' track.
-    rows: [Rect; 6],
+    /// Rows for the corners, the font, its size, the opacity, the panel, the gap between panes,
+    /// the focused pane's highlight and the tabs' track.
+    rows: [Rect; 8],
     corner_choice: Rect,
     /// The buttons that end the font size's field.
     stepper: Rect,
-    slider: Rect,
+    /// Sliders of the opacity and of the gap between panes.
+    sliders: [Rect; 2],
     /// Switches of the panel and the tabs' track.
     switches: [Rect; 2],
+    /// Well showing the focused pane's highlight.
+    well: Rect,
 }
 
 impl AppearancePanel {
+    /// Row of the gap between panes, which only the panel has.
+    const GAP_ROW: usize = 5;
     /// Names and descriptions of the rows.
-    const ROWS: [(&'static str, &'static str); 6] = [
+    const ROWS: [(&'static str, &'static str); 8] = [
         ("Corners", "Window, panels, tabs and buttons"),
         ("Interface font", "Tab bar, menus and settings"),
         ("Font size", "Interface text, in points"),
         ("Background opacity", "Behind the terminal's text"),
         ("Terminal panel", "Set in from the window's edges"),
+        ("Pane gap", "Space between a tab's panes"),
+        ("Focus highlight", "Border of the focused pane"),
         ("Tab track", "Behind the tabs"),
     ];
 
@@ -369,10 +391,10 @@ impl AppearancePanel {
         layout.px(9.)
     }
 
-    /// Where the slider's knob can go, from transparent to opaque.
-    fn track(&self, layout: &Layout) -> (f32, f32) {
+    /// Where the knob of `slider` can go, from its least to its most.
+    fn track(slider: Rect, layout: &Layout) -> (f32, f32) {
         let knob = Self::knob(layout);
-        (self.slider.x + knob, (self.slider.w - 2. * knob).max(1.))
+        (slider.x + knob, (slider.w - 2. * knob).max(1.))
     }
 }
 
@@ -385,6 +407,8 @@ impl Target {
                 | Target::Corners(_)
                 | Target::Step(_)
                 | Target::Opacity
+                | Target::Gap
+                | Target::Well
                 | Target::Backdrop(_)
                 | Target::Field(_)
                 | Target::Browse(_)
@@ -401,14 +425,17 @@ pub struct Settings {
     /// The application's settings as last saved.
     saved_app_settings: AppSettings,
     /// The application's settings as edited: the text of their fields, the corners, the opacity,
-    /// the panel and the tabs' track.
-    app_setting_texts: [String; 2],
+    /// the panel, the tabs' track and the gap between panes.
+    app_setting_texts: [String; 3],
     edited_corners: Corners,
     edited_opacity: f32,
     edited_panel: bool,
     edited_tab_track: bool,
-    /// Whether the opacity's knob is being dragged.
-    sliding: bool,
+    edited_gap: u8,
+    /// Slider whose knob is being dragged.
+    sliding: Option<Target>,
+    /// The color picker of the focused pane's highlight, while it is open.
+    picker: Option<ColorPicker>,
     /// The configuration file just saved, to reload.
     reload: Option<PathBuf>,
     entries: Vec<Entry>,
@@ -452,12 +479,18 @@ impl Settings {
         let saved = AppSettings::new(config);
         Self {
             page,
-            app_setting_texts: [saved.family.clone(), app_settings::format(saved.size)],
+            app_setting_texts: [
+                saved.family.clone(),
+                app_settings::format(saved.size),
+                saved.pane_highlight.map(|color| color.to_string()).unwrap_or_default(),
+            ],
             edited_corners: saved.corners,
             edited_opacity: saved.opacity,
             edited_panel: saved.panel,
             edited_tab_track: saved.tab_track,
-            sliding: false,
+            edited_gap: saved.pane_gap,
+            sliding: None,
+            picker: None,
             saved_app_settings: saved,
             reload: None,
             default: profiles.list.iter().position(|profile| profile.name == profiles.default),
@@ -592,8 +625,8 @@ impl Settings {
         let place_appearance = |top: f32| {
             let heading = Rect::new(x0, top + px(24.), width, 2. * ch);
             let row = px(56.).max(2. * ch + px(16.));
-            let group = Rect::new(x0, heading.bottom() + px(20.), width, 6. * row);
-            let rows = [0., 1., 2., 3., 4., 5.]
+            let group = Rect::new(x0, heading.bottom() + px(20.), width, 8. * row);
+            let rows = [0., 1., 2., 3., 4., 5., 6., 7.]
                 .map(|i| Rect::new(group.x, group.y + i * row, group.w, row));
             let mut fields = [Rect::default(); FIELD_COUNT];
 
@@ -612,13 +645,29 @@ impl Settings {
             let size_width = px(64.).max(font.width("72.5", false) + px(24.));
             fields[Field::UiFontSize.index()] =
                 Rect { x: stepper.x - size_width, w: size_width, ..stepper };
-            let value = font.width("100%", false).ceil();
-            let slider = control_at(rows[3], px(200.) + px(12.) + value);
-            let slider = Rect { w: (slider.w - px(12.) - value).max(px(40.)), ..slider };
-            let switches = [control_at(rows[4], px(40.)), control_at(rows[5], px(40.))];
+            let value = font.width("100%", false).max(font.width("48 px", false)).ceil();
+            let sliders = [rows[3], rows[AppearancePanel::GAP_ROW]].map(|row| {
+                let slider = control_at(row, px(200.) + px(12.) + value);
+                Rect { w: (slider.w - px(12.) - value).max(px(40.)), ..slider }
+            });
+            let switches = [control_at(rows[4], px(40.)), control_at(rows[7], px(40.))];
+            // The highlight's well, beside its hex field.
+            let hex = px(96.).max(font.width("#bbbbbb", false) + px(24.));
+            let highlight = control_at(rows[6], px(24.) + px(8.) + hex);
+            fields[Field::PaneHighlight.index()] =
+                Rect { x: highlight.right() - hex, w: hex, ..highlight };
+            let well = Rect::new(highlight.x, highlight.center().1 - px(12.), px(24.), px(24.));
 
-            let panel =
-                AppearancePanel { heading, group, rows, corner_choice, stepper, slider, switches };
+            let panel = AppearancePanel {
+                heading,
+                group,
+                rows,
+                corner_choice,
+                stepper,
+                sliders,
+                switches,
+                well,
+            };
             (panel, fields, group.bottom() + px(24.) - top)
         };
 
@@ -651,9 +700,11 @@ impl Settings {
                         h: stepper.h - upper,
                         ..stepper
                     }),
-                    (Target::Opacity, page.slider),
+                    (Target::Opacity, page.sliders[0]),
+                    (Target::Gap, page.sliders[1]),
                     (Target::Backdrop(Backdrop::Panel), page.switches[0]),
                     (Target::Backdrop(Backdrop::TabTrack), page.switches[1]),
+                    (Target::Well, page.well),
                 ]);
                 appearance = Some(page);
             },
@@ -736,6 +787,22 @@ impl Settings {
             (picker, cells, cell, columns)
         });
 
+        // The color picker drops from its well, or rises above it when there is no room below,
+        // ending where the hex field does, kept inside the scrolling fields.
+        let picker = appearance.as_ref().filter(|_| self.picker.is_some()).map(|page| {
+            let size = ColorPicker::layout((0., 0.), layout.scale).popover;
+            let field = fields[Field::PaneHighlight.index()];
+            let x = (field.right() - size.w).max(dialog.x + px(8.));
+            let below = page.well.bottom() + px(6.);
+            let y = if below + size.h <= viewport.bottom() {
+                below
+            } else {
+                page.well.y - px(6.) - size.h
+            };
+            let y = y.min(viewport.bottom() - size.h).max(viewport.y);
+            ColorPicker::layout((x, y), layout.scale)
+        });
+
         Panel {
             dialog,
             close: buttons[0].1,
@@ -756,10 +823,14 @@ impl Settings {
             status,
             font_list,
             logos,
+            picker,
         }
     }
 
     fn target(&self, panel: &Panel, point: PhysicalPosition<f64>) -> Option<Target> {
+        if let Some(parts) = panel.picker.filter(|parts| parts.popover.contains(point)) {
+            return ColorPicker::part_at(&parts, point).map(Target::Picker);
+        }
         if let (Some(picker), Some((rect, cells, cell, columns))) = (&self.logos, panel.logos) {
             if rect.contains(point) {
                 let column = ((point.x as f32 - cells.x) / cell) as usize;
@@ -801,6 +872,7 @@ impl Settings {
         match target {
             Target::Reset => !self.entries[self.selected].text[Field::Icon.index()].is_empty(),
             Target::Delete => self.entries.len() > 1,
+            Target::Gap => self.edited_panel,
             _ => true,
         }
     }
@@ -961,6 +1033,7 @@ impl Settings {
         self.focus = None;
         self.logos = None;
         self.font_list = None;
+        self.picker = None;
     }
 
     /// Make the interface's font a point larger, or smaller, from the size typed.
@@ -985,14 +1058,49 @@ impl Settings {
         }
     }
 
-    /// Set the opacity to where the pointer is along the slider.
+    /// Set the gap between panes to an even number of pixels.
+    fn set_gap(&mut self, gap: f32) {
+        let gap = ((gap.clamp(0., f32::from(MAX_PANE_GAP)) / 2.).round() * 2.) as u8;
+        if gap != self.edited_gap {
+            self.edited_gap = gap;
+            self.touched();
+        }
+    }
+
+    /// Set the value of the slider being dragged to where the pointer is along it.
     fn slide(&mut self, panel: &Panel, layout: &Layout) {
         let Some(appearance) = &panel.appearance else { return };
-        let (start, length) = appearance.track(layout);
-        self.set_opacity((self.pointer.x as f32 - start) / length);
+        let gap = self.sliding == Some(Target::Gap);
+        let (start, length) = AppearancePanel::track(appearance.sliders[gap as usize], layout);
+        let fraction = (self.pointer.x as f32 - start) / length;
+        match gap {
+            true => self.set_gap(fraction * f32::from(MAX_PANE_GAP)),
+            false => self.set_opacity(fraction),
+        }
+    }
+
+    /// The focused pane's highlight as typed, or none for the automatic one.
+    fn highlight(&self) -> Option<Rgb> {
+        parse_hex(self.text(Field::PaneHighlight))
+    }
+
+    /// Set the focused pane's highlight, or none for the automatic one, as the picker chose it.
+    fn set_highlight(&mut self, color: Option<Rgb>) {
+        let text = color.map(|color| color.to_string()).unwrap_or_default();
+        if self.focus == Some(Field::PaneHighlight) {
+            self.caret = text.len();
+        }
+        if text != self.text(Field::PaneHighlight) {
+            *self.text_mut(Field::PaneHighlight) = text;
+            self.touched();
+        }
     }
 
     fn focus(&mut self, field: Field) {
+        // Only the hex field types alongside the color picker.
+        if field != Field::PaneHighlight {
+            self.picker = None;
+        }
         self.focus = Some(field);
         self.caret = self.text(field).len();
         self.preedit.clear();
@@ -1005,9 +1113,15 @@ impl Settings {
     pub fn moved(&mut self, layout: &Layout, point: PhysicalPosition<f64>) -> bool {
         self.pointer = point;
         let panel = self.panel(layout);
-        if self.sliding {
+        if self.sliding.is_some() {
             self.slide(&panel, layout);
             return true;
+        }
+        if let (Some(picker), Some(parts)) = (&mut self.picker, panel.picker) {
+            if let Some(color) = picker.drag(&parts, point) {
+                self.set_highlight(Some(color));
+                return true;
+            }
         }
         if let Some(drag) = &mut self.drag {
             let y = point.y as f32;
@@ -1056,9 +1170,21 @@ impl Settings {
         if button != MouseButton::Left || !panel.dialog.contains(point) {
             return false;
         }
+        if let (Some(picker), Some(parts)) = (&mut self.picker, panel.picker) {
+            if parts.popover.contains(point) {
+                if let Some(color) = picker.press(&parts, point) {
+                    self.set_highlight(color);
+                }
+                return false;
+            }
+        }
         let target = self.target(&panel, point);
         if !matches!(target, Some(Target::Logo(_) | Target::Tile)) {
             self.logos = None;
+        }
+        // A click elsewhere closes the color picker, but for typing its color.
+        if !matches!(target, Some(Target::Well | Target::Field(Field::PaneHighlight))) {
+            self.picker = None;
         }
         let Some(target) = target else {
             self.focus = None;
@@ -1097,10 +1223,27 @@ impl Settings {
                 self.edited_tab_track ^= true;
                 self.touched();
             },
-            Target::Opacity => {
-                self.sliding = true;
+            Target::Opacity | Target::Gap => {
+                self.sliding = Some(target);
                 self.slide(&panel, layout);
             },
+            Target::Well if self.picker.is_some() => self.picker = None,
+            Target::Well => {
+                let colors = &config.colors;
+                let swatches: [Rgb; SWATCHES] = [
+                    colors.normal.blue,
+                    colors.normal.cyan,
+                    colors.normal.green,
+                    colors.normal.yellow,
+                    colors.normal.red,
+                    colors.normal.magenta,
+                    colors.bright.blue,
+                    colors.primary.foreground,
+                ];
+                self.picker = Some(ColorPicker::new(self.highlight(), swatches));
+                self.focus = None;
+            },
+            Target::Picker(_) => (),
             Target::Row(index) => {
                 self.select(index, layout);
                 let rect =
@@ -1178,11 +1321,18 @@ impl Settings {
 
     pub fn release(&mut self) {
         self.drag = None;
-        self.sliding = false;
+        self.sliding = None;
+        if let Some(picker) = &mut self.picker {
+            picker.release();
+        }
     }
 
     pub fn scroll(&mut self, layout: &Layout, down: bool) {
         let (panel, count) = (self.panel(layout), self.candidates().len());
+        // The color picker covers what lies under it.
+        if panel.picker.is_some_and(|parts| parts.popover.contains(self.pointer)) {
+            return;
+        }
 
         // The wheel turns the font's size and the opacity under the pointer.
         let over = |rect: Rect| rect.contains(self.pointer);
@@ -1191,8 +1341,11 @@ impl Settings {
             if self.font_list().is_none() && (over(size) || over(appearance.stepper)) {
                 return self.step_font_size(!down);
             }
-            if over(appearance.slider) {
+            if over(appearance.sliders[0]) {
                 return self.set_opacity(self.edited_opacity + if down { -0.01 } else { 0.01 });
+            }
+            if over(appearance.sliders[1]) && self.enabled(Target::Gap) {
+                return self.set_gap(f32::from(self.edited_gap) + if down { -2. } else { 2. });
             }
         }
         if let (Some(picker), Some((rect, cells, cell, columns))) = (&mut self.logos, panel.logos) {
@@ -1343,6 +1496,12 @@ impl Settings {
         if self.font_field().is_some() {
             self.filter_fonts();
         }
+        // The picker shows the highlight typed, once it is a color.
+        let text = self.text(Field::PaneHighlight).trim();
+        let typed = if text.is_empty() { Some(None) } else { parse_hex(text).map(Some) };
+        if let (Some(picker), Some(color)) = (&mut self.picker, typed) {
+            picker.set(color);
+        }
     }
 
     pub fn preedit(&mut self, text: String) {
@@ -1359,7 +1518,10 @@ impl Settings {
         layout: &Layout,
     ) -> bool {
         let command = modifiers.control_key() || modifiers.super_key();
-        if self.logo_key(event, layout) || self.font_key(event, layout) {
+        if self.picker_key(event, modifiers)
+            || self.logo_key(event, layout)
+            || self.font_key(event, layout)
+        {
             return false;
         }
         match event.logical_key.as_ref() {
@@ -1428,6 +1590,21 @@ impl Settings {
             },
         }
         false
+    }
+
+    /// Handle a key for the color picker, returning whether it was used.
+    fn picker_key(&mut self, event: &KeyEvent, modifiers: ModifiersState) -> bool {
+        let Some(picker) = &mut self.picker else { return false };
+        match event.logical_key.as_ref() {
+            Key::Named(NamedKey::Escape | NamedKey::Enter) => self.picker = None,
+            // The arrows move through the square while no field has the caret.
+            Key::Named(key) if self.focus.is_none() => {
+                let Some(color) = picker.key(key, modifiers.shift_key()) else { return false };
+                self.set_highlight(Some(color));
+            },
+            _ => return false,
+        }
+        true
     }
 
     /// Handle a key for the logo picker, returning whether it was used.
@@ -1512,6 +1689,11 @@ impl Settings {
             opacity: self.edited_opacity,
             panel: self.edited_panel,
             tab_track: self.edited_tab_track,
+            pane_gap: self.edited_gap,
+            pane_highlight: match self.text(Field::PaneHighlight).trim() {
+                "" => None,
+                text => Some(parse_hex(text).ok_or("Focus highlight: write a color as #RRGGBB")?),
+            },
         })
     }
 
@@ -1913,7 +2095,20 @@ impl Settings {
                     layer.icon(rect.center(), px(3.5), px(1.3).max(1.), &chevron, color);
                     continue;
                 },
-                Target::Opacity => continue,
+                Target::Opacity | Target::Gap => continue,
+                // A well of the highlight, framed like a field.
+                Target::Well => {
+                    let color = match &self.picker {
+                        Some(picker) => picker.rgb(),
+                        None => self.highlight().unwrap_or(palette.primary),
+                    };
+                    let open = self.picker.is_some();
+                    let outline =
+                        if open || hovered { palette.focus } else { palette.field_outline };
+                    layer.outlined(rect, layout.radius(7.), palette.field, outline, line);
+                    layer.rounded(rect.inset(px(3.)), layout.radius(4.), color);
+                    continue;
+                },
                 Target::Save => ("Save", palette.muted, true),
                 // Deleting is a link in dark red, starting where the fields do, underlined under
                 // the pointer.
@@ -2144,6 +2339,13 @@ impl Settings {
                 popup.rounded(Rect::new(track.x, y, track.w, h), layout.radius(1.5), palette.muted);
             }
         }
+        if let (Some(picker), Some(parts)) = (&self.picker, panel.picker) {
+            let hovered = match self.hover {
+                Some(Target::Picker(part)) => Some(part),
+                _ => None,
+            };
+            picker.draw(&mut popup, &parts, palette, layout, hovered);
+        }
         popup.clip(panel.dialog, ch);
         vec![layer, content, popup]
     }
@@ -2159,6 +2361,7 @@ impl Settings {
                 Some(format!("System · {}", layout.font.family))
             },
             Field::UiFont => Some("System".into()),
+            Field::PaneHighlight => Some("Auto".into()),
             _ => None,
         }
     }
@@ -2188,10 +2391,13 @@ impl Settings {
             page.corner_choice.x,
             panel.fields[Field::UiFont.index()].x,
             panel.fields[Field::UiFontSize.index()].x,
-            page.slider.x,
+            page.sliders[0].x,
             page.switches[0].x,
+            page.sliders[1].x,
+            page.well.x,
             page.switches[1].x,
         ];
+        let gap = self.enabled(Target::Gap);
         for (index, (row, (name, description))) in
             page.rows.iter().zip(AppearancePanel::ROWS).enumerate()
         {
@@ -2199,34 +2405,47 @@ impl Settings {
                 let rule = Rect::new(row.x + px(16.), row.y, row.w - px(16.), line);
                 layer.rect(rule, palette.field_outline);
             }
+            // The gap between panes is dimmed while there is no panel to set them in.
+            let (name_color, description_color) = match index == AppearancePanel::GAP_ROW && !gap {
+                true => (palette.muted, mix(palette.muted, group, 0.4)),
+                false => (palette.foreground, palette.muted),
+            };
             let (x, middle) = (row.x + px(16.), row.center().1);
             let room = (controls[index] - px(16.) - x).max(0.);
-            layer.text(x, middle - ch, font.fit(name, room, false), palette.foreground, false);
-            layer.text(x, middle, font.fit(description, room, false), palette.muted, false);
+            layer.text(x, middle - ch, font.fit(name, room, false), name_color, false);
+            layer.text(x, middle, font.fit(description, room, false), description_color, false);
         }
 
         // The choice of corners, on a track like the tabs'.
         let radius = layout.radius(10.);
         layer.outlined(page.corner_choice, radius, palette.track, palette.track_outline, line);
 
-        // The opacity: a track filled up to its knob, and the percentage beside it.
-        let (start, length) = page.track(layout);
-        let (thickness, y) = (px(4.), page.slider.center().1);
-        let track = Rect::new(start, (y - thickness / 2.).round(), length, thickness);
-        layer.rounded(
-            track,
-            layout.curve(thickness / 2.),
-            mix(palette.field, palette.foreground, 0.15),
-        );
-        let knob = start + length * self.edited_opacity;
-        let filled = Rect { w: knob - start, ..track };
-        layer.rounded(filled, layout.curve(thickness / 2.), palette.primary);
-        let size = AppearancePanel::knob(layout);
-        layout.dot(layer, (knob, y), size, palette.raised_outline);
-        layout.dot(layer, (knob, y), size - line, palette.foreground);
-        let percent = format!("{}%", (self.edited_opacity * 100.).round());
-        let x = page.slider.right() + px(12.);
-        layer.text(x, y - ch / 2., percent, palette.foreground, false);
+        // The opacity and the gap: a track filled up to its knob, and the value beside it.
+        let opacity = format!("{}%", (self.edited_opacity * 100.).round());
+        let pixels = format!("{} px", self.edited_gap);
+        let gap_fraction = f32::from(self.edited_gap) / f32::from(MAX_PANE_GAP);
+        for (slider, fraction, value, enabled) in [
+            (page.sliders[0], self.edited_opacity, opacity, true),
+            (page.sliders[1], gap_fraction, pixels, gap),
+        ] {
+            let (start, length) = AppearancePanel::track(slider, layout);
+            let (thickness, y) = (px(4.), slider.center().1);
+            let track = Rect::new(start, (y - thickness / 2.).round(), length, thickness);
+            let empty = mix(palette.field, palette.foreground, 0.15);
+            layer.rounded(track, layout.curve(thickness / 2.), empty);
+            let knob = start + length * fraction;
+            let filled = Rect { w: knob - start, ..track };
+            let fill = if enabled { palette.primary } else { mix(empty, palette.foreground, 0.15) };
+            layer.rounded(filled, layout.curve(thickness / 2.), fill);
+            let size = AppearancePanel::knob(layout);
+            let (face, text) = match enabled {
+                true => (palette.foreground, palette.foreground),
+                false => (palette.muted, palette.muted),
+            };
+            layout.dot(layer, (knob, y), size, palette.raised_outline);
+            layout.dot(layer, (knob, y), size - line, face);
+            layer.text(slider.right() + px(12.), y - ch / 2., value, text, false);
+        }
     }
 
     /// Draw a profile's icon, or a badge with text.
