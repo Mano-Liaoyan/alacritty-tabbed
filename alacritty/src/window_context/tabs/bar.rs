@@ -460,7 +460,7 @@ impl Tabs {
 
         let mut layers = vec![base, top];
         if let Some(settings) = &self.settings {
-            layers.push(settings.draw(&layout, &palette, config, window));
+            layers.extend(settings.draw(&layout, &palette, config, window));
         }
 
         // Draw over the whole window, then give the terminal its own viewport back.

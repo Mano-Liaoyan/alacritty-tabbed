@@ -1,7 +1,7 @@
 //! Profile settings, drawn as a dialog over the window.
 
 use std::path::Path;
-use std::sync::mpsc::{Receiver, channel};
+use std::sync::mpsc::{Receiver, TryRecvError, channel};
 
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use winit::dpi::PhysicalPosition;
@@ -16,6 +16,7 @@ use crate::display::color::Rgb;
 use crate::display::window::Window;
 
 use super::bar::Layout;
+use super::fonts::{self, Family};
 use super::paint::{BLACK, Layer, Palette, Rect, fit, mix};
 use super::profiles::{self, Profile, Profiles};
 use super::{icons, platform};
@@ -26,12 +27,23 @@ enum Field {
     Command,
     Directory,
     Icon,
+    Font,
     Env,
     Options,
 }
 
-const FIELDS: [Field; 6] =
-    [Field::Name, Field::Command, Field::Directory, Field::Icon, Field::Env, Field::Options];
+const FIELDS: [Field; 7] = [
+    Field::Name,
+    Field::Command,
+    Field::Directory,
+    Field::Icon,
+    Field::Font,
+    Field::Env,
+    Field::Options,
+];
+
+/// Most rows the font list shows at once.
+const FONT_ROWS: usize = 8;
 
 impl Field {
     fn index(self) -> usize {
@@ -48,6 +60,7 @@ impl Field {
             "Command line",
             "Starting directory",
             "Icon",
+            "Font",
             "Environment variables",
             "Configuration overrides",
         ][self.index()]
@@ -59,6 +72,7 @@ impl Field {
             "Empty uses the shell from alacritty.toml",
             "Empty starts in your home folder",
             "Empty uses the program's own icon",
+            "Empty uses the font from alacritty.toml",
             "KEY=value, one per line",
             "e.g. font.size=14",
         ][self.index()]
@@ -75,6 +89,9 @@ enum Target {
     Field(Field),
     Browse(Field),
     Reset,
+    AllFonts,
+    /// Row of the font list.
+    Font(usize),
     ToggleDefault,
     ToggleShown,
     Delete,
@@ -85,7 +102,7 @@ enum Target {
 /// A profile being edited, kept as the text the user typed until it is saved.
 #[derive(Clone)]
 struct Entry {
-    text: [String; 6],
+    text: [String; 7],
     hidden: bool,
 }
 
@@ -97,6 +114,7 @@ impl Entry {
             profile.command.clone(),
             profile.directory.clone(),
             profile.icon.clone(),
+            profile.font.clone(),
             env.collect::<Vec<_>>().join("\n"),
             profile.options.join("\n"),
         ];
@@ -116,6 +134,7 @@ impl Entry {
             command: text(Field::Command),
             directory: text(Field::Directory),
             icon: text(Field::Icon),
+            font: text(Field::Font),
             env: env.map(|(key, value)| (key.trim().into(), value.into())).collect(),
             options: self.lines(Field::Options).map(str::to_owned).collect(),
             hidden: self.hidden,
@@ -180,6 +199,16 @@ struct Drag {
     moving: bool,
 }
 
+/// The list of fonts dropped from the font field.
+struct FontList {
+    /// Row chosen with the keyboard.
+    highlighted: Option<usize>,
+    /// First row shown.
+    first: usize,
+    /// Whether the field's text filters the fonts, once it has been typed.
+    filter: bool,
+}
+
 /// Geometry of the dialog in window pixels.
 struct Panel {
     dialog: Rect,
@@ -190,10 +219,12 @@ struct Panel {
     duplicate: Rect,
     card: Rect,
     tile: Rect,
-    fields: [Rect; 6],
-    labels: [Rect; 6],
+    fields: [Rect; 7],
+    labels: [Rect; 7],
     buttons: Vec<(Target, Rect)>,
     status: Rect,
+    /// The font list, its rows' area and the height of a row.
+    font_list: Option<(Rect, Rect, f32)>,
 }
 
 pub struct Settings {
@@ -212,10 +243,17 @@ pub struct Settings {
     status: Option<(String, bool)>,
     /// File picker being shown for a field.
     picking: Option<(Field, Receiver<Option<String>>)>,
+    /// Installed font families, and their listing until it is done.
+    fonts: Vec<Family>,
+    listing: Option<Receiver<Vec<Family>>>,
+    /// Offer every font, not only monospaced ones.
+    all_fonts: bool,
+    font_list: Option<FontList>,
+    pointer: PhysicalPosition<f64>,
 }
 
 impl Settings {
-    pub fn new(config: &UiConfig) -> Self {
+    pub fn new(config: &UiConfig, wake: impl Fn() + Send + 'static) -> Self {
         let profiles = Profiles::load(config);
         let mut entries: Vec<_> = profiles.list.iter().map(Entry::new).collect();
         if entries.is_empty() {
@@ -235,6 +273,11 @@ impl Settings {
             confirm_close: false,
             status: None,
             picking: None,
+            fonts: Vec::new(),
+            listing: Some(fonts::list(wake)),
+            all_fonts: false,
+            font_list: None,
+            pointer: PhysicalPosition::default(),
         }
     }
 
@@ -242,7 +285,7 @@ impl Settings {
         let px = |value: f32| layout.px(value);
         let (window, bar) = (layout.width, layout.bar);
         let height = layout.height;
-        let (w, h) = (px(920.).min(window - px(24.)), px(660.).min(height - bar - px(12.)));
+        let (w, h) = (px(920.).min(window - px(24.)), px(700.).min(height - bar - px(12.)));
         let dialog =
             Rect::new(((window - w) / 2.).round(), (bar + (height - bar - h) / 2.).round(), w, h);
         let (x, y) = (dialog.x, dialog.y);
@@ -281,8 +324,9 @@ impl Settings {
             field(x0, 122., x1 - button - px(8.), 34.),
             field(x0, 194., x1 - button - px(8.), 34.),
             field(x0, 266., x1 - 2. * (button + px(8.)), 34.),
-            field(x0, 338., mid - px(8.), 110.),
-            field(mid + px(8.), 338., x1, 110.),
+            field(x0, 338., x1 - 2. * (button + px(8.)), 34.),
+            field(x0, 410., mid - px(8.), 96.),
+            field(mid + px(8.), 410., x1, 96.),
         ];
         let label = |x: f32, top: f32, right: f32| field(x, top, right, 20.);
         let labels = [
@@ -290,8 +334,9 @@ impl Settings {
             label(x0, 98., x1),
             label(x0, 170., x1),
             label(x0, 242., x1),
-            label(x0, 314., mid - px(8.)),
-            label(mid + px(8.), 314., x1),
+            label(x0, 314., x1),
+            label(x0, 386., mid - px(8.)),
+            label(mid + px(8.), 386., x1),
         ];
         let beside = |field: Rect, offset: f32| {
             Rect::new(field.right() + px(8.) + offset, field.y, button, field.h)
@@ -306,13 +351,25 @@ impl Settings {
             (Target::Browse(Field::Directory), beside(fields[2], 0.)),
             (Target::Browse(Field::Icon), beside(fields[3], 0.)),
             (Target::Reset, beside(fields[3], button + px(8.))),
-            (Target::ToggleDefault, Rect::new(x0, at(468.), mid - x0 - px(8.), px(32.))),
-            (Target::ToggleShown, Rect::new(mid + px(8.), at(468.), x1 - mid - px(8.), px(32.))),
+            (Target::AllFonts, Rect { w: 2. * button + px(8.), ..beside(fields[4], 0.) }),
+            (Target::ToggleDefault, Rect::new(x0, at(524.), mid - x0 - px(8.), px(32.))),
+            (Target::ToggleShown, Rect::new(mid + px(8.), at(524.), x1 - mid - px(8.), px(32.))),
             (Target::Delete, Rect::new(x0, footer, px(128.), px(34.))),
             (Target::Cancel, Rect::new(x1 - px(196.), footer, px(92.), px(34.))),
             (Target::Save, Rect::new(x1 - px(96.), footer, px(96.), px(34.))),
         ];
         let status = Rect::new(x0 + px(140.), footer, x1 - px(208.) - x0 - px(140.), px(34.));
+
+        // The font list drops from its field over the fields below.
+        let font_list = self.font_list().map(|_| {
+            let field = fields[Field::Font.index()];
+            let row = px(28.).max(layout.cell.1 + px(8.));
+            let space = ((dialog.bottom() - field.bottom() - px(24.)) / row).max(1.) as usize;
+            let rows = self.candidates().len().clamp(1, FONT_ROWS.min(space));
+            let list =
+                Rect::new(field.x, field.bottom() + px(4.), field.w, rows as f32 * row + px(12.));
+            (list, list.inset(px(6.)), row)
+        });
         Panel {
             dialog,
             close: buttons[0].1,
@@ -326,10 +383,18 @@ impl Settings {
             labels,
             buttons,
             status,
+            font_list,
         }
     }
 
     fn target(&self, panel: &Panel, point: PhysicalPosition<f64>) -> Option<Target> {
+        if let (Some(list), Some((rect, rows, row))) = (self.font_list(), panel.font_list) {
+            if rect.contains(point) {
+                let index = list.first + ((point.y as f32 - rows.y) / row).max(0.) as usize;
+                return (rows.contains(point) && index < self.candidates().len())
+                    .then_some(Target::Font(index));
+            }
+        }
         let button = panel
             .buttons
             .iter()
@@ -354,6 +419,53 @@ impl Settings {
         &self.entries[self.selected].text[field.index()]
     }
 
+    /// The font list, while the font field has focus.
+    fn font_list(&self) -> Option<&FontList> {
+        self.font_list.as_ref().filter(|_| self.focus == Some(Field::Font))
+    }
+
+    /// Fonts offered in the font list.
+    fn candidates(&self) -> Vec<&Family> {
+        self.offered(self.font_list.as_ref().is_some_and(|list| list.filter))
+    }
+
+    /// Fonts offered, all of them or those matching the field's text when `filter`.
+    fn offered(&self, filter: bool) -> Vec<&Family> {
+        let query = if filter { self.text(Field::Font) } else { "" };
+        fonts::matching(&self.fonts, query, self.all_fonts)
+    }
+
+    /// Show every font in the list, from the profile's own.
+    fn open_font_list(&mut self) {
+        let current = self.text(Field::Font).trim().to_lowercase();
+        let index = self.offered(false).iter().position(|font| font.name.to_lowercase() == current);
+        let first = index.map_or(0, |index| index.saturating_sub(FONT_ROWS / 2));
+        self.font_list = Some(FontList { highlighted: index, first, filter: false });
+    }
+
+    /// Show the fonts matching the typed text.
+    fn filter_fonts(&mut self) {
+        let found = !self.text(Field::Font).trim().is_empty() && !self.offered(true).is_empty();
+        self.font_list = Some(FontList { highlighted: found.then_some(0), first: 0, filter: true });
+    }
+
+    /// Take the font in row `index` of the list.
+    fn pick_font(&mut self, index: usize) {
+        let Some(name) = self.candidates().get(index).map(|font| font.name.clone()) else { return };
+        self.caret = name.len();
+        self.entries[self.selected].text[Field::Font.index()] = name;
+        self.font_list = None;
+        self.touched();
+    }
+
+    /// Highlight row `index` of the font list, scrolling it into view.
+    fn highlight_font(&mut self, index: usize, layout: &Layout) {
+        let rows = self.panel(layout).font_list.map_or(1, |(_, rows, row)| (rows.h / row) as usize);
+        let Some(list) = &mut self.font_list else { return };
+        list.highlighted = Some(index);
+        list.first = list.first.min(index).max((index + 1).saturating_sub(rows.max(1)));
+    }
+
     /// Note an unsaved change.
     fn touched(&mut self) {
         self.dirty = true;
@@ -373,10 +485,14 @@ impl Settings {
         self.focus = Some(field);
         self.caret = self.text(field).len();
         self.preedit.clear();
+        if field == Field::Font {
+            self.open_font_list();
+        }
     }
 
     /// Handle the pointer moving, returning whether the dialog changed.
     pub fn moved(&mut self, layout: &Layout, point: PhysicalPosition<f64>) -> bool {
+        self.pointer = point;
         let panel = self.panel(layout);
         if let Some(drag) = &mut self.drag {
             let y = point.y as f32;
@@ -479,6 +595,14 @@ impl Settings {
                 self.entries[self.selected].text[Field::Icon.index()].clear();
                 self.touched();
             },
+            Target::AllFonts => {
+                self.all_fonts ^= true;
+                match &self.font_list {
+                    Some(list) if list.filter => self.filter_fonts(),
+                    _ => self.open_font_list(),
+                }
+            },
+            Target::Font(index) => self.pick_font(index),
             Target::Field(field) => {
                 self.focus(field);
                 self.caret = self.caret_at(&panel, field, point, layout);
@@ -512,13 +636,33 @@ impl Settings {
     }
 
     pub fn scroll(&mut self, layout: &Layout, down: bool) {
-        let visible = self.panel(layout).rows.len();
+        let (panel, count) = (self.panel(layout), self.candidates().len());
+        if let (Some(list), Some((rect, rows, row))) = (&mut self.font_list, panel.font_list) {
+            if rect.contains(self.pointer) {
+                let max = count.saturating_sub((rows.h / row) as usize);
+                let first = list.first.min(max);
+                list.first = if down { (first + 3).min(max) } else { first.saturating_sub(3) };
+                return;
+            }
+        }
+        let visible = panel.rows.len();
         let max = self.entries.len().saturating_sub(visible);
         self.scroll = if down { (self.scroll + 1).min(max) } else { self.scroll.saturating_sub(1) };
     }
 
-    /// Take the path chosen in a file picker.
+    /// Take the listed fonts, or the path chosen in a file picker, returning whether either came.
     pub fn poll(&mut self) -> bool {
+        let listed = self.listing.as_ref().map(Receiver::try_recv);
+        if let Some(Ok(_) | Err(TryRecvError::Disconnected)) = listed {
+            self.fonts = listed.and_then(Result::ok).unwrap_or_default();
+            self.listing = None;
+            match &self.font_list {
+                Some(list) if list.filter => self.filter_fonts(),
+                Some(_) => self.open_font_list(),
+                None => (),
+            }
+            return true;
+        }
         let Some((field, receiver)) = &self.picking else { return false };
         let Ok(path) = receiver.try_recv() else { return false };
         let field = *field;
@@ -591,7 +735,15 @@ impl Settings {
         if !text.is_empty() {
             self.entries[self.selected].text[field.index()].insert_str(self.caret, &text);
             self.caret += text.len();
-            self.touched();
+            self.edited();
+        }
+    }
+
+    /// Note text typed in the focused field.
+    fn edited(&mut self) {
+        self.touched();
+        if self.focus == Some(Field::Font) {
+            self.filter_fonts();
         }
     }
 
@@ -606,8 +758,12 @@ impl Settings {
         modifiers: ModifiersState,
         paste: impl FnOnce() -> String,
         config: &UiConfig,
+        layout: &Layout,
     ) -> bool {
         let command = modifiers.control_key() || modifiers.super_key();
+        if self.font_key(event, layout) {
+            return false;
+        }
         match event.logical_key.as_ref() {
             Key::Named(NamedKey::Escape) => return self.close(),
             Key::Character("s") if command => self.save(config),
@@ -629,11 +785,11 @@ impl Settings {
                     Key::Named(NamedKey::Backspace) if previous > 0 => {
                         self.caret -= previous;
                         self.entries[self.selected].text[field.index()].remove(self.caret);
-                        self.touched();
+                        self.edited();
                     },
                     Key::Named(NamedKey::Delete) if next > 0 => {
                         self.entries[self.selected].text[field.index()].remove(self.caret);
-                        self.touched();
+                        self.edited();
                     },
                     Key::Named(NamedKey::ArrowLeft) => self.caret -= previous,
                     Key::Named(NamedKey::ArrowRight) => self.caret += next,
@@ -669,6 +825,39 @@ impl Settings {
             },
         }
         false
+    }
+
+    /// Handle a key for the font list, returning whether it was used.
+    fn font_key(&mut self, event: &KeyEvent, layout: &Layout) -> bool {
+        let Some(list) = self.font_list() else {
+            let down = event.logical_key == Key::Named(NamedKey::ArrowDown);
+            if down && self.focus == Some(Field::Font) {
+                self.open_font_list();
+            }
+            return down && self.focus == Some(Field::Font);
+        };
+        let (count, highlighted) = (self.candidates().len(), list.highlighted);
+        let page = self.panel(layout).font_list.map_or(1, |(_, rows, row)| (rows.h / row) as usize);
+        let last = count.saturating_sub(1);
+        let index = match event.logical_key.as_ref() {
+            Key::Named(NamedKey::Escape) => {
+                self.font_list = None;
+                return true;
+            },
+            Key::Named(NamedKey::Enter) if highlighted.is_some_and(|index| index < count) => {
+                self.pick_font(highlighted.unwrap_or_default());
+                return true;
+            },
+            Key::Named(NamedKey::ArrowDown) => highlighted.map_or(0, |index| index + 1),
+            Key::Named(NamedKey::ArrowUp) => highlighted.map_or(last, |i| i.saturating_sub(1)),
+            Key::Named(NamedKey::PageDown) => highlighted.map_or(0, |index| index + page),
+            Key::Named(NamedKey::PageUp) => highlighted.map_or(0, |i| i.saturating_sub(page)),
+            _ => return false,
+        };
+        if count > 0 {
+            self.highlight_font(index.min(last), layout);
+        }
+        true
     }
 
     fn close(&mut self) -> bool {
@@ -715,7 +904,7 @@ impl Settings {
         palette: &Palette,
         config: &UiConfig,
         window: &Window,
-    ) -> Layer {
+    ) -> Vec<Layer> {
         let panel = self.panel(layout);
         let px = |value: f32| layout.px(value);
         let (cw, ch) = layout.cell;
@@ -950,6 +1139,20 @@ impl Settings {
                     );
                     continue;
                 },
+                Target::AllFonts => {
+                    let check = Rect::new(rect.x + px(4.), rect.y, px(18.), rect.h).square(px(18.));
+                    if self.all_fonts {
+                        layer.rounded(check, px(5.), palette.foreground);
+                        let mark = [[-1., 0., -0.3, 0.7], [-0.3, 0.7, 1., -0.7]];
+                        layer.icon(check.center(), px(5.), px(1.5), &mark, palette.terminal);
+                    } else {
+                        let outline = if hovered { palette.foreground } else { palette.focus };
+                        layer.outlined(check, px(5.), palette.field, outline, line);
+                    }
+                    let text = Rect::new(check.right() + px(10.), rect.y, rect.w - px(32.), rect.h);
+                    left(&mut layer, text, "Show all fonts", palette.foreground, false);
+                    continue;
+                },
                 Target::ToggleDefault | Target::ToggleShown => {
                     let (on, label, hint) = if target == Target::ToggleDefault {
                         (
@@ -1011,7 +1214,59 @@ impl Settings {
             let x = panel.status.right() - message.width() as f32 * cw;
             layer.text(x, panel.status.center().1 - ch / 2., message, color, false);
         }
-        layer
+
+        // The font list covers the fields below its own, so it is drawn after their text.
+        let mut popup = Layer::default();
+        if let (Some(list), Some((rect, rows, row))) = (self.font_list(), panel.font_list) {
+            let radius = px(8.);
+            let shadow = Rect::new(rect.x, rect.y + px(2.), rect.w, rect.h);
+            popup.rounded_alpha(shadow, radius + px(2.), BLACK, 0.3);
+            popup.outlined(rect, radius, palette.popup, palette.popup_outline, line);
+
+            let candidates = self.candidates();
+            let shown = (rows.h / row) as usize;
+            let first = list.first.min(candidates.len().saturating_sub(shown));
+            let highlighted = match self.hover {
+                Some(Target::Font(index)) => Some(index),
+                _ => list.highlighted,
+            };
+            let current = self.text(Field::Font).trim();
+            let tag = "Mono";
+            for (index, font) in candidates.iter().enumerate().skip(first).take(shown) {
+                let item = Rect::new(rows.x, rows.y + (index - first) as f32 * row, rows.w, row);
+                if highlighted == Some(index) {
+                    popup.rounded(item, px(6.), palette.hover);
+                }
+                let tagged = self.all_fonts && font.mono;
+                let tag_width = if tagged { (tag.width() + 2) as f32 * cw } else { 0. };
+                let name = Rect::new(item.x + px(10.), item.y, item.w - px(20.) - tag_width, row);
+                let chosen = font.name.eq_ignore_ascii_case(current);
+                left(&mut popup, name, &font.name, palette.foreground, chosen);
+                if tagged {
+                    let x = item.right() - px(10.) - tag.width() as f32 * cw;
+                    popup.text(x, item.center().1 - ch / 2., tag.into(), palette.muted, false);
+                }
+            }
+
+            if candidates.len() > shown {
+                let track = Rect::new(rect.right() - px(5.), rows.y, px(3.), rows.h);
+                let h = (track.h * shown as f32 / candidates.len() as f32).max(px(16.));
+                let y = track.y + (track.h - h) * first as f32 / (candidates.len() - shown) as f32;
+                popup.rounded(Rect::new(track.x, y, track.w, h), px(1.5), palette.muted);
+            }
+            if candidates.is_empty() {
+                let message = if self.listing.is_some() {
+                    "Listing fonts…"
+                } else if self.all_fonts || self.fonts.is_empty() {
+                    "No fonts found"
+                } else {
+                    "No monospaced fonts found"
+                };
+                let item = Rect::new(rows.x + px(10.), rows.y, rows.w - px(20.), row);
+                left(&mut popup, item, message, palette.muted, false);
+            }
+        }
+        vec![layer, popup]
     }
 
     /// Draw a profile's icon, or a badge with text.

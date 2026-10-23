@@ -9,6 +9,7 @@
 //! events are moved up accordingly.
 
 mod bar;
+mod fonts;
 mod icons;
 mod paint;
 mod profiles;
@@ -205,8 +206,8 @@ impl Session {
         proxy: &EventLoopProxy<Event>,
         profile: Option<&Profile>,
     ) -> Result<(WindowId, Self), Box<dyn Error>> {
-        let options = profile.map_or(&[][..], |profile| &profile.options);
-        let mut window_config = ParsedOptions::from_options(options);
+        let options = profile.map_or_else(Vec::new, Profile::overrides);
+        let mut window_config = ParsedOptions::from_options(&options);
         let config = window_config.override_config_rc(config.clone());
         let mut pty_config = config.pty_config();
         if let Some(profile) = profile {
@@ -329,7 +330,7 @@ pub fn window_event(
         {
             if let Some(settings) = &mut tabs.settings {
                 let paste = || clipboard.load(ClipboardType::Clipboard);
-                if settings.key(key, tabs.modifiers, paste, config) {
+                if settings.key(key, tabs.modifiers, paste, config, &layout) {
                     close_settings(ctx);
                 }
                 redraw(ctx);
@@ -394,11 +395,7 @@ pub fn window_event(
         WindowEvent::MouseInput { button, .. } => {
             let pointer = tabs.pointer;
             if let Some(settings) = &mut tabs.settings {
-                let id = tabs.tabs.get(tabs.active).map_or(window_id, |tab| tab.id);
-                let proxy = proxy.clone();
-                let wake = move || {
-                    let _ = proxy.send_event(Event::new(TerminalEvent::Wakeup.into(), id));
-                };
+                let wake = waker(tabs.tabs.get(tabs.active).map_or(window_id, |tab| tab.id), proxy);
                 if settings.press(&layout, pointer, button, config, wake) {
                     close_settings(ctx);
                 }
@@ -533,8 +530,9 @@ fn sync(ctx: &mut WindowContext, config: &Rc<UiConfig>, resize: bool) {
         }
         let tabs = &mut ctx.display.tabs;
         tabs.tabs.push(Tab { id, name, title: String::new(), badge, icon, session: None });
-        if let Some(profile) = profile.filter(|profile| !profile.options.is_empty()) {
-            ctx.window_config = ParsedOptions::from_options(&profile.options);
+        let options = profile.as_ref().map_or_else(Vec::new, Profile::overrides);
+        if !options.is_empty() {
+            ctx.window_config = ParsedOptions::from_options(&options);
             ctx.update_config(config.clone());
         }
     }
@@ -719,10 +717,7 @@ fn click(
             ctx.display.tabs.menu = Some(Menu { profiles, selected: 0 });
             redraw(ctx);
         },
-        (Hit::Settings, MouseButton::Left) => {
-            ctx.display.tabs.settings = Some(Settings::new(config));
-            redraw(ctx);
-        },
+        (Hit::Settings, MouseButton::Left) => open_settings(ctx, config, proxy),
         (Hit::Previous, MouseButton::Left) => run(ctx, Command::Previous, config, proxy),
         (Hit::Next, MouseButton::Left) => run(ctx, Command::Next, config, proxy),
         (Hit::Minimize, MouseButton::Left) => ctx.display.window.set_minimized(true),
@@ -803,7 +798,7 @@ fn choose(
     close_menu(ctx);
     match menu.profiles.get(index) {
         Some(profile) => open(ctx, config, proxy, Some(profile)),
-        None => ctx.display.tabs.settings = Some(Settings::new(config)),
+        None => open_settings(ctx, config, proxy),
     }
 }
 
@@ -812,6 +807,21 @@ fn close_menu(ctx: &mut WindowContext) {
     // Repaint the terminal the menu covered.
     ctx.display.damage_tracker.frame().mark_fully_damaged();
     redraw(ctx);
+}
+
+fn open_settings(ctx: &mut WindowContext, config: &UiConfig, proxy: &EventLoopProxy<Event>) {
+    let tabs = &ctx.display.tabs;
+    let wake = waker(tabs.tabs.get(tabs.active).map_or(ctx.id(), |tab| tab.id), proxy);
+    ctx.display.tabs.settings = Some(Settings::new(config, wake));
+    redraw(ctx);
+}
+
+/// Wake the window from another thread, through the terminal that reports events as `id`.
+fn waker(id: WindowId, proxy: &EventLoopProxy<Event>) -> impl Fn() + Send + 'static {
+    let proxy = proxy.clone();
+    move || {
+        let _ = proxy.send_event(Event::new(TerminalEvent::Wakeup.into(), id));
+    }
 }
 
 fn close_settings(ctx: &mut WindowContext) {

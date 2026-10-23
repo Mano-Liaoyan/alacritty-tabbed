@@ -300,3 +300,21 @@ pub fn pick(folder: bool, title: &str) -> Option<String> {
         (GetOpenFileNameW(&mut dialog) != 0).then(|| string(&path))
     }
 }
+
+/// Font families installed, with whether each is monospaced, as DirectWrite lists them.
+pub fn fonts() -> Vec<(String, bool)> {
+    use dwrote::{FontCollection, FontStretch, FontStyle, FontWeight};
+
+    FontCollection::system()
+        .families_iter()
+        .filter_map(|family| {
+            let font = family.first_matching_font(
+                FontWeight::Regular,
+                FontStretch::Normal,
+                FontStyle::Normal,
+            );
+            let mono = font.ok().and_then(|font| font.is_monospace()).unwrap_or(false);
+            Some((family.family_name().ok()?, mono))
+        })
+        .collect()
+}

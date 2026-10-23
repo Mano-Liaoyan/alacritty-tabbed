@@ -29,6 +29,9 @@ pub struct Profile {
     /// Image file, or text such as an emoji; empty uses the program's own icon.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub icon: String,
+    /// Font family; empty uses the font from `alacritty.toml`.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub font: String,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub env: BTreeMap<String, String>,
     /// Configuration overrides, in `--option` syntax such as `font.size=14`.
@@ -125,6 +128,15 @@ impl Profile {
             "" => icons::get(None, &self.command),
             icon => icons::get(Some(Path::new(&expand(icon))), ""),
         }
+    }
+
+    /// Configuration overrides for the profile's font, followed by its own.
+    pub fn overrides(&self) -> Vec<String> {
+        let family = toml::Value::from(self.font.trim()).to_string();
+        let styles = ["normal", "bold", "italic", "bold_italic"];
+        let font = styles.map(|style| format!("font.{style}.family={family}"));
+        let font = if self.font.trim().is_empty() { &[][..] } else { &font[..] };
+        font.iter().chain(&self.options).cloned().collect()
     }
 
     /// Start the terminal with this profile's command, directory and environment.
@@ -244,11 +256,27 @@ mod tests {
         let mut profile = Profile::new("Shell", "sh -l");
         profile.env.insert("NAME".into(), "value".into());
         profile.options.push("font.size=14".into());
+        profile.font = "DejaVu Sans Mono".into();
         let profiles = Profiles { default: "Shell".into(), list: vec![profile] };
         let text = toml::to_string_pretty(&profiles).unwrap();
         let parsed: Profiles = toml::from_str(&text).unwrap();
         assert_eq!(parsed.list, profiles.list);
         assert_eq!(parsed.default_profile(), profiles.list.first());
+    }
+
+    #[test]
+    fn fonts_override_every_style_before_other_options() {
+        let mut profile = Profile::new("Shell", "");
+        profile.options.push("font.size=14".into());
+        assert_eq!(profile.overrides(), ["font.size=14"]);
+        profile.font = r#" Font "Quoted" "#.into();
+        let overrides = profile.overrides();
+        assert_eq!(overrides.len(), 5);
+        for (option, style) in overrides.iter().zip(["normal", "bold", "italic", "bold_italic"]) {
+            let table: toml::Table = toml::from_str(option).unwrap();
+            assert_eq!(table["font"][style]["family"].as_str(), Some(r#"Font "Quoted""#));
+        }
+        assert_eq!(overrides[4], "font.size=14");
     }
 
     #[test]
