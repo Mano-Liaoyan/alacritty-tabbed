@@ -13,7 +13,6 @@ use bitflags::bitflags;
 use log::{debug, trace};
 use unicode_width::UnicodeWidthChar;
 
-use crate::cwd::ReportedDirectory;
 use crate::event::{Event, EventListener};
 use crate::grid::{Dimensions, Grid, GridIterator, Scroll};
 use crate::index::{self, Boundary, Column, Direction, Line, Point, Side};
@@ -30,6 +29,7 @@ use crate::vte::ansi::{
 pub mod cell;
 pub mod color;
 pub mod search;
+pub mod tabbed; // tabbed: the fork's own terminal state.
 
 /// Minimum number of columns.
 ///
@@ -275,8 +275,7 @@ pub struct Term<T> {
 
     pub selection: Option<Selection>,
 
-    /// Working directory the shell last reported, through `OSC 7` or `OSC 9 ; 9`.
-    pub reported_directory: Option<ReportedDirectory>,
+    pub tabbed: tabbed::Tabbed, // tabbed: the fork's own terminal state.
 
     /// Currently active grid.
     ///
@@ -443,7 +442,7 @@ impl<T> Term<T> {
             title_stack: Default::default(),
             is_focused: Default::default(),
             selection: Default::default(),
-            reported_directory: Default::default(),
+            tabbed: Default::default(),
             title: Default::default(),
             mode: Default::default(),
         }
@@ -649,11 +648,6 @@ impl<T> Term<T> {
     /// Access to the raw grid data structure.
     pub fn grid(&self) -> &Grid<Cell> {
         &self.grid
-    }
-
-    /// The grid of the normal screen, also while a program shows the alternate screen.
-    pub fn primary_grid(&self) -> &Grid<Cell> {
-        if self.mode.contains(TermMode::ALT_SCREEN) { &self.inactive_grid } else { &self.grid }
     }
 
     /// Mutable access to the raw grid data structure.

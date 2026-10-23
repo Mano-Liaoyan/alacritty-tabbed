@@ -37,15 +37,14 @@ dependencies = [
  "ahash",
  "alacritty_config",
  "alacritty_config_derive",
+ "alacritty_tabbed_deps",
  "alacritty_terminal",
  "bitflags 2.9.4",
  "clap",
  "clap_complete",
  "copypasta",
- "core-text",
  "crossfont",
  "dirs",
- "dwrote",
  "embed-resource",
  "gl_generator",
  "glutin",
@@ -59,7 +58,6 @@ dependencies = [
  "parking_lot",
  "png",
  "polling",
- "resvg",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -71,7 +69,6 @@ dependencies = [
  "windows-sys 0.59.0",
  "winit",
  "xdg",
- "yeslogic-fontconfig-sys",
 ]
 
 [[package]]
@@ -95,6 +92,18 @@ dependencies = [
  "serde",
  "syn",
  "toml",
+]
+
+[[package]]
+name = "alacritty_tabbed_deps"
+version = "0.1.0"
+dependencies = [
+ "core-text",
+ "dwrote",
+ "png",
+ "resvg",
+ "windows-sys 0.59.0",
+ "yeslogic-fontconfig-sys",
 ]
 
 [[package]]

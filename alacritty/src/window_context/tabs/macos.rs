@@ -5,6 +5,7 @@ use std::process::Command;
 use std::sync::Arc;
 use std::{env, fs};
 
+use alacritty_tabbed_deps::core_text;
 use core_text::font_descriptor::CTFontDescriptor;
 use winit::platform::macos::WindowAttributesExtMacOS;
 use winit::window::WindowAttributes;

@@ -1,0 +1,100 @@
+# Tries a merge of upstream/master into the fork every week and tests the result.
+# Nothing is pushed: the merge only happens in the runner's checkout.
+
+name: Upstream sync
+
+on:
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  merge:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Fetch upstream
+        run: |
+          git remote add upstream https://github.com/alacritty/alacritty.git
+          git fetch --no-tags upstream master
+
+      - name: Try the merge
+        id: merge
+        run: |
+          git config user.name "upstream-sync"
+          git config user.email "upstream-sync@users.noreply.github.com"
+          behind=$(git rev-list --count HEAD..upstream/master)
+          echo "behind=$behind" >> "$GITHUB_OUTPUT"
+          {
+            echo "## Upstream sync"
+            echo
+            echo "\`upstream/master\` is $(git rev-parse --short upstream/master), $behind commits not yet merged."
+          } >> "$GITHUB_STEP_SUMMARY"
+          if git merge --no-commit --no-ff upstream/master; then
+            echo "conflicts=false" >> "$GITHUB_OUTPUT"
+            echo "The merge is clean." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "conflicts=true" >> "$GITHUB_OUTPUT"
+            git diff --name-only --diff-filter=U > conflicts.txt
+            {
+              echo
+              echo "### Conflicts"
+              echo
+              sed 's/^/- `/; s/$/`/' conflicts.txt
+            } | tee -a "$GITHUB_STEP_SUMMARY" > conflicts.md
+          fi
+
+      - name: Report conflicts in an issue
+        if: steps.merge.outputs.conflicts == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          gh label create upstream-sync --color c5def5 \
+            --description "Merging upstream/master needs work" 2> /dev/null || true
+          {
+            echo "Merging \`upstream/master\` ($(git rev-parse --short upstream/master)) conflicts."
+            cat conflicts.md
+            echo
+            echo "Run: $RUN_URL"
+          } > body.md
+          number=$(gh issue list --label upstream-sync --state open --json number --jq '.[0].number')
+          if [ -n "$number" ]; then
+            gh issue comment "$number" --body-file body.md
+          else
+            gh issue create --title "Upstream merge conflicts" --label upstream-sync --body-file body.md
+          fi
+
+      - name: Fail on conflicts
+        if: steps.merge.outputs.conflicts == 'true'
+        run: |
+          echo "::error::Merging upstream/master conflicts; see the job summary."
+          exit 1
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake g++ pkg-config libfreetype6-dev libfontconfig1-dev \
+            libxcb-xfixes0-dev libxkbcommon-dev python3
+
+      - name: Test the merge
+        run: cargo test -p alacritty -p alacritty_terminal
+
+      - name: Report
+        if: always() && steps.merge.outputs.conflicts == 'false'
+        run: |
+          if [ "${{ job.status }}" = "success" ]; then
+            echo "Tests pass on the merged tree." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "The merge is clean but tests fail; see the log." >> "$GITHUB_STEP_SUMMARY"
+          fi

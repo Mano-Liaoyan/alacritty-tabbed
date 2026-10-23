@@ -1,0 +1,43 @@
+# Reports how much of upstream's code a pull request leaves changed, and fails
+# when the lines changed in upstream files exceed the budget.
+
+name: Patch surface
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  # 222 lines measured, rounded up with headroom; lower it as fork code moves out of upstream files.
+  MAX_LINES: 300
+
+jobs:
+  patch-surface:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Fetch upstream
+        run: |
+          git remote add upstream https://github.com/alacritty/alacritty.git
+          git fetch --no-tags upstream master
+
+      - name: Patch surface
+        run: |
+          set +e
+          bash scripts/patch-surface.sh --max-lines "$MAX_LINES" > report.txt 2>&1
+          status=$?
+          cat report.txt
+          {
+            echo "## Patch surface"
+            echo
+            echo '```'
+            cat report.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit $status

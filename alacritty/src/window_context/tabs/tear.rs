@@ -45,9 +45,6 @@ pub struct Live {
     #[cfg(not(windows))]
     pub master_fd: RawFd,
     pub shell_pid: u32,
-    /// Size of the terminal's text, in its window's pixels, while it is zoomed away from its
-    /// configuration's.
-    pub zoom: Option<crossfont::Size>,
 }
 
 /// A tab taken out of its window, waiting for a window of its own.
@@ -68,6 +65,11 @@ impl Torn {
         let focus = self.tab.focus;
         let pane = &mut self.tab.panes[focus];
         Some((pane.id, pane.session.take()?.into_live()))
+    }
+
+    /// Text size of the focused pane, when zoomed.
+    pub fn zoom(&self) -> Option<crossfont::Size> {
+        self.tab.panes[self.tab.focus].session.as_ref().and_then(|session| session.zoom)
     }
 
     /// Give the tab back to the window `ctx` it was torn off, as its last tab, when no window

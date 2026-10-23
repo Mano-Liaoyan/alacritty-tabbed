@@ -17,7 +17,7 @@ use unicode_width::UnicodeWidthChar;
 use alacritty_terminal::index::{Column, Point};
 use alacritty_terminal::term::cell::Flags;
 
-use crate::config::window::UiFont as Config;
+use crate::config::tabbed::UiFont as Config;
 use crate::display::SizeInfo;
 use crate::display::color::Rgb;
 use crate::display::content::RenderableCell;

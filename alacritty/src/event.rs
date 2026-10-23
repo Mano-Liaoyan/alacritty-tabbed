@@ -49,7 +49,6 @@ use crate::cli::{IpcConfig, ParsedOptions};
 use crate::cli::{Options as CliOptions, WindowOptions};
 use crate::clipboard::Clipboard;
 use crate::config::ui_config::{HintAction, HintInternalAction};
-use crate::config::window::RestoreSession;
 use crate::config::{self, UiConfig};
 #[cfg(not(windows))]
 use crate::daemon::foreground_process_path;
@@ -65,7 +64,9 @@ use crate::message_bar::{Message, MessageBuffer};
 use crate::polling::ipc::{self, SocketReply};
 use crate::scheduler::{Scheduler, TimerId, Topic};
 use crate::window_context::WindowContext;
-use crate::window_context::tabs::{self, Torn, restore};
+
+// tabbed: tabs and sessions, hooked in below.
+mod tabbed;
 
 /// Duration after the last user input until an unlimited search is performed.
 pub const TYPING_SEARCH_DELAY: Duration = Duration::from_millis(500);
@@ -100,10 +101,8 @@ pub struct Processor {
     global_ipc_options: ParsedOptions,
     cli_options: CliOptions,
     config: Rc<UiConfig>,
-    /// Windows closed as windows, and when, to save with the last one.
-    closed: Vec<(Instant, restore::Window)>,
-    /// Whether Alacritty was started plainly, which alone restores and saves sessions.
-    plain: bool,
+    // tabbed: the session to restore and to save.
+    tabbed: tabbed::State,
 }
 
 impl Processor {
@@ -135,7 +134,8 @@ impl Processor {
         }
 
         Processor {
-            plain: restore::plain(&cli_options),
+            // tabbed: the session to restore and to save.
+            tabbed: tabbed::State::new(&cli_options),
             initial_window_options,
             initial_window_error: None,
             cli_options,
@@ -148,7 +148,6 @@ impl Processor {
             #[cfg(unix)]
             global_ipc_options: Default::default(),
             config_monitor,
-            closed: Default::default(),
         }
     }
 
@@ -160,14 +159,14 @@ impl Processor {
         &mut self,
         event_loop: &ActiveEventLoop,
         window_options: WindowOptions,
-        saved: Option<restore::Window>,
     ) -> Result<(), Box<dyn Error>> {
         let window_context = WindowContext::initial(
             event_loop,
             self.proxy.clone(),
             self.config.clone(),
             window_options,
-            saved,
+            // tabbed: the window to restore from the last session.
+            self.tabbed.saved.take(),
         )?;
 
         self.gl_config = Some(window_context.display.gl_context().config());
@@ -176,12 +175,11 @@ impl Processor {
         Ok(())
     }
 
-    /// Create a new terminal window, or one like the window `saved` from a previous session.
+    /// Create a new terminal window.
     pub fn create_window(
         &mut self,
         event_loop: &ActiveEventLoop,
         options: WindowOptions,
-        saved: Option<restore::Window>,
     ) -> Result<(), Box<dyn Error>> {
         let gl_config = self.gl_config.as_ref().unwrap();
 
@@ -199,32 +197,12 @@ impl Processor {
             config,
             options,
             config_overrides,
-            saved,
+            // tabbed: the window to restore from the last session.
+            crate::window_context::tabs::hooks::Origin::Saved(self.tabbed.saved.take()),
         )?;
 
         self.windows.insert(window_context.id(), window_context);
         Ok(())
-    }
-
-    /// Create a window for the tab `torn` off the window `source`, which gets it back on failure.
-    fn create_torn_window(&mut self, event_loop: &ActiveEventLoop, source: WindowId, torn: Torn) {
-        // No context may be current while a window is created, as for `CreateWindow`.
-        for window_context in self.windows.values_mut() {
-            window_context.display.make_not_current();
-        }
-
-        let gl_config = self.gl_config.as_ref().expect("windows share the first one's config");
-        match WindowContext::torn(gl_config, event_loop, self.config.clone(), torn) {
-            Ok(window_context) => {
-                self.windows.insert(window_context.id(), window_context);
-            },
-            Err((err, torn)) => {
-                error!("Could not open a window for the tab: {err:?}");
-                if let Some(window_context) = self.windows.get_mut(&source) {
-                    torn.restore(window_context, &self.config);
-                }
-            },
-        }
     }
 
     /// Run the event loop.
@@ -235,35 +213,6 @@ impl Processor {
         match self.initial_window_error.take() {
             Some(initial_window_error) => Err(initial_window_error),
             _ => result.map_err(Into::into),
-        }
-    }
-
-    /// Keep the state of `window_context`, which is closing, for the session saved once the last
-    /// window closes: windows closed as windows within a moment are saved together, while a
-    /// session ended by closing its tabs or shells is not saved.
-    fn remember(&mut self, window_context: &WindowContext) {
-        let level = self.config.window.restore_session;
-        let whole = window_context.display.tabs.closed_whole();
-        let now = Instant::now();
-        let saved = self.plain && level != RestoreSession::Off && whole;
-        let window = saved.then(|| restore::capture(window_context, level));
-        restore::remember(&mut self.closed, now, window);
-        if self.windows.is_empty() {
-            let windows = restore::kept(mem::take(&mut self.closed), now, whole);
-            self.quit(windows);
-        }
-    }
-
-    /// Save the session of `windows` as Alacritty quits, or forget it, as the setting asks.
-    fn quit(&self, windows: Vec<restore::Window>) {
-        match restore::quit(self.plain, self.config.window.restore_session, windows) {
-            restore::Quit::Save(windows) => {
-                if let Err(err) = restore::save(windows) {
-                    error!("Could not save the session: {err}");
-                }
-            },
-            restore::Quit::Forget => restore::forget(),
-            restore::Quit::Leave => (),
         }
     }
 
@@ -297,35 +246,11 @@ impl ApplicationHandler<Event> for Processor {
         }
 
         if let Some(window_options) = self.initial_window_options.take() {
-            // The windows of the last session, when it is restored.
-            let mut saved = restore::take(&self.config, &self.cli_options).into_iter();
-            let first = saved.next();
-            let restoring = first.is_some();
-            let mut created = self.create_initial_window(event_loop, window_options.clone(), first);
-            // A saved window that cannot open, such as with a shell since removed, gives way to a
-            // window as without a saved session.
-            if let (Err(err), true) = (&created, restoring) {
-                warn!("Could not restore the first window: {err}");
-                created = self.create_initial_window(event_loop, window_options.clone(), None);
-            }
-            if let Err(err) = created {
+            // tabbed: open the windows of the last session too.
+            if let Err(err) = self.create_initial_windows(event_loop, window_options) {
                 self.initial_window_error = Some(err);
                 event_loop.exit();
                 return;
-            }
-            for window in saved {
-                for window_context in self.windows.values_mut() {
-                    window_context.display.make_not_current();
-                }
-                if let Err(err) =
-                    self.create_window(event_loop, window_options.clone(), Some(window))
-                {
-                    error!("Could not restore a window: {err:?}");
-                }
-            }
-            // Its text is no longer kept on disk once restored.
-            if restoring {
-                restore::restored();
             }
         }
 
@@ -334,7 +259,7 @@ impl ApplicationHandler<Event> for Processor {
 
     fn window_event(
         &mut self,
-        event_loop: &ActiveEventLoop,
+        _event_loop: &ActiveEventLoop,
         window_id: WindowId,
         event: WindowEvent,
     ) {
@@ -347,34 +272,31 @@ impl ApplicationHandler<Event> for Processor {
             return;
         }
 
+        // tabbed: the tabs take the events meant for them.
+        let Some(event) = self.tab_window_event(_event_loop, window_id, event) else { return };
+
         let window_context = match self.windows.get_mut(&window_id) {
             Some(window_context) => window_context,
             None => return,
         };
 
-        let (config, proxy, clipboard) = (&self.config, &self.proxy, &mut self.clipboard);
-        let event = tabs::window_event(window_context, event, config, proxy, clipboard);
-        if let Some(event) = event {
-            let is_redraw = matches!(event, WindowEvent::RedrawRequested);
+        let is_redraw = matches!(event, WindowEvent::RedrawRequested);
 
-            window_context.handle_event(
-                #[cfg(target_os = "macos")]
-                event_loop,
-                &self.proxy,
-                &mut self.clipboard,
-                &mut self.scheduler,
-                WinitEvent::WindowEvent { window_id, event },
-            );
+        window_context.handle_event(
+            #[cfg(target_os = "macos")]
+            _event_loop,
+            &self.proxy,
+            &mut self.clipboard,
+            &mut self.scheduler,
+            WinitEvent::WindowEvent { window_id, event },
+        );
 
-            if is_redraw {
-                window_context.draw(&mut self.scheduler);
-            }
+        if is_redraw {
+            window_context.draw(&mut self.scheduler);
         }
 
-        // A tab torn off the window, by a drag or a menu, gets a window of its own.
-        if let Some(torn) = tabs::take_torn(window_context) {
-            self.create_torn_window(event_loop, window_id, torn);
-        }
+        // tabbed: a tab torn off the window gets a window of its own.
+        self.tear_off(_event_loop, window_id);
     }
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: Event) {
@@ -382,8 +304,8 @@ impl ApplicationHandler<Event> for Processor {
             info!(target: LOG_TARGET_WINIT, "{event:?}");
         }
 
-        let event = tabs::route(&mut self.windows, &self.config, event.payload, event.window_id);
-        let Some(event) = event else { return };
+        // tabbed: the events of terminals in other panes go to their panes.
+        let Some(event) = self.route(event) else { return };
 
         // Handle events which don't mandate the WindowId.
         match (event.payload, event.window_id.as_ref()) {
@@ -404,7 +326,8 @@ impl ApplicationHandler<Event> for Processor {
                     } else {
                         window_context.add_window_config(self.config.clone(), &options);
                     }
-                    tabs::reconfigure(window_context, &self.config);
+                    // tabbed: pad the tabs' terminals for the new config.
+                    tabbed::reconfigure(window_context, &self.config);
                 }
 
                 // Persist global options for future windows.
@@ -451,12 +374,8 @@ impl ApplicationHandler<Event> for Processor {
                 // Load config and update each terminal.
                 if let Ok(config) = config::reload(&path, &mut self.cli_options) {
                     self.config = Rc::new(config);
-
-                    // Turning the setting off forgets the saved session at once.
-                    if self.plain && self.config.window.restore_session == RestoreSession::Off {
-                        self.closed.clear();
-                        restore::forget();
-                    }
+                    // tabbed: turning restoring off forgets the saved session at once.
+                    self.forget_session();
 
                     // Restart config monitor if imports changed.
                     if let Some(monitor) = self.config_monitor.take() {
@@ -471,7 +390,8 @@ impl ApplicationHandler<Event> for Processor {
 
                     for window_context in self.windows.values_mut() {
                         window_context.update_config(self.config.clone());
-                        tabs::reconfigure(window_context, &self.config);
+                        // tabbed: pad the tabs' terminals for the new config.
+                        tabbed::reconfigure(window_context, &self.config);
                     }
                 }
             },
@@ -487,11 +407,11 @@ impl ApplicationHandler<Event> for Processor {
 
                 if self.gl_config.is_none() {
                     // Handle initial window creation in daemon mode.
-                    if let Err(err) = self.create_initial_window(event_loop, options, None) {
+                    if let Err(err) = self.create_initial_window(event_loop, options) {
                         self.initial_window_error = Some(err);
                         event_loop.exit();
                     }
-                } else if let Err(err) = self.create_window(event_loop, options, None) {
+                } else if let Err(err) = self.create_window(event_loop, options) {
                     error!("Could not open window: {err:?}");
                 }
             },
@@ -534,6 +454,7 @@ impl ApplicationHandler<Event> for Processor {
 
                 // Unschedule pending events.
                 self.scheduler.unschedule_window(window_context.id());
+                // tabbed: keep the window for the session saved with the last one.
                 self.remember(&window_context);
 
                 // Shutdown if no more terminals are open.
@@ -601,14 +522,8 @@ impl ApplicationHandler<Event> for Processor {
             info!("Exiting the event loop");
         }
 
-        // Quitting with windows open, as by `alacritty msg shutdown`, saves them all.
-        let level = self.config.window.restore_session;
-        if self.plain && level != RestoreSession::Off && !self.windows.is_empty() {
-            let now = Instant::now();
-            let mut windows = restore::kept(mem::take(&mut self.closed), now, true);
-            windows.extend(self.windows.values().map(|ctx| restore::capture(ctx, level)));
-            self.quit(windows);
-        }
+        // tabbed: quitting with windows open saves them all.
+        self.save_session();
 
         match self.gl_config.take().map(|config| config.display()) {
             #[cfg(not(target_os = "macos"))]

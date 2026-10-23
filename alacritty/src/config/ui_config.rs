@@ -86,6 +86,9 @@ pub struct UiConfig {
     /// Config for the alacritty_terminal itself.
     pub terminal: Terminal,
 
+    // tabbed: the fork's own keys, in a `[tabbed]` table of their own.
+    pub tabbed: crate::config::tabbed::TabbedConfig,
+
     /// Keyboard configuration.
     keyboard: Keyboard,
 

@@ -26,7 +26,7 @@ use alacritty_terminal::vte::ansi::{self, Color, NamedColor, StdSyncHandler};
 
 use crate::cli::{Options as CliOptions, ParsedOptions};
 use crate::config::UiConfig;
-use crate::config::window::RestoreSession;
+use crate::config::tabbed::RestoreSession;
 use crate::display::window::Window as DisplayWindow;
 use crate::event::Event;
 use crate::window_context::WindowContext;
@@ -165,7 +165,7 @@ pub fn take(config: &UiConfig, options: &CliOptions) -> Vec<Window> {
     if !plain(options) {
         return Vec::new();
     }
-    if config.window.restore_session == RestoreSession::Off {
+    if config.tabbed.restore_session == RestoreSession::Off {
         forget();
         return Vec::new();
     }
@@ -376,7 +376,7 @@ fn indices<S>(tab: &Tab<S>) -> Split<usize> {
 /// with its profile, when the window has tabs, and in its directory.
 pub fn prepare(config: &UiConfig, tabs: &Tabs, saved: &Window, pty: &mut PtyOptions) {
     let live = saved.live();
-    if config.window.tabs {
+    if config.tabbed.tabs {
         let profile = Profiles::load(config).list.into_iter().find(|p| is(p, &live.profile));
         if let Some(profile) = &profile {
             profile.apply(pty);
@@ -407,7 +407,7 @@ pub fn install(
     let live = saved.live().clone();
     let first_profile = ctx.display.tabs.first_profile.borrow_mut().take();
 
-    if config.window.tabs {
+    if config.tabbed.tabs {
         let profiles = Profiles::load(config).list;
         let mut tabs = Vec::new();
         let mut active = 0;
@@ -477,7 +477,7 @@ pub fn install(
     if let Some(points) = live.font.and_then(|points| zoomed(points, configured)) {
         set_live_font(ctx, size(points));
     }
-    if config.window.tabs {
+    if config.tabbed.tabs {
         sync(ctx, config, true);
     }
     if !ctx.preserve_title {
@@ -912,7 +912,7 @@ mod tests {
     #[test]
     fn take_rules() {
         let mut config = UiConfig::default();
-        config.window.restore_session = RestoreSession::Text;
+        config.tabbed.restore_session = RestoreSession::Text;
         for args in [&["alacritty", "-e", "true"][..], &["alacritty", "--hold"], &[
             "alacritty",
             "--working-directory",

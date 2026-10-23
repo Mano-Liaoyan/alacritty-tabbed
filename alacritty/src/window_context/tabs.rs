@@ -22,6 +22,8 @@ mod cwd;
 mod divider;
 mod dnd;
 mod fonts;
+mod fullscreen;
+pub mod hooks;
 mod icons;
 mod job;
 mod paint;
@@ -84,7 +86,7 @@ use alacritty_terminal::vte::ansi::NamedColor;
 use crate::cli::{ParsedOptions, WindowOptions};
 use crate::clipboard::Clipboard;
 use crate::config::font::Font;
-use crate::config::window::{Corners, UiFont as UiFontConfig};
+use crate::config::tabbed::{Corners, UiFont as UiFontConfig};
 use crate::config::{Action, BindingKey, BindingMode, UiConfig};
 use crate::display::SizeInfo;
 use crate::event::{Event, EventProxy, EventType, InlineSearchState, SearchState};
@@ -95,8 +97,7 @@ use app_settings::AppSettings;
 use bar::{BAR, Hit, INSET, Layout, MARGIN};
 use dnd::{Drag, Source, Target};
 use paint::Image;
-#[cfg(windows)]
-pub use cwd::{mark as mark_pane, register as register_pane};
+pub use fullscreen::FullscreenState;
 pub use paint::Rect;
 use panes::Control;
 use profiles::{Profile, Profiles};
@@ -167,6 +168,9 @@ pub enum FontChange {
 pub struct Tabs {
     /// Pixels above the terminal's area; zero without tabs, or with a bar that is not pinned.
     pub height: u32,
+    /// Present the whole window this frame and the next, since the terminal's damage alone does
+    /// not cover it; set while drawing into frames, reset once presented.
+    pub full_damage: bool,
     /// Whether the bar is shown, or slides in when it is not pinned.
     caption: bool,
     /// All tabs, or none while tabs are off.
@@ -865,7 +869,6 @@ impl Session {
             #[cfg(not(windows))]
             master_fd: self.master_fd,
             shell_pid: self.shell_pid,
-            zoom: self.zoom,
         }
     }
 }
@@ -893,12 +896,12 @@ impl Drop for Session {
 
 /// Let the bar replace the system's caption.
 pub fn attributes(attributes: WindowAttributes, config: &UiConfig) -> WindowAttributes {
-    if config.window.tabs { platform::attributes(attributes) } else { attributes }
+    if config.tabbed.tabs { platform::attributes(attributes) } else { attributes }
 }
 
 /// Start a window's first terminal with the default profile, unless a command was given.
 pub fn launch(config: &UiConfig, options: &WindowOptions, pty: &mut PtyOptions, tabs: &Tabs) {
-    if !config.window.tabs || options.terminal_options.command().is_some() {
+    if !config.tabbed.tabs || options.terminal_options.command().is_some() {
         return;
     }
     let Some(profile) = Profiles::load(config).default_profile().cloned() else { return };
@@ -923,6 +926,9 @@ pub fn window_event(
     proxy: &EventLoopProxy<Event>,
     clipboard: &mut Clipboard,
 ) -> Option<WindowEvent> {
+    if let WindowEvent::RedrawRequested = event {
+        fullscreen::before_draw(ctx, config, proxy, clipboard);
+    }
     if let WindowEvent::Resized(size) = event {
         // Minimizing reports an empty size, which the terminal ignores too.
         if size.width == 0 || size.height == 0 {
@@ -1273,7 +1279,7 @@ pub fn window_event(
         // The wheel with the zoom modifiers sizes the text of the live pane, under the pointer.
         WindowEvent::MouseWheel { delta, .. }
             if !modal
-                && config.window.wheel_zoom
+                && config.tabbed.wheel_zoom
                 && tabs.modifiers == ZOOM_WHEEL
                 && layout.hit(tabs.pointer) == Hit::Terminal
                 && tabs.pane_at(tabs.pointer) == Some(tabs.live().1) =>
@@ -1461,7 +1467,7 @@ fn sync(ctx: &mut WindowContext, config: &Rc<UiConfig>, resize: bool) {
     }
 
     // The interface's font follows the configuration and the window's scale.
-    let source = (config.window.ui_font.clone(), tabs.scale);
+    let source = (config.tabbed.ui_font.clone(), tabs.scale);
     if tabs.font_source.as_ref() != Some(&source) {
         match UiFont::new(&source.0, source.1) {
             Ok(font) => tabs.font = Some(Rc::new(font)),
@@ -1471,7 +1477,7 @@ fn sync(ctx: &mut WindowContext, config: &Rc<UiConfig>, resize: bool) {
         redraw(ctx);
     }
     let tabs = &mut ctx.display.tabs;
-    let shown = (ctx.config.window.tabs || tabs.count() > 1) && tabs.font.is_some();
+    let shown = (ctx.config.tabbed.tabs || tabs.count() > 1) && tabs.font.is_some();
 
     // The window's own terminal becomes the first tab.
     if shown && tabs.tabs.is_empty() {
@@ -1496,16 +1502,16 @@ fn sync(ctx: &mut WindowContext, config: &Rc<UiConfig>, resize: bool) {
     let px = |value: f32| (value * ctx.display.window.scale_factor as f32).round() as u32;
     // Without its panel the terminal fills the window, its text still lined up with the logo.
     let tabs = &mut ctx.display.tabs;
-    tabs.panel = config.window.panel;
+    tabs.panel = config.tabbed.panel;
     tabs.caption = shown;
     // A bar that is not pinned is drawn over the panes, which take the whole window.
-    tabs.autohide.pinned = config.window.pin_tab_bar;
-    let gap = f32::from(config.window.pane_gap.min(48));
+    tabs.autohide.pinned = config.tabbed.pin_tab_bar;
+    let gap = f32::from(config.tabbed.pane_gap.min(48));
     let regap = mem::replace(&mut tabs.gap, gap) != gap;
     let (offset, inset) = match shown {
         false => (0, 0),
-        _ if !config.window.pin_tab_bar => (0, (MARGIN + INSET) as u8),
-        _ if !config.window.panel => (px(BAR), (MARGIN + INSET) as u8),
+        _ if !config.tabbed.pin_tab_bar => (0, (MARGIN + INSET) as u8),
+        _ if !config.tabbed.panel => (px(BAR), (MARGIN + INSET) as u8),
         _ => (px(BAR) - px(MARGIN), (MARGIN + INSET) as u8),
     };
     note_font(ctx);
@@ -1624,7 +1630,7 @@ fn resize_live(ctx: &mut WindowContext) {
 /// Systems that round windows themselves are told which corners to give the window; elsewhere
 /// the corners of a window that is not maximized are cut out, which makes it transparent there.
 fn shape(ctx: &mut WindowContext, config: &UiConfig, framed: bool) {
-    let corners = config.window.corners;
+    let corners = config.tabbed.corners;
     let round = corners == Corners::Round;
     let cut = framed && round && cfg!(not(any(windows, target_os = "macos")));
     let tabs = &mut ctx.display.tabs;
@@ -2002,7 +2008,7 @@ pub fn split(
     let profiles = Profiles::load(config).list;
     let profile = profiles.into_iter().find(|profile| Some(&profile.name) == name.as_ref());
     // The new shell starts where the focused one is.
-    let reported = ctx.terminal.lock().reported_directory.clone();
+    let reported = ctx.terminal.lock().tabbed.reported_directory.clone();
     #[cfg(not(windows))]
     let process = || crate::daemon::foreground_process_path(ctx.master_fd, ctx.shell_pid).ok();
     #[cfg(windows)]

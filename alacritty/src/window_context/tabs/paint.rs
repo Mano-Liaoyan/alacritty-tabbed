@@ -4,6 +4,7 @@
 use std::f32::consts::{FRAC_PI_2, FRAC_PI_4};
 use std::sync::{Arc, Mutex};
 
+use alacritty_tabbed_deps::resvg;
 use resvg::{tiny_skia, usvg};
 use winit::dpi::PhysicalPosition;
 

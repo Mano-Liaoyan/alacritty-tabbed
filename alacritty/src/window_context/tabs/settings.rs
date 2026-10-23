@@ -14,7 +14,7 @@ use winit::keyboard::{Key, ModifiersState, NamedKey};
 use alacritty_terminal::index::{Column, Point};
 
 use crate::config::UiConfig;
-use crate::config::window::{Corners, MAX_PANE_GAP, RestoreSession};
+use crate::config::tabbed::{Corners, MAX_PANE_GAP, RestoreSession};
 use crate::display::SizeInfo;
 use crate::display::color::Rgb;
 use crate::display::window::Window;
@@ -3503,7 +3503,7 @@ mod tests {
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.starts_with("# Mine.\n[window]\nopacity = 1\n"), "{text}");
         let window: toml::Table =
-            toml::from_str::<toml::Table>(&text).unwrap()["window"].as_table().unwrap().clone();
+            toml::from_str::<toml::Table>(&text).unwrap()["tabbed"].as_table().unwrap().clone();
         assert_eq!(window["restore_session"].as_str(), Some("text"));
         assert_eq!(window["pin_tab_bar"].as_bool(), Some(false));
         assert_eq!(window["wheel_zoom"].as_bool(), Some(false));
@@ -3519,9 +3519,9 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
 
         // Nor does saving a logo title with spaces around it, unedited.
-        let spaced = "[window.brand]\ntitle = \" Work \"\n";
+        let spaced = "[tabbed.brand]\ntitle = \" Work \"\n";
         std::fs::write(&path, spaced).unwrap();
-        config.window.brand.title = " Work ".into();
+        config.tabbed.brand.title = " Work ".into();
         Settings::new(&config, Page::Appearance, || ()).save(&config);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), spaced);
     }

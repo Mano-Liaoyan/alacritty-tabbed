@@ -20,6 +20,8 @@ pub mod monitor;
 pub mod scrolling;
 pub mod selection;
 pub mod serde_utils;
+// tabbed: the fork's own `[tabbed]` keys.
+pub mod tabbed;
 pub mod terminal;
 pub mod ui_config;
 pub mod window;

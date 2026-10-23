@@ -4,7 +4,7 @@
 #![deny(clippy::all, clippy::if_not_else, clippy::enum_glob_use)]
 #![cfg_attr(clippy, deny(warnings))]
 
-pub mod cwd;
+pub mod cwd; // tabbed: working directories reported by shells.
 pub mod event;
 pub mod event_loop;
 pub mod grid;

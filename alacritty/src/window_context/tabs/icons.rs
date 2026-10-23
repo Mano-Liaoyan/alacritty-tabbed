@@ -9,6 +9,7 @@ use std::io::Cursor;
 use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
 
+use alacritty_tabbed_deps::png;
 use log::warn;
 use png::{ColorType, Decoder, Transformations};
 
