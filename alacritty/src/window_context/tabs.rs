@@ -1066,6 +1066,7 @@ pub fn window_event(
                 // Like a native button, × acts on release, so a press there that moves away
                 // closes nothing.
                 tabs.press = Press::Close(index);
+                tabs.last_click = None;
                 return None;
             } else {
                 tabs.press = Press::Bar;

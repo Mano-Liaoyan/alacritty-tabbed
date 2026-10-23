@@ -84,7 +84,7 @@ where the system has none, and other programs get a terminal. A profile can set 
 **Settings panel.** Like Windows Terminal's, the settings list the
 application's pages above the profiles. The gear opens **Appearance**: the
 corners, the interface font and its size, the background opacity, the
-terminal panel, the pane gap and the focus highlight, saved to
+terminal panel, the pane gap, the focus highlight and the tab track, saved to
 `alacritty.toml` (changing only those keys, and keeping its comments) and
 applied to every window. "Edit profiles…" in the ⌄ menu opens the profiles:
 name, icon, command line, starting directory, font, environment variables, configuration overrides,
@@ -154,8 +154,8 @@ Restart Alacritty after changing `window.tabs`.
 
 Keys bound in `keyboard.bindings` keep their meaning, and the `CreateNewTab`,
 `SelectNextTab`, `SelectPreviousTab`, `SelectTab1`-`SelectTab9`,
-`SelectLastTab` and `TogglePaneZoom` actions work on every platform. The window's close button closes
-all of its tabs.
+`SelectLastTab` and `TogglePaneZoom` actions work on every platform. The
+window's close button closes all of its tabs.
 
 ## Profiles
 
