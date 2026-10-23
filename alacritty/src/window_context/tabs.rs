@@ -869,7 +869,6 @@ impl Session {
             #[cfg(not(windows))]
             master_fd: self.master_fd,
             shell_pid: self.shell_pid,
-            zoom: self.zoom,
         }
     }
 }

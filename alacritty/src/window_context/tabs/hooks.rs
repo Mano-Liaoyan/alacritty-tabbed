@@ -9,9 +9,6 @@ use std::rc::Rc;
 use std::time::Instant;
 
 use glutin::config::Config as GlutinConfig;
-use glutin::display::GetGlDisplay;
-#[cfg(all(feature = "x11", not(any(target_os = "macos", windows))))]
-use glutin::platform::x11::X11GlConfigExt;
 use winit::event_loop::{ActiveEventLoop, EventLoopProxy};
 use winit::window::WindowId;
 
@@ -28,7 +25,7 @@ use crate::config::window::StartupMode;
 use crate::display::window::Window;
 use crate::display::{Display, SizeInfo};
 use crate::event::{Event, EventProxy};
-use crate::renderer::{self, Frame};
+use crate::renderer::Frame;
 use crate::scheduler::Scheduler;
 use crate::window_context::WindowContext;
 
@@ -148,40 +145,79 @@ pub fn animate(ctx: &mut WindowContext, now: Instant) {
     }
 }
 
+/// What a new window is made from, besides its config.
+pub enum Origin<'a> {
+    /// A window of its own, restored from the last session if one is saved.
+    Saved(Option<restore::Window>),
+    /// A tab torn off another window, whose focused terminal the window adopts.
+    Torn(&'a mut Torn),
+}
+
+/// Place the window of a tab torn off another where it was dropped, at the size of the window it
+/// was torn off, before it is shown.
+pub fn prepare_window(window: &Window, origin: &Origin<'_>) {
+    if let Origin::Torn(torn) = origin {
+        if let Some(position) = torn.position {
+            window.winit().set_outer_position(position);
+        }
+        window.request_inner_size(torn.size);
+    }
+}
+
+/// Create the context of the new window around `display`: with a shell of its own, or around the
+/// focused terminal of a torn-off tab.
+pub fn context(
+    display: Display,
+    config: Rc<UiConfig>,
+    options: WindowOptions,
+    proxy: EventLoopProxy<Event>,
+    origin: Origin<'_>,
+) -> Result<WindowContext, Box<dyn Error>> {
+    match origin {
+        Origin::Saved(saved) => WindowContext::new(display, config, options, proxy, saved),
+        Origin::Torn(torn) => {
+            // The source window hands over a tab whose focused pane is not live.
+            let Some((id, live)) = torn.live() else {
+                return Err("the torn tab has no terminal to show".into());
+            };
+            Ok(assemble(display, config, id, live))
+        },
+    }
+}
+
 /// Create a window for a tab torn off another, which adopts its running terminals.
 ///
 /// Without a window, the tab is handed back with its terminals untouched.
 pub fn torn_window(
     gl_config: &GlutinConfig,
     event_loop: &ActiveEventLoop,
+    proxy: EventLoopProxy<Event>,
     config: Rc<UiConfig>,
     mut torn: Torn,
 ) -> Result<WindowContext, (Box<dyn Error>, Box<Torn>)> {
-    let (position, size) = (torn.position, torn.size);
+    let zoom = torn.zoom();
     // The window takes the size of the one it was torn off, rather than the startup mode's.
     let mut windowed = (*config).clone();
     windowed.window.startup_mode = StartupMode::Windowed;
-    let display = display(gl_config, event_loop, &windowed, &mut Default::default(), |w| {
-        if let Some(position) = position {
-            w.winit().set_outer_position(position);
-        }
-        w.request_inner_size(size);
-    });
-    let display = match display {
-        Ok(display) => display,
-        Err(err) => return Err((err, Box::new(torn))),
-    };
-    // The source window hands over a tab whose focused pane is not live.
-    let Some((id, live)) = torn.live() else {
-        return Err(("the torn tab has no terminal to show".into(), Box::new(torn)));
-    };
+    let window_context = WindowContext::additional(
+        gl_config,
+        event_loop,
+        proxy,
+        Rc::new(windowed),
+        Default::default(),
+        Default::default(),
+        Origin::Torn(&mut torn),
+    );
 
     // From here on the terminal belongs to the new window, whatever happens.
-    let zoom = live.zoom;
-    let mut window_context = assemble(display, config.clone(), id, live);
+    let mut window_context = match window_context {
+        Ok(window_context) => window_context,
+        Err(err) => return Err((err, Box::new(torn))),
+    };
     // A configured size gives way to the size of the window it was torn off.
-    window_context.display.window.request_inner_size(size);
+    window_context.display.window.request_inner_size(torn.size);
     window_context.display.window.hold = torn.hold;
+    // Adopting the tab also brings in the config the other windows share.
     adopt(&mut window_context, torn, &config);
     // A zoomed pane keeps its text size.
     if let Some(size) = zoom {
@@ -189,45 +225,6 @@ pub fn torn_window(
     }
     window_context.display.window.winit().focus_window();
     Ok(window_context)
-}
-
-/// Create a window and its display with the graphics platform other windows are using,
-/// letting `prepare` adjust the window before it is shown, like [`WindowContext::additional`].
-fn display(
-    gl_config: &GlutinConfig,
-    event_loop: &ActiveEventLoop,
-    config: &UiConfig,
-    options: &mut WindowOptions,
-    prepare: impl FnOnce(&Window),
-) -> Result<Display, Box<dyn Error>> {
-    let gl_display = gl_config.display();
-
-    let mut identity = config.window.identity.clone();
-    options.window_identity.override_identity_config(&mut identity);
-
-    // Check if new window will be opened as a tab.
-    // This must be done before `Window::new()`, which unsets `window_tabbing_id`.
-    #[cfg(target_os = "macos")]
-    let tabbed = options.window_tabbing_id.is_some();
-    #[cfg(not(target_os = "macos"))]
-    let tabbed = false;
-
-    let window = Window::new(
-        event_loop,
-        config,
-        &identity,
-        options,
-        #[cfg(all(feature = "x11", not(any(target_os = "macos", windows))))]
-        gl_config.x11_visual(),
-    )?;
-    prepare(&window);
-
-    // Create context.
-    let raw_window_handle = window.raw_window_handle();
-    let gl_context =
-        renderer::platform::create_gl_context(&gl_display, gl_config, Some(raw_window_handle))?;
-
-    Ok(Display::new(window, gl_context, config, tabbed)?)
 }
 
 /// Create the context of a window around its running terminal `live`, whose events come with the

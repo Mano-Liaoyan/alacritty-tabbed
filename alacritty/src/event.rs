@@ -198,7 +198,7 @@ impl Processor {
             options,
             config_overrides,
             // tabbed: the window to restore from the last session.
-            self.tabbed.saved.take(),
+            crate::window_context::tabs::hooks::Origin::Saved(self.tabbed.saved.take()),
         )?;
 
         self.windows.insert(window_context.id(), window_context);

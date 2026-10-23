@@ -109,7 +109,7 @@ impl Processor {
         }
 
         let gl_config = self.gl_config.as_ref().expect("windows share the first one's config");
-        match torn_window(gl_config, event_loop, self.config.clone(), torn) {
+        match torn_window(gl_config, event_loop, self.proxy.clone(), self.config.clone(), torn) {
             Ok(window_context) => {
                 self.windows.insert(window_context.id(), window_context);
             },

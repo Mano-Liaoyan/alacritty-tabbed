@@ -133,8 +133,8 @@ impl WindowContext {
         config: Rc<UiConfig>,
         mut options: WindowOptions,
         config_overrides: ParsedOptions,
-        // tabbed: the window to restore from the last session.
-        saved: Option<tabs::restore::Window>,
+        // tabbed: the window to restore from the last session, or the tab torn off another.
+        origin: tabs::hooks::Origin<'_>,
     ) -> Result<Self, Box<dyn Error>> {
         let gl_display = gl_config.display();
 
@@ -156,6 +156,8 @@ impl WindowContext {
             #[cfg(all(feature = "x11", not(any(target_os = "macos", windows))))]
             gl_config.x11_visual(),
         )?;
+        // tabbed: a torn-off tab's window opens where it was dropped.
+        tabs::hooks::prepare_window(&window, &origin);
 
         // Create context.
         let raw_window_handle = window.raw_window_handle();
@@ -164,7 +166,8 @@ impl WindowContext {
 
         let display = Display::new(window, gl_context, &config, tabbed)?;
 
-        let mut window_context = Self::new(display, config, options, proxy, saved)?;
+        // tabbed: a torn-off tab's window adopts its terminal rather than starting a shell.
+        let mut window_context = tabs::hooks::context(display, config, options, proxy, origin)?;
 
         // Set the config overrides at startup.
         //
