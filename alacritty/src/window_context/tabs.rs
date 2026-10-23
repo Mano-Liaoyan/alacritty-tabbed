@@ -1081,8 +1081,12 @@ pub fn window_event(
             }
             return None;
         },
-        // Only the live terminal scrolls.
-        WindowEvent::MouseWheel { .. } if over_other_pane => return None,
+        // Only the live terminal scrolls, and not under a fanned shelf.
+        WindowEvent::MouseWheel { .. }
+            if over_other_pane || matches!(layout.hit(tabs.pointer), Hit::Icon(..)) =>
+        {
+            return None;
+        },
         WindowEvent::Touch(mut touch) => {
             touch.location.x -= left;
             touch.location.y -= top;
