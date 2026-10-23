@@ -203,6 +203,7 @@ pub fn draw(tabs: &Tabs, layout: &Layout, palette: &Palette, layer: &mut Layer, 
     let modal = tabs.settings.is_some()
         || tabs.menu.is_some()
         || tabs.context.is_some()
+        || tabs.confirm.is_some()
         || tabs.rename.is_some()
         || tabs.drag.is_some();
     let point = (tabs.pointer.x as f32, tabs.pointer.y as f32);

@@ -46,6 +46,9 @@ pub struct WindowConfig {
     /// Set the tabs on a track, instead of on the bar itself.
     pub tab_track: bool,
 
+    /// Draw the icons of a tab's panes on tiles, instead of bare and as large as the tiles.
+    pub icon_tiles: bool,
+
     /// Space between the panes of a tab, in logical pixels, up to [`MAX_PANE_GAP`].
     pub pane_gap: u8,
 
@@ -122,6 +125,7 @@ impl Default for WindowConfig {
             corners: Default::default(),
             panel: true,
             tab_track: true,
+            icon_tiles: true,
             pane_gap: 16,
             pane_highlight: None,
             pin_tab_bar: true,
@@ -454,7 +458,7 @@ mod tests {
     #[test]
     fn round_three_keys_default() {
         let window = WindowConfig::default();
-        assert!(window.pin_tab_bar && window.wheel_zoom);
+        assert!(window.pin_tab_bar && window.wheel_zoom && window.icon_tiles);
         assert_eq!(window.restore_session, RestoreSession::Off);
         let brand = &window.brand;
         assert!(brand.show);

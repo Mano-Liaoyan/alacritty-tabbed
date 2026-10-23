@@ -179,6 +179,38 @@ impl<P: Copy + PartialEq> Split<P> {
         range
     }
 
+    /// Where `new` joins this group laid out in `area`, every pane keeping at least `min`,
+    /// `spacing` apart: beside all of its panes, `None`, while they keep that much, or else beside
+    /// the roomiest pane it fits beside, as a split would. None when it fits nowhere.
+    ///
+    /// Halving the whole group soon leaves too little for a group of a few panes, while one of
+    /// them still has room enough to share.
+    pub fn spot(
+        &self,
+        new: &Split<P>,
+        area: Rect,
+        min: (f32, f32),
+        spacing: f32,
+    ) -> Option<(Option<P>, Axis, Side)> {
+        let axis = auto_axis(area);
+        if self.clone().join(new.clone(), axis, Side::After).fits_in(area, min, spacing) {
+            return Some((None, axis, Side::After));
+        }
+        let mut panes = self.rects(area, spacing);
+        // Roomiest first; a stable sort keeps the order of the tree among equals.
+        panes.sort_by(|(_, a), (_, b)| (b.w * b.h).total_cmp(&(a.w * a.h)));
+        panes.into_iter().find_map(|(pane, rect)| {
+            let other = match auto_axis(rect) {
+                Axis::Row => Axis::Column,
+                Axis::Column => Axis::Row,
+            };
+            [auto_axis(rect), other]
+                .into_iter()
+                .find(|&axis| fits(rect, axis, Side::After, new, min, spacing))
+                .map(|axis| (Some(pane), axis, Side::After))
+        })
+    }
+
     /// Whether every pane laid out in `area` is at least `min` in size.
     pub fn fits_in(&self, area: Rect, min: (f32, f32), spacing: f32) -> bool {
         self.rects(area, spacing).iter().all(|(_, rect)| rect.w >= min.0 && rect.h >= min.1)
@@ -593,5 +625,28 @@ mod tests {
         assert!(!three().fits_in(Rect::new(0., 0., 209., 110.), min, 10.));
         assert!(!three().fits_in(Rect::new(0., 0., 210., 109.), min, 10.));
         assert!(three().fits_in(Rect::new(0., 0., 200., 100.), min, 0.));
+    }
+
+    #[test]
+    fn spot_halves_the_group_or_shares_its_roomiest_pane() {
+        let (min, new) = ((100., 50.), Split::Pane(9));
+        // Room enough: beside the whole group, along the area's longer side.
+        let roomy = Rect::new(0., 0., 800., 300.);
+        assert_eq!(three().spot(&new, roomy, min, 0.), Some((None, Axis::Row, Side::After)));
+        // Four side by side, each 100 px once halved, which is too little, but pane 1 of the four
+        // can share its own 200 px.
+        let four = pair(
+            Axis::Row,
+            pair(Axis::Row, Split::Pane(1), Split::Pane(2)),
+            pair(Axis::Row, Split::Pane(3), Split::Pane(4)),
+        );
+        let min = (150., 50.);
+        assert_eq!(four.spot(&new, roomy, min, 0.), Some((Some(1), Axis::Column, Side::After)));
+        // The roomiest pane goes first, the other way when its longer side leaves too little.
+        let area = Rect::new(0., 0., 1000., 300.);
+        let wide = (300., 50.);
+        assert_eq!(three().spot(&new, area, wide, 0.), Some((Some(1), Axis::Column, Side::After)));
+        // Nowhere to go.
+        assert_eq!(four.spot(&new, Rect::new(0., 0., 400., 100.), min, 0.), None);
     }
 }

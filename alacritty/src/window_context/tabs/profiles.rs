@@ -183,7 +183,7 @@ pub fn shell(config: &UiConfig) -> String {
 
 /// Split a command line into its program and arguments.
 #[cfg(windows)]
-fn split(command: &str) -> Option<(String, Vec<String>)> {
+pub(super) fn split(command: &str) -> Option<(String, Vec<String>)> {
     // Windows programs parse their own command line, so the arguments are passed verbatim.
     let command = command.trim();
     let end = match command.strip_prefix('"') {
@@ -191,13 +191,43 @@ fn split(command: &str) -> Option<(String, Vec<String>)> {
         None => command.find(char::is_whitespace).unwrap_or(command.len()),
     };
     let (program, args) = command.split_at(end);
-    let args = Some(args.trim()).filter(|args| !args.is_empty()).map(String::from);
+    let lower = program.trim_matches('"').to_lowercase();
+    let args = match lower == "wsl" || lower.ends_with("wsl.exe") {
+        true => unquote_distribution(args.trim()),
+        false => args.trim().into(),
+    };
+    let args = Some(args).filter(|args| !args.is_empty());
     (!program.is_empty()).then(|| (program.into(), args.into_iter().collect()))
+}
+
+/// Command line starting the WSL distribution `name` in its home directory.
+///
+/// `wsl.exe` reads its own command line and keeps quotes as part of the distribution's name, so
+/// the name, which cannot contain spaces, is left unquoted.
+#[cfg(windows)]
+pub fn wsl_command(name: &str) -> String {
+    format!("wsl.exe -d {name} --cd ~")
+}
+
+/// Drop the quotes around the distribution's name in `wsl.exe`'s arguments, which profiles saved
+/// by earlier versions have and `wsl.exe` would look for as part of the name.
+#[cfg(windows)]
+fn unquote_distribution(args: &str) -> String {
+    let mut words: Vec<&str> = args.split(' ').collect();
+    for index in 1..words.len() {
+        let name = words[index].strip_prefix('"').and_then(|word| word.strip_suffix('"'));
+        let name = name.filter(|name| !name.is_empty() && !name.contains('"'));
+        let option = matches!(words[index - 1], "-d" | "--distribution");
+        if let Some(name) = name.filter(|_| option) {
+            words[index] = name;
+        }
+    }
+    words.join(" ")
 }
 
 /// Split a command line into its program and arguments, like a shell without expansions.
 #[cfg(not(windows))]
-fn split(command: &str) -> Option<(String, Vec<String>)> {
+pub(super) fn split(command: &str) -> Option<(String, Vec<String>)> {
     let mut words = Vec::new();
     let mut word: Option<String> = None;
     let mut quote = None;
@@ -312,6 +342,27 @@ mod tests {
         let (program, args) = split(r#""C:\Program Files\Git\bin\bash.exe" --login -i"#).unwrap();
         assert_eq!(program, r#""C:\Program Files\Git\bin\bash.exe""#);
         assert_eq!(args, ["--login -i"]);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn wsl_distributions_are_named_without_quotes() {
+        assert_eq!(wsl_command("Ubuntu-24.04"), "wsl.exe -d Ubuntu-24.04 --cd ~");
+        let (program, args) = split(&wsl_command("openSUSE-Tumbleweed")).unwrap();
+        assert_eq!(program, "wsl.exe");
+        assert_eq!(args, ["-d openSUSE-Tumbleweed --cd ~"]);
+
+        // Profiles saved with the name quoted, which `wsl.exe` would not find.
+        let (_, args) = split(r#"wsl.exe -d "Ubuntu-24.04" --cd ~"#).unwrap();
+        assert_eq!(args, ["-d Ubuntu-24.04 --cd ~"]);
+        let (_, args) = split(r#"C:\Windows\System32\wsl.exe --distribution "Debian""#).unwrap();
+        assert_eq!(args, ["--distribution Debian"]);
+        let (_, args) = split(r#"wsl -d Ubuntu -e sh -c "echo a""#).unwrap();
+        assert_eq!(args, [r#"-d Ubuntu -e sh -c "echo a""#]);
+
+        // Other programs keep their quotes.
+        let (_, args) = split(r#"ssh.exe -d "host""#).unwrap();
+        assert_eq!(args, [r#"-d "host""#]);
     }
 
     #[test]

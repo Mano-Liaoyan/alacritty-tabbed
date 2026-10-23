@@ -28,7 +28,7 @@ use super::anim::{Curve, Tween};
 use super::dnd::{Source, Target};
 use super::paint::{self, BLACK, Image, Layer, Palette, Rect, WHITE, mix};
 use super::text::UiFont;
-use super::{Frame, Pane, Tab, Tabs, context, icons, panes, peek, rename};
+use super::{Frame, Pane, Tab, Tabs, confirm, context, icons, panes, peek, rename};
 
 /// Height of the bar in logical pixels, on every platform.
 pub const BAR: f32 = 48.;
@@ -165,18 +165,16 @@ impl Layout {
         let lights = if mac { px(72.) } else { 0. };
         // GNOME's and KDE's round window buttons end as far from the window's edge as the logo
         // begins, so the bar's two ends mirror each other.
-        let trailing = if mac || cfg!(windows) {
-            margin
-        } else {
-            px(MARGIN + INSET) - (caption / 2. - px(CONTROL_DOT))
-        };
+        let trailing =
+            if mac || cfg!(windows) { margin } else { margin - (caption / 2. - px(CONTROL_DOT)) };
         let controls = width - trailing - if mac { 0. } else { 3. * caption };
         let [pin, settings] = ends(controls, scale);
 
-        // The logo is set in from the window's edge as far as from its top, which keeps it clear
-        // of the rounded corner and lines it up with the terminal's text below. macOS puts it
-        // beside its window buttons instead.
-        let left = if mac { lights + px(7.) } else { px(MARGIN + INSET) };
+        // The bar's first thing, the logo, its names, the track or else the first tab, begins at
+        // the edge of the panes' cards below, as the window's controls end at it on the right.
+        // macOS puts it beside its window buttons instead.
+        let left = if mac { lights + px(7.) } else { margin };
+        let on_track = tabs.configs.as_ref().is_none_or(|(config, _)| config.window.tab_track);
         let default = Brand::default();
         let config = tabs.configs.as_ref().map_or(&default, |(config, _)| &config.window.brand);
         let image = config.show.then(|| icons::brand(&config.icon)).flatten();
@@ -190,9 +188,11 @@ impl Layout {
         let text = names.iter().map(|(name, title)| font.width(name, *title)).fold(0., f32::max);
         let text = (width >= px(780.) && !names.is_empty()).then_some(text);
         let (mark, label, brand) = brand(left, image.is_some(), text, bar, scale);
+        // Without a track drawn around them, the tabs take its padding across.
+        let inner = if on_track { pad } else { 0. };
 
         let min_tab = px(124.);
-        let available = pin - px(48.) - brand - 2. * pad - px(6.) - control - chevron;
+        let available = pin - px(48.) - brand - 2. * inner - px(6.) - control - chevron;
         let overflow = count as f32 > (available / min_tab).floor().max(1.);
         let available = (available - if overflow { 2. * nav + px(6.) } else { 0. }).max(1.);
         let capacity = ((available / min_tab) as usize).max(1);
@@ -204,15 +204,8 @@ impl Layout {
             .max((tabs.active + 1).saturating_sub(capacity))
             .min(count - shown);
 
-        let (top, bottom) = (px(TRACK_TOP), bar - px(TRACK_TOP));
-        let tab_rects: Vec<_> = (0..shown)
-            .map(|slot| {
-                let x = brand + pad + slot as f32 * step;
-                (first + slot, Rect::new(x, top + pad, step - px(4.), bottom - top - 2. * pad))
-            })
-            .collect();
-        let right = tab_rects.last().map_or(brand, |(_, rect)| rect.right() + pad);
-        let track = Rect::new(brand, top, right - brand, bottom - top);
+        let (track, slots) = track(brand, (inner, pad), shown, step, bar, scale);
+        let tab_rects: Vec<_> = slots.into_iter().enumerate().map(|(i, r)| (first + i, r)).collect();
 
         let mut buttons = Vec::new();
         let mut x = track.right() + px(6.);
@@ -466,7 +459,7 @@ fn ends(controls: f32, scale: f32) -> [f32; 2] {
 /// Where the logo and the names beside it go, from `left` in a bar `bar` high, and where the tab
 /// track begins after them: an `icon` is a square as wide as the bar's buttons are tall less
 /// some, and names `text` wide take at most 160 logical pixels. Without either the track begins
-/// at `left`, lined up with the terminal's text.
+/// at `left`.
 fn brand(
     left: f32,
     icon: bool,
@@ -484,6 +477,35 @@ fn brand(
         (None, None) => left,
     };
     (mark, label, track)
+}
+
+/// The tab track beginning at `start` in a bar `bar` high, and its `shown` tabs `step` apart:
+/// set in from its ends by `inner`, and from its top and bottom by `pad`. A track that is not
+/// drawn has no `inner` padding, so its first tab begins where it would.
+fn track(
+    start: f32,
+    (inner, pad): (f32, f32),
+    shown: usize,
+    step: f32,
+    bar: f32,
+    scale: f32,
+) -> (Rect, Vec<Rect>) {
+    let px = |value: f32| (value * scale).round();
+    let (top, bottom) = (px(TRACK_TOP), bar - px(TRACK_TOP));
+    let tabs: Vec<_> = (0..shown)
+        .map(|slot| {
+            let x = start + inner + slot as f32 * step;
+            Rect::new(x, top + pad, step - px(4.), bottom - top - 2. * pad)
+        })
+        .collect();
+    let right = tabs.last().map_or(start, |rect| rect.right() + inner);
+    (Rect::new(start, top, right - start, bottom - top), tabs)
+}
+
+/// Where the image of a pane's icon `icon` in a deck goes: inside the tile it lies on, or the
+/// whole of it without `tiles`, so a bare icon is as large as a tiled one.
+fn card_image(icon: Rect, tiles: bool) -> Rect {
+    if tiles { icon.inset((icon.w / 9.).round()) } else { icon }
 }
 
 /// What the pointer at `point` is over while the bar is hidden: the panes have the window, whose
@@ -575,12 +597,13 @@ fn deck(
     Deck { icons, chip }
 }
 
-/// Where the capsule counting the panes left out of a deck with the badge `front` is: tucked
-/// behind its last card like one more, centered on the badge, showing `size` beside the card.
+/// Where the capsule counting the panes left out of a deck with the badge `front` is: just past
+/// its last card, centered on the badge, all of its `size` clear of the cards so none of them
+/// covers it or its count.
 fn chip(front: Rect, (width, height): (f32, f32), scale: f32) -> Rect {
-    let (edge, tuck) = (front.right() + 6. * (DECK - 1) as f32 * scale, 4. * scale);
+    let (edge, gap) = (front.right() + 6. * (DECK - 1) as f32 * scale, 3. * scale);
     let y = front.center().1 - height / 2.;
-    Rect::new((edge - tuck).round(), y.round(), width + tuck.round(), height)
+    Rect::new((edge + gap).round(), y.round(), width, height)
 }
 
 /// How opaque the icon `order`th from the front of a deck of `count` is, fanned out by `fan`: the
@@ -855,7 +878,7 @@ impl Tabs {
 
         // Tabs on a track, or on the bar itself, the active one raised from it.
         let radius = layout.radius(TRACK_RADIUS);
-        let on_track = config.window.tab_track;
+        let (on_track, tiles) = (config.window.tab_track, config.window.icon_tiles);
         let track = if on_track { palette.track } else { palette.chrome };
         if on_track && !layout.tabs.is_empty() {
             base.outlined(layout.track, radius, track, palette.track_outline, line);
@@ -988,16 +1011,18 @@ impl Tabs {
                     let Pane { icon: image, badge: text, .. } = &tab.panes[pane];
                     match image {
                         Some(image) => {
-                            let card = mix(surface, palette.foreground, 0.16 + 0.1 * lift);
-                            into.rounded_alpha(icon, layout.curve(icon.w / 4.), card, alpha);
-                            let inner = icon.inset((icon.w / 9.).round());
+                            if tiles {
+                                let card = mix(surface, palette.foreground, 0.16 + 0.1 * lift);
+                                into.rounded_alpha(icon, layout.curve(icon.w / 4.), card, alpha);
+                            }
+                            let inner = card_image(icon, tiles);
                             into.image_alpha(inner, image, palette.foreground, alpha);
                         },
                         None => badge(into, &layout, icon, None, text, font, colors(pane, alpha)),
                     }
                 };
-                // From the back: the panes left out of the deck, which come out from under the
-                // count of them, then the cards.
+                // From the back: the panes left out of the deck, which come out from behind its
+                // last card, the count of them, then the cards.
                 let back_to_front = deck.icons.iter().rev().enumerate().rev();
                 let dragged = |pane: usize| source == Some(Source::Pane(index, pane));
                 let (cards, hidden): (Vec<_>, Vec<_>) = back_to_front
@@ -1009,11 +1034,9 @@ impl Tabs {
                 if let Some((chip, _)) = deck.chip.filter(|_| fan < 1.) {
                     let fill = mix(surface, palette.foreground, 0.12);
                     into.rounded_alpha(chip, layout.curve(chip.h / 2.), fill, 1. - fan);
-                    let tuck = px(4.) + line;
-                    let label = Rect::new(chip.x + tuck, chip.y, chip.w - tuck, chip.h);
                     let color = if lit(index) { palette.foreground } else { palette.muted };
                     let color = mix(fill, color, 1. - fan);
-                    into.label(label, &count_label(count), font, color, false);
+                    into.label(chip, &count_label(count), font, color, false);
                 }
                 for (order, &(pane, icon)) in cards {
                     card(into, order, pane, icon);
@@ -1150,6 +1173,7 @@ impl Tabs {
         }
         layers.push(carried);
         layers.extend(context::draw(self, &layout, &palette, now));
+        layers.extend(confirm::draw(self, &layout, &palette, now));
         if let Some(settings) = &self.settings {
             layers.extend(settings.draw(&layout, &palette, config, window));
         }
@@ -1331,9 +1355,11 @@ mod tests {
             assert_eq!(order, [3, 2, 1, 0, 4]);
             let (chip, hidden) = deck.chip.unwrap();
             assert_eq!((hidden, count_label(count).as_str()), (count - 5, label));
-            // The count overlaps the last card and is centered on the badge.
+            // The count is clear of the last card, and of the outline cut around it, and is
+            // centered on the badge.
             let last = deck.icons[0].1;
-            assert!(chip.x < last.right() && chip.right() > last.right(), "{chip:?} {last:?}");
+            assert!(chip.x > last.right() + 1., "{chip:?} {last:?}");
+            assert_eq!(chip.w, chip_size(count).0);
             assert!((chip.center().1 - FRONT.center().1).abs() <= 0.5);
             // However many panes, the deck leaves the title its room.
             assert!(last.right() < FRONT.x + 70., "{count}: {last:?}");
@@ -1538,11 +1564,11 @@ mod tests {
 
     #[test]
     fn brand_lays_out_its_icon_and_names() {
-        let (left, bar) = (12., 48.);
         // Both: the names after the icon, the track after the names.
+        let (left, bar) = (8., 48.);
         let (mark, label, track) = brand(left, true, Some(90.), bar, 1.);
         let (mark, label) = (mark.unwrap(), label.unwrap());
-        assert_eq!(mark, Rect::new(12., 12., 24., 24.));
+        assert_eq!(mark, Rect::new(8., 12., 24., 24.));
         assert_eq!((label.x, label.w), (mark.right() + 11., 90.));
         assert_eq!(track, label.right() + 4.);
         // Long names are cut.
@@ -1554,12 +1580,62 @@ mod tests {
         // Names only begin where the icon would.
         let (mark, label, _) = brand(left, false, Some(50.), bar, 1.);
         assert_eq!((mark, label.unwrap().x), (None, left));
-        // Hidden: the tabs begin where the logo did.
+        // Hidden: the track begins where the logo would.
         assert_eq!(brand(left, false, None, bar, 1.), (None, None, left));
         // Scaled.
-        let (mark, label, _) = brand(24., true, Some(90.), 96., 2.);
+        let (mark, label, _) = brand(16., true, Some(90.), 96., 2.);
         assert_eq!(mark.unwrap().w, 48.);
         assert_eq!(label.unwrap().x, mark.unwrap().right() + 22.);
+    }
+
+    #[test]
+    fn tabs_sit_in_their_track_or_take_its_padding() {
+        let (on, tabs) = track(8., (3., 3.), 2, 200., 48., 1.);
+        assert_eq!(on, Rect::new(8., 6., 2. * 200. - 4. + 6., 36.));
+        assert_eq!(tabs, [Rect::new(11., 9., 196., 30.), Rect::new(211., 9., 196., 30.)]);
+        // Without a track drawn, the first tab begins where the track does.
+        let (bare, tabs) = track(8., (0., 3.), 2, 200., 48., 1.);
+        assert_eq!((tabs[0].x, tabs[0].y, tabs[0].h), (8., 9., 30.));
+        assert_eq!(bare.right(), tabs[1].right());
+        // No tabs, no track.
+        assert_eq!(track(8., (3., 3.), 0, 200., 48., 1.).0.w, 0.);
+    }
+
+    #[test]
+    fn bar_begins_at_the_edge_of_the_panes_cards() {
+        let area = Rect::new(0., 48., 1200., 700.);
+        for scale in [1., 1.25, 1.5, 2.] {
+            let px = |value: f32| (value * scale).round();
+            let (bar, left, pad) = (px(BAR), px(MARGIN), px(TRACK_PAD));
+            for (logo, on_track, panel) in (0..8).map(|i| (i & 1 > 0, i & 2 > 0, i & 4 > 0)) {
+                // As the bar lays itself out, without names.
+                let (mark, _, start) = brand(left, logo, None, bar, scale);
+                let inner = if on_track { pad } else { 0. };
+                let (drawn, tabs) = track(start, (inner, pad), 3, px(200.), bar, scale);
+                // What is seen first at the left: the logo, the track, or else the first tab.
+                let first = match (mark, on_track) {
+                    (Some(mark), _) => mark.x,
+                    (None, true) => drawn.x,
+                    (None, false) => tabs[0].x,
+                };
+                let card = Tabs { panel, scale: scale.into(), ..Tabs::default() }.card(area);
+                // Without a panel the cards fill the window, and the bar keeps clear of its
+                // corner the same.
+                let edge = if panel { card.x } else { px(MARGIN) };
+                assert_eq!(first, edge, "logo {logo}, track {on_track}, panel {panel}, {scale}");
+            }
+        }
+    }
+
+    #[test]
+    fn bare_icons_are_as_large_as_their_tiles() {
+        assert_eq!(card_image(FRONT, true), Rect::new(102., 17., 14., 14.));
+        assert_eq!(card_image(FRONT, false), FRONT);
+        // The deck is laid out by its icons' places, which bare icons fill: its cards overlap
+        // alike, and its count stays clear of them.
+        let deck = deck(FRONT, 7, 0, 1., ROW_MAX, chip_size(7), at_rest);
+        let (last, chip) = (deck.icons[0].1, deck.chip.unwrap().0);
+        assert!(chip.x > card_image(last, false).right() + 1., "{chip:?} {last:?}");
     }
 
     #[test]

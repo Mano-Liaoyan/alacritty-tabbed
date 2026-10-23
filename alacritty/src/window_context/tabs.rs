@@ -16,11 +16,14 @@ mod anim;
 mod app_settings;
 mod autohide;
 mod bar;
+mod confirm;
 mod context;
+mod cwd;
 mod divider;
 mod dnd;
 mod fonts;
 mod icons;
+mod job;
 mod paint;
 mod panes;
 mod peek;
@@ -92,6 +95,8 @@ use app_settings::AppSettings;
 use bar::{BAR, Hit, INSET, Layout, MARGIN};
 use dnd::{Drag, Source, Target};
 use paint::Image;
+#[cfg(windows)]
+pub use cwd::{mark as mark_pane, register as register_pane};
 pub use paint::Rect;
 use panes::Control;
 use profiles::{Profile, Profiles};
@@ -201,6 +206,8 @@ pub struct Tabs {
     menu: Option<Menu>,
     /// The open context menu of a pane.
     context: Option<context::Menu>,
+    /// The open popup asking whether to close a pane running a job.
+    confirm: Option<confirm::Dialog>,
     settings: Option<Settings>,
     pane_effects: panes::Effects,
     bar_effects: bar::Effects,
@@ -296,8 +303,8 @@ enum Press {
     Divider,
     /// On the close button of the tab at this index, which closes it if released there.
     Close(usize),
-    /// On the zoom control of the pane at this index, which zooms it if released there.
-    Control(usize),
+    /// On the zoom or close control of the pane at this index, which acts if released there.
+    Control(usize, Control),
     /// Over something that used the press, such as a pane it focused, so the terminal gets
     /// neither it nor its release.
     Swallowed,
@@ -321,7 +328,6 @@ struct Session {
     window_config: ParsedOptions,
     #[cfg(not(windows))]
     master_fd: RawFd,
-    #[cfg(not(windows))]
     shell_pid: u32,
     /// The pane's configuration, with its profile's overrides and padding.
     config: Rc<UiConfig>,
@@ -511,6 +517,7 @@ impl Tabs {
         self.pane_effects.running(now)
             || self.bar_effects.running(now)
             || self.context.as_ref().is_some_and(|menu| menu.running(now))
+            || self.confirm.as_ref().is_some_and(|dialog| dialog.running(now))
             || self.divider.running(now)
             || self.peeking.running(now)
             || self.autohide.running(now)
@@ -651,13 +658,14 @@ fn tidy(name: Option<String>) -> Option<String> {
 }
 
 /// Move the live pane to `target`, where it stays live; `Dock` refers to the panes of the tab
-/// `shown`. Returns whether it moved.
+/// `shown`, and a `Merge` finds it a place where each pane of the tab keeps `min` in `area`, as
+/// `join_spot` does. Returns whether it moved.
 fn place<S>(
     tabs: &mut Vec<Tab<S>>,
     active: &mut usize,
     shown: usize,
     target: Target,
-    area: Rect,
+    (area, min, spacing): (Rect, (f32, f32), f32),
 ) -> bool {
     let (from, pane) = (*active, tabs[*active].focus);
     let alone = tabs[from].panes.len() == 1;
@@ -681,7 +689,9 @@ fn place<S>(
     let (tab, index) = match target {
         Target::Merge(tab) => {
             let (tab, id) = (shift(tab), moved.id);
-            tabs[tab].join(Tab::new(moved), None, split::auto_axis(area), Side::After);
+            let (beside, axis, side) =
+                join_spot(&tabs[tab].layout, &Split::Pane(id), area, min, spacing);
+            tabs[tab].join(Tab::new(moved), beside, axis, side);
             (tab, tabs[tab].position(id).unwrap_or_default())
         },
         Target::Dock { axis, side, .. } => {
@@ -707,27 +717,39 @@ fn reorder<S>(tabs: &mut Vec<Tab<S>>, active: &mut usize, to: usize) {
     tabs.insert(*active, tab);
 }
 
+/// Where `new` joins the panes of `group` in `area`, each keeping `min`, `spacing` apart, as
+/// [`Split::spot`] finds; beside them all when it fits nowhere, as before there was a check.
+fn join_spot(
+    group: &Split<WindowId>,
+    new: &Split<WindowId>,
+    area: Rect,
+    min: (f32, f32),
+    spacing: f32,
+) -> (Option<WindowId>, Axis, Side) {
+    group.spot(new, area, min, spacing).unwrap_or((None, split::auto_axis(area), Side::After))
+}
+
 /// Group the active tab with the tab `into`, which takes its place and its focus: docked beside
-/// the pane of `dock`, or else beside all of its panes. Returns whether they were grouped.
+/// the pane of `dock`, or else where `join_spot` finds room in `area`. Returns whether they were
+/// grouped.
 fn group<S>(
     tabs: &mut Vec<Tab<S>>,
     active: &mut usize,
     into: usize,
     dock: Option<(usize, Axis, Side)>,
-    area: Rect,
+    (area, min, spacing): (Rect, (f32, f32), f32),
 ) -> bool {
     let from = *active;
     if into == from || into >= tabs.len() {
         return false;
     }
-    let beside = match dock {
-        Some((pane, ..)) => match tabs[into].panes.get(pane) {
-            Some(pane) => Some(pane.id),
+    let (beside, axis, side) = match dock {
+        Some((pane, axis, side)) => match tabs[into].panes.get(pane) {
+            Some(pane) => (Some(pane.id), axis, side),
             None => return false,
         },
-        None => None,
+        None => join_spot(&tabs[into].layout, &tabs[from].layout, area, min, spacing),
     };
-    let (axis, side) = dock.map_or((split::auto_axis(area), Side::After), |(_, a, s)| (a, s));
     let tab = tabs.remove(from);
     let into = if into > from { into - 1 } else { into };
     let focus = tab.pane().id;
@@ -768,10 +790,16 @@ impl Session {
         }
         let terminal = Arc::new(FairMutex::new(terminal));
 
+        #[cfg(windows)]
+        let marker = cwd::mark(&mut pty_config);
         // Shells and `alacritty msg` refer to the window, not the tab.
         let pty = tty::new(&pty_config, size.into(), ctx.id().into())?;
         #[cfg(not(windows))]
         let (master_fd, shell_pid) = (pty.file().as_raw_fd(), pty.child().id());
+        #[cfg(windows)]
+        let shell_pid = pty.child_watcher().pid().map_or(0, |pid| pid.get());
+        #[cfg(windows)]
+        cwd::register(shell_pid, marker);
         let event_loop =
             PtyEventLoop::new(terminal.clone(), event_proxy, pty, pty_config.drain_on_exit, false)?;
         let notifier = Notifier(event_loop.channel());
@@ -788,7 +816,6 @@ impl Session {
             preserve_title: false,
             #[cfg(not(windows))]
             master_fd,
-            #[cfg(not(windows))]
             shell_pid,
             config,
             size,
@@ -817,10 +844,8 @@ impl Session {
         mem::swap(&mut self.preserve_title, &mut ctx.preserve_title);
         mem::swap(&mut self.window_config, &mut ctx.window_config);
         #[cfg(not(windows))]
-        {
-            mem::swap(&mut self.master_fd, &mut ctx.master_fd);
-            mem::swap(&mut self.shell_pid, &mut ctx.shell_pid);
-        }
+        mem::swap(&mut self.master_fd, &mut ctx.master_fd);
+        mem::swap(&mut self.shell_pid, &mut ctx.shell_pid);
         self.config = ctx.config.clone();
         self.size = ctx.display.size_info;
         let live = mem::replace(&mut ctx.display.font_size, incoming);
@@ -839,7 +864,6 @@ impl Session {
             preserve_title: self.preserve_title,
             #[cfg(not(windows))]
             master_fd: self.master_fd,
-            #[cfg(not(windows))]
             shell_pid: self.shell_pid,
             zoom: self.zoom,
         }
@@ -946,6 +970,7 @@ pub fn window_event(
     let modal = tabs.settings.is_some()
         || tabs.menu.is_some()
         || tabs.context.is_some()
+        || tabs.confirm.is_some()
         || tabs.rename.is_some();
     // The live terminal's pane, which pointer positions are given relative to.
     let pane = tabs.focused_rect();
@@ -995,6 +1020,7 @@ pub fn window_event(
                 return None;
             }
             if divider::key(ctx, key)
+                || confirm::key(ctx, key, config)
                 || context::key(ctx, key, config, proxy)
                 || dnd::key(ctx, key, config)
             {
@@ -1023,7 +1049,7 @@ pub fn window_event(
                 ctx.display.window.set_mouse_cursor(CursorIcon::Default);
                 return None;
             }
-            if context::moved(ctx, position) {
+            if confirm::moved(ctx, position) || context::moved(ctx, position) {
                 return None;
             }
             let tabs = &mut ctx.display.tabs;
@@ -1052,8 +1078,11 @@ pub fn window_event(
                 return None;
             }
 
-            // A pane is grabbed by its grip, or anywhere with the modifiers that drag it.
-            let control = panes::control_at(tabs, &layout, position).filter(|_| free && !shelf);
+            // A pane is grabbed by its grip, or anywhere with the modifiers that drag it. The
+            // window's resize borders keep the pointer over the controls near them.
+            let resize = matches!(under, Hit::Resize(_));
+            let control =
+                panes::control_at(tabs, &layout, position).filter(|_| free && !shelf && !resize);
             if mem::replace(&mut tabs.control, control) != control {
                 redraw(ctx);
             }
@@ -1062,7 +1091,7 @@ pub fn window_event(
             if control.is_some() || over_pane && tabs.pane_drag() {
                 hover(ctx, Hit::None);
                 let cursor = match control {
-                    Some((_, Control::Zoom)) => CursorIcon::Pointer,
+                    Some((_, Control::Zoom | Control::Close)) => CursorIcon::Pointer,
                     _ => CursorIcon::Grab,
                 };
                 ctx.display.window.set_mouse_cursor(cursor);
@@ -1100,6 +1129,9 @@ pub fn window_event(
         // The release that would end a drag may never come once the window loses focus.
         WindowEvent::Focused(false) => {
             context::unfocused(ctx);
+            if let Some(settings) = &mut ctx.display.tabs.settings {
+                settings.release();
+            }
             dnd::cancel(ctx, config);
             divider::release(ctx);
             if ctx.display.tabs.press == Press::Divider {
@@ -1143,14 +1175,18 @@ pub fn window_event(
                     }
                     return None;
                 },
-                // Like a native button, the zoom control acts on release.
-                Press::Control(index) => {
-                    if panes::control_at(tabs, &layout, tabs.pointer)
-                        == Some((index, Control::Zoom))
-                    {
-                        let active = tabs.active;
-                        focus_pane(ctx, active, index, config);
-                        toggle_zoom(ctx);
+                // Like native buttons, the zoom and close controls act on release.
+                Press::Control(index, control) => {
+                    let active = tabs.active;
+                    if panes::control_at(tabs, &layout, tabs.pointer) == Some((index, control)) {
+                        match control {
+                            Control::Zoom => {
+                                focus_pane(ctx, active, index, config);
+                                toggle_zoom(ctx);
+                            },
+                            Control::Close => confirm::request(ctx, active, index, config),
+                            Control::Grip => (),
+                        }
                     }
                     return None;
                 },
@@ -1178,7 +1214,7 @@ pub fn window_event(
                 redraw(ctx);
                 return None;
             }
-            if context::press(ctx, button, config, proxy) {
+            if confirm::press(ctx, button, config) || context::press(ctx, button, config, proxy) {
                 return None;
             }
             let tabs = &mut ctx.display.tabs;
@@ -1187,12 +1223,20 @@ pub fn window_event(
                 return None;
             }
             let tabs = &mut ctx.display.tabs;
-            if let (Some((index, Control::Zoom)), MouseButton::Left) = (tabs.control, button) {
-                tabs.press = Press::Control(index);
-                return None;
+            match (tabs.control, button) {
+                (Some((index, control @ (Control::Zoom | Control::Close))), MouseButton::Left) => {
+                    tabs.press = Press::Control(index, control);
+                    return None;
+                },
+                // Other buttons on a button do nothing, rather than reach the terminal under it.
+                (Some((_, Control::Zoom | Control::Close)), _) => {
+                    tabs.press = Press::Swallowed;
+                    return None;
+                },
+                _ => (),
             }
             let dragged = terminal && tabs.pane_drag();
-            let grip = tabs.control.map(|(index, _)| index);
+            let grip = tabs.control.filter(|&(_, c)| c == Control::Grip).map(|(index, _)| index);
             let grabbed = grip.or_else(|| tabs.pane_at(pointer).filter(|_| dragged));
             if let (Some(pane), MouseButton::Left) = (grabbed, button) {
                 // Like its icon in the bar, a pane is focused as it is pressed to drag it.
@@ -1762,7 +1806,7 @@ fn click(
             ctx.display.tabs.menu = Some(Menu { profiles, selected: 0 });
             redraw(ctx);
         },
-        (Hit::Settings, MouseButton::Left) => open_settings(ctx, config, proxy, Page::Appearance),
+        (Hit::Settings, MouseButton::Left) => open_settings(ctx, config, proxy, Page::General),
         (Hit::Pin, MouseButton::Left) => toggle_pin(config, proxy),
         (Hit::Previous, MouseButton::Left) => run(ctx, Command::Previous, config, proxy),
         (Hit::Next, MouseButton::Left) => run(ctx, Command::Next, config, proxy),
@@ -1958,10 +2002,14 @@ pub fn split(
     let profiles = Profiles::load(config).list;
     let profile = profiles.into_iter().find(|profile| Some(&profile.name) == name.as_ref());
     // The new shell starts where the focused one is.
+    let reported = ctx.terminal.lock().reported_directory.clone();
     #[cfg(not(windows))]
-    let directory = crate::daemon::foreground_process_path(ctx.master_fd, ctx.shell_pid).ok();
+    let process = || crate::daemon::foreground_process_path(ctx.master_fd, ctx.shell_pid).ok();
     #[cfg(windows)]
-    let directory = None;
+    let command = profile.as_ref().map(|profile| profile.command.clone());
+    #[cfg(windows)]
+    let process = || cwd::process_directory(ctx.shell_pid, command.as_deref());
+    let (profile, directory) = cwd::inherit(profile, reported, process);
     let spawned = Session::spawn(ctx, config, proxy, profile.as_ref(), directory, None);
     let (id, session) = match spawned {
         Ok(pane) => pane,
@@ -2182,12 +2230,13 @@ pub fn move_pane(
     let effects = mem::take(&mut ctx.display.tabs.pane_effects);
     focus_pane(ctx, tab, pane, config);
     ctx.display.tabs.pane_effects = effects;
+    let min = min_pane(&ctx.display.size_info);
     let tabs = &mut ctx.display.tabs;
-    let area = tabs.area();
+    let room = (tabs.area(), min, tabs.spacing());
     if tabs.tabs.is_empty() || tabs.live() != (tab, pane) {
         return;
     }
-    if place(&mut tabs.tabs, &mut tabs.active, shown, target, area) {
+    if place(&mut tabs.tabs, &mut tabs.active, shown, target, room) {
         relayout(ctx);
     }
 }
@@ -2205,12 +2254,13 @@ pub fn merge(
     let effects = mem::take(&mut ctx.display.tabs.pane_effects);
     select(ctx, from, config);
     ctx.display.tabs.pane_effects = effects;
+    let min = min_pane(&ctx.display.size_info);
     let tabs = &mut ctx.display.tabs;
-    let area = tabs.area();
+    let room = (tabs.area(), min, tabs.spacing());
     if tabs.active != from || from >= tabs.tabs.len() {
         return;
     }
-    if group(&mut tabs.tabs, &mut tabs.active, into, dock, area) {
+    if group(&mut tabs.tabs, &mut tabs.active, into, dock, room) {
         relayout(ctx);
     }
 }
@@ -2310,8 +2360,8 @@ mod tests {
         fn place(&mut self, from: (usize, usize), target: Target) -> bool {
             let shown = self.active;
             self.focus(from);
-            let area = Rect::new(0., 40., 1000., 600.);
-            let placed = place(&mut self.tabs, &mut self.active, shown, target, area);
+            let room = (Rect::new(0., 40., 1000., 600.), (0., 0.), 0.);
+            let placed = place(&mut self.tabs, &mut self.active, shown, target, room);
             self.check();
             placed
         }
@@ -2411,7 +2461,7 @@ mod tests {
         model.check();
 
         // Grouping whole tabs keeps the focus of the tab that moved.
-        let area = Rect::new(0., 0., 800., 600.);
+        let area = (Rect::new(0., 0., 800., 600.), (0., 0.), 0.);
         model.tabs.push(Tab::new(pane(7, Some(7))));
         assert!(group(&mut model.tabs, &mut model.active, 2, None, area));
         assert_eq!((model.tabs.len(), model.ids(1), model.live), (2, vec![7, 3], 3));
@@ -2441,7 +2491,7 @@ mod tests {
         assert!(!model.tabs[0].zoom, "remove");
 
         zoom(&mut model);
-        let area = Rect::new(0., 0., 800., 600.);
+        let area = (Rect::new(0., 0., 800., 600.), (0., 0.), 0.);
         model.focus((1, 0));
         assert!(group(&mut model.tabs, &mut model.active, 0, None, area));
         assert!(!model.tabs[0].zoom, "join");

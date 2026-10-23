@@ -70,7 +70,6 @@ pub struct WindowContext {
     preserve_title: bool,
     #[cfg(not(windows))]
     master_fd: RawFd,
-    #[cfg(not(windows))]
     shell_pid: u32,
     window_config: ParsedOptions,
     config: Rc<UiConfig>,
@@ -292,12 +291,18 @@ impl WindowContext {
         // The PTY forks a process to run the shell on the slave side of the
         // pseudoterminal. A file descriptor for the master side is retained for
         // reading/writing to the shell.
+        #[cfg(windows)]
+        let marker = tabs::mark_pane(&mut pty_config);
         let pty = tty::new(&pty_config, display.size_info.into(), display.window.id().into())?;
 
         #[cfg(not(windows))]
         let master_fd = pty.file().as_raw_fd();
         #[cfg(not(windows))]
         let shell_pid = pty.child().id();
+        #[cfg(windows)]
+        let shell_pid = pty.child_watcher().pid().map_or(0, |pid| pid.get());
+        #[cfg(windows)]
+        tabs::register_pane(shell_pid, marker);
 
         // Create the pseudoterminal I/O loop.
         //
@@ -334,7 +339,6 @@ impl WindowContext {
             preserve_title,
             #[cfg(not(windows))]
             master_fd,
-            #[cfg(not(windows))]
             shell_pid,
             zoom: None,
         }))
@@ -360,7 +364,6 @@ impl WindowContext {
             display,
             #[cfg(not(windows))]
             master_fd: live.master_fd,
-            #[cfg(not(windows))]
             shell_pid: live.shell_pid,
             config,
             notifier: live.notifier,

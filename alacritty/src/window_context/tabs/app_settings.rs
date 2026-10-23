@@ -26,6 +26,8 @@ pub struct AppSettings {
     /// Whether the terminal is held in a panel, and the tabs set on a track.
     pub panel: bool,
     pub tab_track: bool,
+    /// Whether the icons of a tab's panes lie on tiles.
+    pub icon_tiles: bool,
     /// Space between a tab's panes, in logical pixels.
     pub pane_gap: u8,
     /// Border of the focused pane; none uses the terminal's blue.
@@ -49,6 +51,7 @@ impl AppSettings {
             opacity: window.opacity.as_f32(),
             panel: window.panel,
             tab_track: window.tab_track,
+            icon_tiles: window.icon_tiles,
             pane_gap: window.pane_gap.min(MAX_PANE_GAP),
             pane_highlight: window.pane_highlight,
             pin_tab_bar: window.pin_tab_bar,
@@ -111,6 +114,9 @@ impl AppSettings {
         }
         if self.tab_track != before.tab_track {
             window["tab_track"] = value(self.tab_track);
+        }
+        if self.icon_tiles != before.icon_tiles {
+            window["icon_tiles"] = value(self.icon_tiles);
         }
         if self.pane_gap != before.pane_gap {
             window["pane_gap"] = value(i64::from(self.pane_gap));
@@ -185,6 +191,7 @@ mod tests {
             opacity: 1.,
             panel: true,
             tab_track: true,
+            icon_tiles: true,
             pane_gap: 16,
             pane_highlight: None,
             pin_tab_bar: true,
@@ -210,6 +217,7 @@ mod tests {
             opacity: 0.85,
             panel: false,
             tab_track: true,
+            icon_tiles: false,
             pane_gap: 4,
             pane_highlight: Some(Rgb::new(0xff, 0x95, 0)),
             ..defaults()
@@ -225,6 +233,7 @@ mod tests {
         assert_eq!(window["ui_font"]["size"].as_float(), Some(11.5));
         assert_eq!(window["panel"].as_bool(), Some(false));
         assert!(window.get("tab_track").is_none());
+        assert_eq!(window["icon_tiles"].as_bool(), Some(false));
         assert_eq!(window["pane_gap"].as_integer(), Some(4));
         assert_eq!(window["pane_highlight"].as_str(), Some("#ff9500"));
     }

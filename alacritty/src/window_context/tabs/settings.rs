@@ -50,6 +50,15 @@ enum Field {
 /// Number of fields, of the profiles and of the application.
 const FIELD_COUNT: usize = 12;
 
+/// Height of the footer's buttons, in logical pixels.
+const FOOTER_BUTTON: f32 = 34.;
+
+/// Room between the scrolling content and the footer, in logical pixels.
+const FOOTER_GAP: f32 = 16.;
+
+/// Height over which the scrolling content fades out at the edges it is hidden past.
+const SCROLL_FADE: f32 = 16.;
+
 /// Fields of a profile.
 const FIELDS: [Field; 7] = [
     Field::Name,
@@ -154,6 +163,8 @@ enum Target {
     Opacity,
     /// Slider of the space between panes.
     Gap,
+    /// Scrollbar of the card or of a list, by its thumb or its track.
+    Scrollbar(Bar),
     /// Well of the focused pane's highlight, which opens the color picker.
     Well,
     Picker(Part),
@@ -186,6 +197,8 @@ enum Toggle {
     Panel,
     /// The track behind the tabs.
     TabTrack,
+    /// The tiles behind the icons of a tab's panes.
+    IconTiles,
     /// The logo at the left of the tab bar.
     Logo,
     Pin,
@@ -197,6 +210,7 @@ impl Toggle {
         match self {
             Toggle::Panel => settings.panel,
             Toggle::TabTrack => settings.tab_track,
+            Toggle::IconTiles => settings.icon_tiles,
             Toggle::Logo => settings.brand.show,
             Toggle::Pin => settings.pin_tab_bar,
             Toggle::WheelZoom => settings.wheel_zoom,
@@ -207,6 +221,7 @@ impl Toggle {
         let on = match self {
             Toggle::Panel => &mut settings.panel,
             Toggle::TabTrack => &mut settings.tab_track,
+            Toggle::IconTiles => &mut settings.icon_tiles,
             Toggle::Logo => &mut settings.brand.show,
             Toggle::Pin => &mut settings.pin_tab_bar,
             Toggle::WheelZoom => &mut settings.wheel_zoom,
@@ -250,6 +265,7 @@ enum Row {
     Gap,
     Highlight,
     TabTrack,
+    IconTiles,
     Logo,
     LogoIcon,
     LogoText,
@@ -270,6 +286,7 @@ impl Row {
             Row::Gap => "Pane gap",
             Row::Highlight => "Focus highlight",
             Row::TabTrack => "Tab track",
+            Row::IconTiles => "Icon tiles",
             Row::Logo => "Logo",
             Row::LogoIcon => "Logo icon",
             Row::LogoText => "Logo text",
@@ -289,6 +306,7 @@ impl Row {
             Row::Gap => "Space between a tab's panes",
             Row::Highlight => "Border of the focused pane",
             Row::TabTrack => "Behind the tabs",
+            Row::IconTiles => "Behind the icons in tabs",
             Row::Logo => "Top left of the tab bar",
             Row::LogoIcon => "Alacritty's, a bundled logo or none",
             Row::LogoText => "{host} is this computer's name",
@@ -302,6 +320,7 @@ impl Row {
             Row::WheelZoom => Some(Toggle::WheelZoom),
             Row::Panel => Some(Toggle::Panel),
             Row::TabTrack => Some(Toggle::TabTrack),
+            Row::IconTiles => Some(Toggle::IconTiles),
             Row::Logo => Some(Toggle::Logo),
             _ => None,
         }
@@ -331,6 +350,7 @@ impl Page {
                 Row::Gap,
                 Row::Highlight,
                 Row::TabTrack,
+                Row::IconTiles,
                 Row::Logo,
                 Row::LogoIcon,
                 Row::LogoText,
@@ -583,6 +603,106 @@ fn wrap(text: &str, width: f32, measure: impl Fn(&str) -> f32) -> Vec<String> {
     lines
 }
 
+/// How far along a track starting at `start`, `length` long, the pointer at `x` is, from 0 to 1.
+fn along(start: f32, length: f32, x: f32) -> f32 {
+    ((x - start) / length).clamp(0., 1.)
+}
+
+/// The thumb of a scrollbar along `track`, for a view `view` high scrolled by `scrolled` of at
+/// most `scroll_max`, and at least `least` high.
+fn thumb(track: Rect, view: f32, scrolled: f32, scroll_max: f32, least: f32) -> Rect {
+    let h = (track.h * view / (view + scroll_max)).max(least).min(track.h);
+    let fraction = if scroll_max > 0. { (scrolled / scroll_max).clamp(0., 1.) } else { 0. };
+    Rect { y: track.y + (track.h - h) * fraction, h, ..track }
+}
+
+/// How far to scroll, of at most `scroll_max`, for a thumb `height` high with its top at `top`
+/// along `track`.
+fn scrolled_to(track: Rect, height: f32, top: f32, scroll_max: f32) -> f32 {
+    let room = track.h - height;
+    if room <= 0. {
+        return 0.;
+    }
+    ((top - track.y) / room).clamp(0., 1.) * scroll_max
+}
+
+/// Strips `step` high filling `band`, each with how opaque it covers what is under it: most at
+/// the viewport's edge, at its top or its bottom, easing out to nothing away from it.
+fn fade(band: Rect, top: bool, step: f32) -> Vec<(Rect, f32)> {
+    let step = step.max(1.);
+    let count = (band.h / step).ceil() as usize;
+    (0..count)
+        .map(|index| {
+            let from_edge = index as f32 * step;
+            let h = step.min(band.h - from_edge);
+            let y = if top { band.y + from_edge } else { band.bottom() - from_edge - h };
+            // Smoothly from nearly opaque at the edge to clear at the band's far end.
+            let t = 1. - (from_edge + h / 2.) / band.h;
+            (Rect { y, h, ..band }, 0.92 * t * t * (3. - 2. * t))
+        })
+        .collect()
+}
+
+/// What a scrollbar scrolls.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Bar {
+    /// The card's fields, by pixels.
+    Card,
+    /// The font list, by rows.
+    Fonts,
+    /// The logo picker, by rows of cells.
+    Logos,
+}
+
+/// A scrollbar: its track and thumb, the band along it that takes the pointer for it, and how
+/// far its view scrolls at most.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Scrollbar {
+    track: Rect,
+    thumb: Rect,
+    band: Rect,
+    max: f32,
+}
+
+impl Scrollbar {
+    /// The scrollbar along `track`, taking the pointer in a band `band` wide ending at its right
+    /// edge `right`, for a view `view` long scrolled by `scrolled` of at most `max`, with a thumb
+    /// at least `least` long; none when the view does not scroll.
+    fn new(
+        track: Rect,
+        right: f32,
+        band: f32,
+        view: f32,
+        scrolled: f32,
+        max: f32,
+        least: f32,
+    ) -> Option<Self> {
+        (max > 0.).then(|| Scrollbar {
+            track,
+            thumb: thumb(track, view, scrolled, max, least),
+            band: Rect { x: right - band, w: band, ..track },
+            max,
+        })
+    }
+
+    /// Pointer offset from the thumb's top to drag it by, for a press at `y`: where the thumb
+    /// was grabbed, or its middle for a press on the track, which brings the thumb there.
+    fn grab(&self, y: f32) -> f32 {
+        let on_thumb = (self.thumb.y..self.thumb.bottom()).contains(&y);
+        if on_thumb { y - self.thumb.y } else { self.thumb.h / 2. }
+    }
+
+    /// How far to scroll with the pointer at `y`, `grab` below the top of the dragged thumb.
+    fn scrolled(&self, y: f32, grab: f32) -> f32 {
+        scrolled_to(self.track, self.thumb.h, y - grab, self.max)
+    }
+
+    /// The first of the rows scrolled to with the pointer at `y`, for a list scrolled by rows.
+    fn first_row(&self, y: f32, grab: f32) -> usize {
+        self.scrolled(y, grab).round() as usize
+    }
+}
+
 /// A sidebar row being dragged to a new position.
 struct Drag {
     /// Pointer offset from the row's top edge.
@@ -624,9 +744,14 @@ struct Panel {
     card: Rect,
     /// Part of the card the profile's fields scroll in, above its buttons.
     viewport: Rect,
+    /// Bands at the top and the bottom of the viewport, across its content, where what is
+    /// scrolled past them fades out.
+    fades: [Rect; 2],
     /// How far the fields are scrolled, and can be.
     scrolled: f32,
     scroll_max: f32,
+    /// The card's scrollbar, along its edge, where it scrolls.
+    scrollbar: Option<Scrollbar>,
     tile: Rect,
     /// Geometry of the application's page shown.
     settings: Option<RowsPanel>,
@@ -636,8 +761,12 @@ struct Panel {
     status: Rect,
     /// The font list, its rows' area and the height of a row.
     font_list: Option<(Rect, Rect, f32)>,
+    /// The font list's scrollbar, where it has more fonts than it shows.
+    font_bar: Option<Scrollbar>,
     /// The logo picker, its cells' area, the size of a cell and the cells in a row.
     logos: Option<(Rect, Rect, f32, usize)>,
+    /// The logo picker's scrollbar, where it has more rows than it shows.
+    logo_bar: Option<Scrollbar>,
     /// The color picker, dropped from its well.
     picker: Option<picker::Parts>,
 }
@@ -652,6 +781,17 @@ struct RowsPanel {
     rows: Vec<(Row, Rect, Rect)>,
     /// Text under the choices of restoring the session.
     note: Option<Rect>,
+}
+
+impl Panel {
+    /// The scrollbar of `bar`, while it shows.
+    fn bar(&self, bar: Bar) -> Option<Scrollbar> {
+        match bar {
+            Bar::Card => self.scrollbar,
+            Bar::Fonts => self.font_bar,
+            Bar::Logos => self.logo_bar,
+        }
+    }
 }
 
 impl RowsPanel {
@@ -715,8 +855,10 @@ pub struct Settings {
     /// their text until they are saved.
     edited: AppSettings,
     app_setting_texts: [String; 5],
-    /// Slider whose knob is being dragged.
+    /// Slider whose knob, or scrollbar whose thumb, is being dragged.
     sliding: Option<Target>,
+    /// Pointer offset from the top of the scrollbar's thumb while it is dragged.
+    thumb_grab: f32,
     /// The color picker of the focused pane's highlight, while it is open.
     picker: Option<ColorPicker>,
     /// The configuration file just saved, to reload.
@@ -771,6 +913,7 @@ impl Settings {
             ],
             edited: saved.clone(),
             sliding: None,
+            thumb_grab: 0.,
             picker: None,
             saved_app_settings: saved,
             reload: None,
@@ -816,9 +959,14 @@ impl Settings {
         let new_width = px(48.) + font.width("New profile", false);
         let duplicate_width = px(48.) + font.width("Duplicate", false);
         let shrink = ((side - px(16.)) / (new_width + duplicate_width)).clamp(0., 1.);
+        let card =
+            Rect::new(sidebar.right() + px(8.), y + title, (w - side - px(24.)).max(0.), sidebar.h);
+        let pad = if card.w < px(440.) { px(16.) } else { px(28.) };
+        // New profile and Duplicate share the line of the card's footer buttons.
+        let footer_middle = card.bottom() - pad - (px(FOOTER_BUTTON) / 2.).round();
         let new_profile = Rect::new(
             x + px(14.),
-            sidebar.bottom() - px(42.),
+            footer_middle - px(18.),
             (new_width * shrink).round(),
             px(36.),
         );
@@ -843,9 +991,6 @@ impl Settings {
             top += px(38.);
         }
 
-        let card =
-            Rect::new(sidebar.right() + px(8.), y + title, (w - side - px(24.)).max(0.), sidebar.h);
-        let pad = if card.w < px(440.) { px(16.) } else { px(28.) };
         let (x0, x1) = (card.x + pad, (card.right() - pad).max(card.x + pad));
         let width = x1 - x0;
         let narrow = width < px(440.);
@@ -861,13 +1006,17 @@ impl Settings {
         // The status starts the row where no Delete link does.
         let before_status = if self.page == Page::Profile { delete + gap } else { 0. };
         let status_width = width - save - cancel - before_status - 2. * gap;
-        let footer = card.bottom() - px(58.);
+        // The footer's buttons are set in from the card's bottom as far as the content is from
+        // its sides, so they sit in its corner; the fields end a gap above the footer, the
+        // scrolling content fading out there, and never reach under its buttons.
+        let footer = card.bottom() - pad - px(FOOTER_BUTTON);
         let status = if status_width >= px(160.) {
-            Rect::new(x0 + before_status, footer, status_width, px(34.))
+            Rect::new(x0 + before_status, footer, status_width, px(FOOTER_BUTTON))
         } else {
             Rect::new(x0, footer - ch - px(10.), width, ch + px(6.))
         };
-        let viewport = Rect::new(card.x, card.y, card.w, (status.y.min(footer) - card.y).max(0.));
+        let viewport_bottom = status.y.min(footer) - px(FOOTER_GAP);
+        let viewport = Rect::new(card.x, card.y, card.w, (viewport_bottom - card.y).max(0.));
 
         let field =
             |x: f32, y: f32, right: f32, height: f32| Rect::new(x, y, (right - x).max(0.), height);
@@ -963,9 +1112,12 @@ impl Settings {
                     Row::Highlight => control_at(rect, px(24.) + px(8.) + hex),
                     Row::LogoIcon => control_at(rect, px(30.)),
                     Row::LogoText => control_at(rect, 2. * name + px(8.)),
-                    Row::Pin | Row::WheelZoom | Row::Panel | Row::TabTrack | Row::Logo => {
-                        control_at(rect, px(40.))
-                    },
+                    Row::Pin
+                    | Row::WheelZoom
+                    | Row::Panel
+                    | Row::TabTrack
+                    | Row::IconTiles
+                    | Row::Logo => control_at(rect, px(40.)),
                 };
                 // Fields fill their controls, but for the buttons and wells beside them.
                 let half = ((control.w - px(8.)) / 2.).round();
@@ -1076,25 +1228,27 @@ impl Settings {
                     ),
                     (Target::ToggleDefault, toggles[0]),
                     (Target::ToggleShown, toggles[1]),
-                    (Target::Delete, Rect::new(x0, footer, delete, px(34.))),
+                    (Target::Delete, Rect::new(x0, footer, delete, px(FOOTER_BUTTON))),
                 ]);
             },
         }
+        let button_h = px(FOOTER_BUTTON);
         buttons.extend([
             (Target::NewProfile, new_profile),
             (Target::Duplicate, duplicate),
-            (Target::Cancel, Rect::new(x1 - save - gap - cancel, footer, cancel, px(34.))),
-            (Target::Save, Rect::new(x1 - save, footer, save, px(34.))),
+            (Target::Cancel, Rect::new(x1 - save - gap - cancel, footer, cancel, button_h)),
+            (Target::Save, Rect::new(x1 - save, footer, save, button_h)),
         ]);
 
         // The font list drops from its field, or rises above it when there is more room there.
         let font = fields[self.font_field().unwrap_or(Field::Font).index()];
-        let font_list = self.font_list().map(|_| {
+        let candidates = self.font_list().map(|_| self.candidates().len());
+        let font_list = candidates.map(|candidates| {
             let row = px(28.).max(ch + px(8.));
             let below = viewport.bottom() - font.bottom() - px(16.);
             let above = font.y - viewport.y - px(16.);
             let space = (below.max(above) / row).max(1.) as usize;
-            let rows = self.candidates().len().clamp(1, FONT_ROWS.min(space));
+            let rows = candidates.clamp(1, FONT_ROWS.min(space));
             let list_height = rows as f32 * row + px(12.);
             let top = if below >= list_height || below >= above {
                 font.bottom() + px(4.)
@@ -1104,6 +1258,16 @@ impl Settings {
             let list = Rect::new(font.x, top, font.w, list_height);
             (list, list.inset(px(6.)), row)
         });
+
+        let font_bar = self.font_list().zip(font_list).zip(candidates).and_then(
+            |((list, (rect, rows, row)), candidates)| {
+                let shown = (rows.h / row) as usize;
+                let max = candidates.saturating_sub(shown);
+                let track = Rect::new(rect.right() - px(5.), rows.y, px(3.), rows.h);
+                let (first, shown) = (list.first.min(max) as f32, shown as f32);
+                Scrollbar::new(track, rect.right(), px(12.), shown, first, max as f32, px(16.))
+            },
+        );
 
         // The logo picker drops from the profile's tile; the tab bar logo's opens beside its well,
         // left of the rows' controls, so it covers neither. Both are kept inside the dialog.
@@ -1131,6 +1295,15 @@ impl Settings {
                 Rect::new(left + px(6.), top + header, columns as f32 * cell, rows as f32 * cell);
             (picker, cells, cell, columns)
         });
+        let logo_bar = self.logos.as_ref().zip(logos).and_then(
+            |(picker, (rect, cells, cell, columns))| {
+                let rows = ((cells.h / cell).round() as usize).max(1);
+                let max = picker.kind.count().div_ceil(columns).saturating_sub(rows);
+                let track = Rect::new(rect.right() - px(5.), cells.y, px(3.), cells.h);
+                let (first, rows) = (picker.first.min(max) as f32, rows as f32);
+                Scrollbar::new(track, rect.right(), px(12.), rows, first, max as f32, px(16.))
+            },
+        );
 
         // The color picker drops from its well, or rises above it when there is no room below,
         // ending where the hex field does, kept inside the scrolling fields.
@@ -1146,6 +1319,19 @@ impl Settings {
             ColorPicker::layout((x, y), layout.scale)
         });
 
+        // The content fades out at the viewport's edges across its width, clear of the card's
+        // corners, its outline and its scrollbar.
+        let fade_height = px(SCROLL_FADE).min((viewport.h / 2.).floor());
+        let outline = px(1.).max(1.);
+        let across = Rect::new(x0 - px(2.), viewport.y + outline, width + px(4.), fade_height);
+        let fades = [across, Rect { y: viewport.bottom() - fade_height, ..across }];
+
+        // The fields scroll inside the card, above its buttons, with a scrollbar at its edge.
+        let track =
+            Rect::new(card.right() - px(7.), viewport.y + px(8.), px(3.), viewport.h - px(16.));
+        let scrollbar =
+            Scrollbar::new(track, card.right(), px(16.), viewport.h, scrolled, scroll_max, px(16.));
+
         Panel {
             dialog,
             close: buttons[0].1,
@@ -1156,8 +1342,10 @@ impl Settings {
             duplicate,
             card,
             viewport,
+            fades,
             scrolled,
             scroll_max,
+            scrollbar,
             tile,
             settings,
             fields,
@@ -1165,7 +1353,9 @@ impl Settings {
             buttons,
             status,
             font_list,
+            font_bar,
             logos,
+            logo_bar,
             picker,
         }
     }
@@ -1176,6 +1366,9 @@ impl Settings {
         }
         if let (Some(picker), Some((rect, cells, cell, columns))) = (&self.logos, panel.logos) {
             if rect.contains(point) {
+                if panel.logo_bar.is_some_and(|bar| bar.band.contains(point)) {
+                    return Some(Target::Scrollbar(Bar::Logos));
+                }
                 let column = ((point.x as f32 - cells.x) / cell) as usize;
                 let row = picker.first + ((point.y as f32 - cells.y) / cell) as usize;
                 let index = row * columns + column;
@@ -1185,10 +1378,16 @@ impl Settings {
         }
         if let (Some(list), Some((rect, rows, row))) = (self.font_list(), panel.font_list) {
             if rect.contains(point) {
+                if panel.font_bar.is_some_and(|bar| bar.band.contains(point)) {
+                    return Some(Target::Scrollbar(Bar::Fonts));
+                }
                 let index = list.first + ((point.y as f32 - rows.y) / row).max(0.) as usize;
                 return (rows.contains(point) && index < self.candidates().len())
                     .then_some(Target::Font(index));
             }
+        }
+        if panel.scrollbar.is_some_and(|bar| bar.band.contains(point)) {
+            return Some(Target::Scrollbar(Bar::Card));
         }
         // What scrolls with the fields can only be reached where they show.
         let shown = |target: Target| !target.scrolls() || panel.viewport.contains(point);
@@ -1356,7 +1555,8 @@ impl Settings {
         let top = label.y.min(rect.y).min(tile.y) - panel.viewport.y + panel.scrolled;
         let bottom = label.bottom().max(rect.bottom()).max(tile.bottom()) - panel.viewport.y
             + panel.scrolled;
-        let margin = layout.px(12.);
+        // A field revealed clears the fades at the viewport's edges.
+        let margin = layout.px(SCROLL_FADE + 8.);
         let scroll = panel.scrolled.max(bottom + margin - panel.viewport.h).min(top - margin);
         self.card_scroll = scroll.clamp(0., panel.scroll_max);
     }
@@ -1419,16 +1619,38 @@ impl Settings {
         }
     }
 
-    /// Set the value of the slider being dragged to where the pointer is along it.
+    /// Set the value of the slider being dragged to where the pointer is along it, or scroll
+    /// the card or the list to where its scrollbar's thumb is dragged.
     fn slide(&mut self, panel: &Panel, layout: &Layout) {
+        let (x, y) = (self.pointer.x as f32, self.pointer.y as f32);
+        let row = match self.sliding {
+            Some(Target::Opacity) => Row::Opacity,
+            Some(Target::Gap) => Row::Gap,
+            Some(Target::Scrollbar(bar)) => {
+                let (Some(scrollbar), grab) = (panel.bar(bar), self.thumb_grab) else { return };
+                match bar {
+                    Bar::Card => self.card_scroll = scrollbar.scrolled(y, grab),
+                    Bar::Fonts => {
+                        if let Some(list) = &mut self.font_list {
+                            list.first = scrollbar.first_row(y, grab);
+                        }
+                    },
+                    Bar::Logos => {
+                        if let Some(picker) = &mut self.logos {
+                            picker.first = scrollbar.first_row(y, grab);
+                        }
+                    },
+                }
+                return;
+            },
+            _ => return,
+        };
         let Some(page) = &panel.settings else { return };
-        let gap = self.sliding == Some(Target::Gap);
-        let slider = page.control(if gap { Row::Gap } else { Row::Opacity });
-        let (start, length) = RowsPanel::track(slider, layout);
-        let fraction = (self.pointer.x as f32 - start) / length;
-        match gap {
-            true => self.set_gap(fraction * f32::from(MAX_PANE_GAP)),
-            false => self.set_opacity(fraction),
+        let (start, length) = RowsPanel::track(page.control(row), layout);
+        let fraction = along(start, length, x);
+        match row {
+            Row::Gap => self.set_gap(fraction * f32::from(MAX_PANE_GAP)),
+            _ => self.set_opacity(fraction),
         }
     }
 
@@ -1532,7 +1754,11 @@ impl Settings {
             }
         }
         let target = self.target(&panel, point);
-        if !matches!(target, Some(Target::Logo(_) | Target::Tile | Target::Brand)) {
+        let logos = matches!(
+            target,
+            Some(Target::Logo(_) | Target::Scrollbar(Bar::Logos) | Target::Tile | Target::Brand)
+        );
+        if !logos {
             self.logos = None;
         }
         // A click elsewhere closes the color picker, but for typing its color.
@@ -1583,6 +1809,14 @@ impl Settings {
             Target::Brand if self.logos.is_some() => self.logos = None,
             Target::Brand => self.open_logos(Logos::Brand, layout),
             Target::Opacity | Target::Gap => {
+                self.sliding = Some(target);
+                self.slide(&panel, layout);
+            },
+            // The thumb is dragged from where it was pressed; a press on the track moves the
+            // thumb's middle there first.
+            Target::Scrollbar(bar) => {
+                let Some(scrollbar) = panel.bar(bar) else { return false };
+                self.thumb_grab = scrollbar.grab(point.y as f32);
                 self.sliding = Some(target);
                 self.slide(&panel, layout);
             },
@@ -2578,18 +2812,10 @@ impl Settings {
             center(layer, rect, text, color, bold);
         }
 
-        // The fields scroll inside the card, above its buttons.
-        if panel.scroll_max > 0. {
-            let viewport = panel.viewport;
-            let track = Rect::new(
-                panel.card.right() - px(7.),
-                viewport.y + px(8.),
-                px(3.),
-                viewport.h - px(16.),
-            );
-            let h = (track.h * viewport.h / (viewport.h + panel.scroll_max)).max(px(16.));
-            let y = track.y + (track.h - h) * panel.scrolled / panel.scroll_max;
-            content.rounded(Rect::new(track.x, y, track.w, h), layout.radius(1.5), palette.muted);
+        // The fields scroll inside the card, above its buttons; the thumb lights up under the
+        // pointer and while it is dragged.
+        if let Some(bar) = panel.scrollbar {
+            content.rounded(bar.thumb, layout.radius(1.5), self.thumb_color(Bar::Card, palette));
         }
         let viewport = panel.viewport;
         content.clip(
@@ -2601,6 +2827,20 @@ impl Settings {
             ),
             ch,
         );
+
+        // Where content is scrolled past an edge of the viewport, it fades out into the card
+        // there, as in the settings of macOS, rather than being cut off flush. The fade spans
+        // the content's width only, clear of the card's corners and its scrollbar.
+        let mut edges = Layer::default();
+        let hidden = [panel.scrolled > 0., panel.scrolled < panel.scroll_max];
+        for (top, hidden) in [true, false].into_iter().zip(hidden) {
+            if hidden {
+                let edge = panel.fades[usize::from(!top)];
+                for (rect, alpha) in fade(edge, top, line) {
+                    edges.rounded_alpha(rect, 0., palette.terminal, alpha);
+                }
+            }
+        }
 
         if let Some((message, error)) = &self.status {
             let color =
@@ -2642,11 +2882,8 @@ impl Settings {
                 }
             }
 
-            if candidates.len() > shown {
-                let track = Rect::new(rect.right() - px(5.), rows.y, px(3.), rows.h);
-                let h = (track.h * shown as f32 / candidates.len() as f32).max(px(16.));
-                let y = track.y + (track.h - h) * first as f32 / (candidates.len() - shown) as f32;
-                popup.rounded(Rect::new(track.x, y, track.w, h), layout.radius(1.5), palette.muted);
+            if let Some(bar) = panel.font_bar {
+                popup.rounded(bar.thumb, layout.radius(1.5), self.thumb_color(Bar::Fonts, palette));
             }
             if candidates.is_empty() {
                 let message = if self.listing.is_some() {
@@ -2716,11 +2953,8 @@ impl Settings {
                     },
                 }
             }
-            if total > rows {
-                let track = Rect::new(rect.right() - px(5.), cells.y, px(3.), cells.h);
-                let h = (track.h * rows as f32 / total as f32).max(px(16.));
-                let y = track.y + (track.h - h) * first as f32 / (total - rows) as f32;
-                popup.rounded(Rect::new(track.x, y, track.w, h), layout.radius(1.5), palette.muted);
+            if let Some(bar) = panel.logo_bar {
+                popup.rounded(bar.thumb, layout.radius(1.5), self.thumb_color(Bar::Logos, palette));
             }
         }
         if let (Some(picker), Some(parts)) = (&self.picker, panel.picker) {
@@ -2731,7 +2965,14 @@ impl Settings {
             picker.draw(&mut popup, &parts, palette, layout, hovered);
         }
         popup.clip(panel.dialog, ch);
-        vec![layer, content, popup]
+        vec![layer, content, edges, popup]
+    }
+
+    /// Color of the thumb of `bar`'s scrollbar, lit under the pointer and while it is dragged.
+    fn thumb_color(&self, bar: Bar, palette: &Palette) -> Rgb {
+        let target = Some(Target::Scrollbar(bar));
+        let lit = self.hover == target || self.sliding == target;
+        if lit { mix(palette.muted, palette.foreground, 0.5) } else { palette.muted }
     }
 
     /// What an empty field stands for.
@@ -2873,6 +3114,284 @@ impl Settings {
 mod tests {
     use super::*;
 
+    /// The layout of a window `width` by `height` pixels, unless the interface's font is missing.
+    fn layout(width: u32, height: u32) -> Option<Layout> {
+        scaled_layout(width, height, 1.)
+    }
+
+    /// The layout of a window `width` by `height` pixels at `scale`.
+    fn scaled_layout(width: u32, height: u32, scale: f64) -> Option<Layout> {
+        let font = UiFont::new(&Default::default(), scale).ok()?;
+        let tabs = super::super::Tabs {
+            font: Some(std::rc::Rc::new(font)),
+            window: winit::dpi::PhysicalSize::new(width, height),
+            scale,
+            ..Default::default()
+        };
+        Some(Layout::new(&tabs))
+    }
+
+    fn at(x: f32, y: f32) -> PhysicalPosition<f64> {
+        PhysicalPosition::new(f64::from(x), f64::from(y))
+    }
+
+    #[test]
+    fn tracks_and_thumbs_follow_the_pointer() {
+        assert_eq!(along(10., 100., 60.), 0.5);
+        assert_eq!((along(10., 100., -500.), along(10., 100., 500.)), (0., 1.));
+
+        let track = Rect::new(0., 100., 3., 400.);
+        let least = thumb(track, 50., 0., 10_000., 16.);
+        assert_eq!((least.y, least.h), (100., 16.));
+        // A thumb dragged to where it is drawn scrolls by as much as it shows.
+        for scrolled in [0., 150., 300.] {
+            let thumb = thumb(track, 300., scrolled, 300., 16.);
+            assert_eq!(thumb.h, 200.);
+            assert_eq!(scrolled_to(track, thumb.h, thumb.y, 300.), scrolled);
+        }
+        // Past either end of its track, it scrolls to that end.
+        assert_eq!(scrolled_to(track, 200., -1000., 300.), 0.);
+        assert_eq!(scrolled_to(track, 200., 1000., 300.), 300.);
+        assert_eq!(scrolled_to(track, 400., 200., 300.), 0.);
+    }
+
+    #[test]
+    fn sliders_follow_a_drag_until_released() {
+        let Some(layout) = layout(1200, 1000) else { return };
+        let config = UiConfig::default();
+        let mut settings = Settings::new(&config, Page::Appearance, || ());
+        let panel = settings.panel(&layout);
+        let page = panel.settings.as_ref().unwrap();
+        let (opacity, gap) = (page.control(Row::Opacity), page.control(Row::Gap));
+        let press = |settings: &mut Settings, point| {
+            settings.moved(&layout, point);
+            settings.press(&layout, point, MouseButton::Left, &config, || ());
+        };
+
+        // A press on the track moves the knob there.
+        let (start, length) = RowsPanel::track(opacity, &layout);
+        let y = opacity.center().1;
+        press(&mut settings, at(start + length / 4., y));
+        assert_eq!(settings.edited.opacity, 0.25);
+        // The drag goes on past the slider, the dialog and the window.
+        settings.moved(&layout, at(-100., y + 300.));
+        assert_eq!(settings.edited.opacity, 0.);
+        settings.moved(&layout, at(5000., -50.));
+        assert_eq!(settings.edited.opacity, 1.);
+        settings.release();
+        settings.moved(&layout, at(start, y));
+        assert_eq!(settings.edited.opacity, 1.);
+
+        let (start, length) = RowsPanel::track(gap, &layout);
+        press(&mut settings, at(start, gap.center().1));
+        assert_eq!(settings.edited.pane_gap, 0);
+        settings.moved(&layout, at(start + length, 0.));
+        assert_eq!(settings.edited.pane_gap, MAX_PANE_GAP);
+        settings.release();
+        assert!(settings.dirty);
+    }
+
+    #[test]
+    fn scrollbar_follows_a_drag_until_released() {
+        let Some(layout) = layout(1200, 500) else { return };
+        let config = UiConfig::default();
+        let mut settings = Settings::new(&config, Page::Appearance, || ());
+        let panel = settings.panel(&layout);
+        let bar = panel.scrollbar.expect("the page scrolls in a short window");
+        let (track, thumb, x) = (bar.track, bar.thumb, bar.band.center().0);
+        let target = settings.target(&panel, at(x, thumb.center().1));
+        assert_eq!(target, Some(Target::Scrollbar(Bar::Card)));
+
+        // The thumb keeps where it was grabbed, even dragged far off the scrollbar.
+        settings.press(&layout, at(x, thumb.y + 2.), MouseButton::Left, &config, || ());
+        assert_eq!(settings.card_scroll, 0.);
+        settings.moved(&layout, at(x - 600., thumb.y + 2. + (track.h - thumb.h) / 2.));
+        assert!((settings.card_scroll - panel.scroll_max / 2.).abs() < 0.01);
+        settings.moved(&layout, at(x, 10_000.));
+        assert_eq!(settings.card_scroll, panel.scroll_max);
+        settings.release();
+        settings.moved(&layout, at(x, track.y));
+        assert_eq!(settings.card_scroll, panel.scroll_max);
+
+        // A press on the track brings the thumb's middle there.
+        settings.press(&layout, at(x, track.y + 1.), MouseButton::Left, &config, || ());
+        settings.release();
+        assert_eq!(settings.card_scroll, 0.);
+    }
+
+    #[test]
+    fn scrollbars_take_the_pointer_by_thumb_or_track() {
+        let track = Rect::new(0., 100., 3., 400.);
+        assert_eq!(Scrollbar::new(track, 10., 12., 50., 0., 0., 16.), None);
+        let bar = Scrollbar::new(track, 10., 12., 300., 150., 300., 16.).unwrap();
+        assert_eq!((bar.band.x, bar.band.w, bar.band.y, bar.band.h), (-2., 12., 100., 400.));
+        assert_eq!((bar.thumb.y, bar.thumb.h), (200., 200.));
+        // On the thumb, it keeps where it was grabbed; on the track, the middle comes there.
+        assert_eq!(bar.grab(210.), 10.);
+        assert_eq!(bar.grab(450.), 100.);
+        assert_eq!(bar.scrolled(210., bar.grab(210.)), 150.);
+        assert_eq!(bar.scrolled(150., bar.grab(150.)), 0.);
+        // Lists scroll by whole rows, and no further than their ends.
+        let rows = Scrollbar::new(track, 10., 12., 8., 0., 92., 16.).unwrap();
+        assert_eq!(rows.first_row(-1000., 0.), 0);
+        assert_eq!(rows.first_row(1000., 0.), 92);
+        let halfway = track.y + (track.h - rows.thumb.h) / 2.;
+        assert_eq!(rows.first_row(halfway, 0.), 46);
+    }
+
+    #[test]
+    fn font_list_scrollbar_follows_a_drag_until_released() {
+        let Some(layout) = layout(1200, 1000) else { return };
+        let config = UiConfig::default();
+        let mut settings = Settings::new(&config, Page::Appearance, || ());
+        settings.fonts =
+            (0..200).map(|i| Family { name: format!("Font {i:03}"), mono: false }).collect();
+        settings.focus(Field::UiFont);
+        settings.font_list.as_mut().unwrap().first = 0;
+        let panel = settings.panel(&layout);
+        let bar = panel.font_bar.expect("200 fonts do not fit the list");
+        let (x, max) = (bar.band.center().0, bar.max as usize);
+        let target = settings.target(&panel, at(x, bar.thumb.center().1));
+        assert_eq!(target, Some(Target::Scrollbar(Bar::Fonts)));
+        let first = |settings: &Settings| settings.font_list().unwrap().first;
+
+        // The drag goes on past the list and the dialog, and keeps the list open.
+        settings.press(&layout, at(x, bar.thumb.y + 2.), MouseButton::Left, &config, || ());
+        assert_eq!(first(&settings), 0);
+        settings.moved(&layout, at(x - 800., 10_000.));
+        assert_eq!(first(&settings), max);
+        settings.moved(&layout, at(x + 800., -10_000.));
+        assert_eq!(first(&settings), 0);
+        settings.release();
+        settings.moved(&layout, at(x, bar.track.bottom()));
+        assert_eq!(first(&settings), 0);
+        assert_eq!(settings.focus, Some(Field::UiFont));
+
+        // A press on the track brings the thumb's middle there.
+        settings.press(&layout, at(x, bar.track.bottom() - 1.), MouseButton::Left, &config, || ());
+        settings.release();
+        assert_eq!(first(&settings), max);
+    }
+
+    #[test]
+    fn logo_picker_scrollbar_follows_a_drag_until_released() {
+        let Some(layout) = layout(1200, 400) else { return };
+        let config = UiConfig::default();
+        let mut settings = Settings::new(&config, Page::Appearance, || ());
+        settings.open_logos(Logos::Brand, &layout);
+        settings.logos.as_mut().unwrap().first = 0;
+        let panel = settings.panel(&layout);
+        let bar = panel.logo_bar.expect("the logos do not fit a short window");
+        let (x, max) = (bar.band.center().0, bar.max as usize);
+        let target = settings.target(&panel, at(x, bar.thumb.center().1));
+        assert_eq!(target, Some(Target::Scrollbar(Bar::Logos)));
+        let first = |settings: &Settings| settings.logos.as_ref().unwrap().first;
+
+        settings.press(&layout, at(x, bar.thumb.y + 2.), MouseButton::Left, &config, || ());
+        settings.moved(&layout, at(-500., 10_000.));
+        assert_eq!(first(&settings), max);
+        settings.release();
+        settings.moved(&layout, at(x, bar.track.y));
+        assert_eq!(first(&settings), max);
+
+        settings.press(&layout, at(x, bar.track.y + 1.), MouseButton::Left, &config, || ());
+        settings.release();
+        assert_eq!(first(&settings), 0);
+    }
+
+    /// Every page in windows short, tall and narrow, at one and two times the scale.
+    fn every_page(mut check: impl FnMut(&Layout, &Settings, &Panel, &str)) {
+        for scale in [1., 2.] {
+            for (width, height) in [(1200, 1000), (1200, 500), (700, 420)] {
+                let size = |value: u32| (f64::from(value) * scale) as u32;
+                let Some(layout) = scaled_layout(size(width), size(height), scale) else { return };
+                for page in [Page::General, Page::Appearance, Page::Profile] {
+                    let mut settings = Settings::new(&UiConfig::default(), page, || ());
+                    settings.status = Some(("Saved to alacritty.toml".into(), false));
+                    for scroll in [0., f32::MAX] {
+                        settings.card_scroll = scroll;
+                        let panel = settings.panel(&layout);
+                        let name = format!("{page:?} {width}x{height} @{scale} scrolled {scroll}");
+                        check(&layout, &settings, &panel, &name);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn content_keeps_clear_of_the_footer() {
+        every_page(|layout, _, panel, name| {
+            let gap = layout.px(FOOTER_GAP);
+            let footer = |target| panel.buttons.iter().find(|(t, _)| *t == target).map(|b| b.1);
+            let (cancel, save) = (footer(Target::Cancel).unwrap(), footer(Target::Save).unwrap());
+            let viewport = panel.viewport;
+            // The viewport ends a gap above the footer's status and buttons.
+            for rect in [cancel, save, panel.status].into_iter().chain(footer(Target::Delete)) {
+                assert!(viewport.bottom() + gap <= rect.y + 0.01, "{name}: {rect:?}");
+            }
+            // The buttons sit as far in from the card's bottom as from its right, centered
+            // in line with each other and with the sidebar's buttons.
+            let card = panel.card;
+            assert_eq!(card.right() - save.right(), card.bottom() - save.bottom(), "{name}");
+            assert_eq!((cancel.y, cancel.h), (save.y, save.h), "{name}");
+            let middle = panel.new_profile.center().1;
+            assert!((middle - save.center().1).abs() <= 1., "{name}");
+            // The scrollbar runs inside the viewport, and the fades lie inside it too.
+            if let Some(bar) = panel.scrollbar {
+                assert!(bar.track.y >= viewport.y && bar.track.bottom() <= viewport.bottom());
+                assert!(bar.band.bottom() <= viewport.bottom(), "{name}");
+                for band in panel.fades {
+                    assert!(band.right() < bar.track.x, "{name}");
+                }
+            }
+            for band in panel.fades {
+                assert!(band.y >= viewport.y && band.bottom() <= viewport.bottom(), "{name}");
+                assert!(band.x > card.x && band.right() < card.right(), "{name}");
+            }
+        });
+    }
+
+    #[test]
+    fn last_row_scrolls_fully_into_view() {
+        every_page(|layout, settings, panel, name| {
+            let viewport = panel.viewport;
+            // What ends the page: the group of rows, or the profile's switches.
+            let (first, last) = match &panel.settings {
+                Some(page) => (page.heading.y, page.group.bottom()),
+                None => {
+                    let shown = panel.buttons.iter().find(|(t, _)| *t == Target::ToggleShown);
+                    (panel.tile.y, shown.unwrap().1.bottom())
+                },
+            };
+            if settings.card_scroll == 0. {
+                assert!(first >= viewport.y + layout.px(16.), "{name}");
+            } else if panel.scroll_max > 0. {
+                // Scrolled to the end, the last row shows whole, with room below it.
+                assert_eq!(panel.scrolled, panel.scroll_max, "{name}");
+                assert!(last + layout.px(16.) <= viewport.bottom() + 0.01, "{name}");
+                assert!(last + layout.px(32.) >= viewport.bottom(), "{name}");
+            } else {
+                assert!(last <= viewport.bottom(), "{name}");
+            }
+        });
+    }
+
+    #[test]
+    fn fades_ease_out_from_the_edge() {
+        let band = Rect::new(10., 100., 50., 16.);
+        for top in [true, false] {
+            let strips = fade(band, top, 2.);
+            assert_eq!(strips.len(), 8);
+            assert_eq!(strips.iter().map(|(rect, _)| rect.h).sum::<f32>(), band.h);
+            assert!(strips.iter().all(|(rect, _)| rect.x == band.x && rect.w == band.w));
+            assert!(strips.windows(2).all(|pair| pair[0].1 > pair[1].1));
+            let edge = if top { band.y } else { band.bottom() - 2. };
+            assert_eq!(strips[0].0.y, edge);
+            assert!(strips[0].1 > 0.8 && strips[7].1 < 0.05);
+        }
+    }
+
     #[test]
     fn copies_get_unique_names() {
         let taken = |name: &str| name == "Shell (copy)";
@@ -2885,8 +3404,9 @@ mod tests {
     fn pages_list_their_rows() {
         assert_eq!(Page::General.rows(), [Row::Restore, Row::Pin, Row::WheelZoom]);
         let appearance = Page::Appearance.rows();
-        assert_eq!(appearance.len(), 11);
-        assert_eq!(appearance[8..], [Row::Logo, Row::LogoIcon, Row::LogoText]);
+        assert_eq!(appearance.len(), 12);
+        assert_eq!(appearance[7..9], [Row::TabTrack, Row::IconTiles]);
+        assert_eq!(appearance[9..], [Row::Logo, Row::LogoIcon, Row::LogoText]);
         assert!(Page::Profile.rows().is_empty());
         // Every switch flips the setting it shows.
         for row in appearance.iter().chain(Page::General.rows()) {

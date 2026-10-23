@@ -6,9 +6,10 @@
 //! terminals are resized once. Panes no longer shown, as a zoomed pane grows over them, stay
 //! drawn under it until it covers them.
 //!
-//! Each pane of a group has controls at the top of its card, shown as the pointer nears them: a
-//! grip, which drags it, and a button that zooms it or back. The live pane's text size shows over
-//! it as it changes.
+//! Each pane of a group has controls at the top of its card, shown together as the pointer nears
+//! any of them: in the middle a grip, which drags it, and a button that zooms it or back, and in
+//! the top right corner one that closes it. They sit flat on the pane, each lit only as it is
+//! hovered. The live pane's text size shows over it as it changes.
 
 use std::cell::Cell;
 use std::mem;
@@ -20,7 +21,7 @@ use winit::window::WindowId;
 use super::anim::{Curve, Tween, scale};
 use super::bar::{BAR, Hit, Layout, MARGIN, PANEL_RADIUS, RADIUS};
 use super::dnd::{Source, Target};
-use super::paint::{BLACK, Layer, Palette, Rect, UNZOOM_GLYPH, ZOOM_GLYPH, mix};
+use super::paint::{Layer, Palette, Rect, UNZOOM_GLYPH, WHITE, ZOOM_GLYPH, mix};
 use super::split::{Axis, Side, Split};
 use super::{Press, Tabs, divider};
 
@@ -37,11 +38,18 @@ const TINT: f32 = 0.06;
 const DROP: f32 = 0.22;
 /// Opacity of the chrome over a pane being dragged.
 const VEIL: f32 = 0.4;
-/// Size of a pane's controls, how far below the top of its card, and the width of their grip, in
-/// logical pixels.
+/// Size of a pane's middle controls, how far below the top of its card, and the width of their
+/// grip, in logical pixels.
 const CLUSTER: (f32, f32) = (58., 22.);
 const CLUSTER_TOP: f32 = 6.;
 const GRIP: f32 = 30.;
+/// Width of the close button, as high as the others, how far inside the right of the card, and
+/// the least room between it and the middle controls, in logical pixels.
+const CLOSE: f32 = 28.;
+const CLOSE_RIGHT: f32 = 6.;
+const CLOSE_ROOM: f32 = 8.;
+/// Opacity of the light behind a hovered control, over the pane.
+const LIT: f32 = 0.12;
 /// Size of the grip's dots, and the distance between their centres.
 const DOT: f32 = 3.;
 const DOT_STEP: f32 = 5.;
@@ -87,8 +95,8 @@ struct Motion {
     tint: Cell<Tween<f32>>,
     /// How visible the controls are.
     reveal: Cell<Reveal>,
-    /// How lit the grip and the zoom button are.
-    hover: Cell<[Tween<f32>; 2]>,
+    /// How lit the grip, the zoom and the close buttons are.
+    hover: Cell<[Tween<f32>; 3]>,
 }
 
 /// How visible a pane's controls are: they appear as the pointer nears them, and stay a moment
@@ -161,7 +169,7 @@ impl Effects {
                     light: Cell::new(Tween::new(0.)),
                     tint: Cell::new(Tween::new(0.)),
                     reveal: Cell::default(),
-                    hover: Cell::new([Tween::new(0.); 2]),
+                    hover: Cell::new([Tween::new(0.); 3]),
                 });
                 if animate {
                     motion.frame.to(rect, now, MOVE_MS, Curve::SNAP);
@@ -237,12 +245,12 @@ impl Effects {
         level
     }
 
-    /// How lit the grip and the zoom button of the pane `id` are at `now`, moving to whether the
-    /// pointer is on `hovered`.
-    fn hover(&self, id: WindowId, hovered: Option<Control>, now: Instant) -> [f32; 2] {
-        let Some(motion) = self.motion(id) else { return [0.; 2] };
+    /// How lit the grip, the zoom and the close buttons of the pane `id` are at `now`, moving to
+    /// whether the pointer is on `hovered`.
+    fn hover(&self, id: WindowId, hovered: Option<Control>, now: Instant) -> [f32; 3] {
+        let Some(motion) = self.motion(id) else { return [0.; 3] };
         let mut tweens = motion.hover.get();
-        let levels = [Control::Grip, Control::Zoom].map(|control| {
+        let levels = [Control::Grip, Control::Zoom, Control::Close].map(|control| {
             let tween = &mut tweens[control as usize];
             let target = if hovered == Some(control) { 1. } else { 0. };
             tween.to(target, now, HOVER_MS, Curve::EASE_OUT);
@@ -300,14 +308,19 @@ pub enum Control {
     Grip,
     /// Zooms the pane, or unzooms it.
     Zoom,
+    /// Closes the pane, asking first while a job runs in it.
+    Close,
 }
 
-/// The controls of a pane: a capsule holding the grip, then the zoom button.
+/// The controls of a pane: in the middle the grip, then the zoom button, and the close button in
+/// the top right corner, where there is room for it beside them.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Cluster {
-    capsule: Rect,
+    /// The grip and the zoom button together.
+    middle: Rect,
     grip: Rect,
     zoom: Rect,
+    close: Option<Rect>,
 }
 
 impl Cluster {
@@ -315,30 +328,41 @@ impl Cluster {
     fn at(&self, point: PhysicalPosition<f64>) -> Option<Control> {
         if self.grip.contains(point) {
             Some(Control::Grip)
+        } else if self.zoom.contains(point) {
+            Some(Control::Zoom)
         } else {
-            self.zoom.contains(point).then_some(Control::Zoom)
+            self.close.filter(|close| close.contains(point)).map(|_| Control::Close)
         }
     }
 }
 
-/// The controls of the pane in `card`, at `scale`: centred at its top, a little inside it, so they
-/// never sit on its border.
+/// The controls of the pane in `card`, at `scale`: centred at its top and in its top right
+/// corner, a little inside it, so they never sit on its border nor where it rounds.
 fn cluster(card: Rect, scale: f32) -> Cluster {
     let px = |value: f32| (value * scale).round();
     let (w, h) = (px(CLUSTER.0), px(CLUSTER.1));
-    let capsule = Rect::new((card.x + (card.w - w) / 2.).round(), card.y + px(CLUSTER_TOP), w, h);
-    let grip = Rect { w: px(GRIP), ..capsule };
-    let zoom = Rect::new(grip.right(), capsule.y, w - grip.w, h);
-    Cluster { capsule, grip, zoom }
+    let middle = Rect::new((card.x + (card.w - w) / 2.).round(), card.y + px(CLUSTER_TOP), w, h);
+    let grip = Rect { w: px(GRIP), ..middle };
+    let zoom = Rect::new(grip.right(), middle.y, w - grip.w, h);
+    let close = Rect::new(card.right() - px(CLOSE_RIGHT) - px(CLOSE), middle.y, px(CLOSE), h);
+    let close = (close.x >= middle.right() + px(CLOSE_ROOM)).then_some(close);
+    Cluster { middle, grip, zoom, close }
 }
 
-/// Where the pointer shows the controls of the pane in `card`, at `scale`: around them, from
-/// `reach` above the card, the middle of the gap there, to a couple of rows below them.
-fn reveal_zone(card: Rect, reach: f32, scale: f32) -> Rect {
-    let capsule = cluster(card, scale).capsule;
+/// Where the pointer shows the controls of the pane in `card`, at `scale`: around each group of
+/// them, from `reach` above the card, the middle of the gap there, to a couple of rows below them,
+/// and up to the right of the card beside the close button.
+fn reveal_zones(card: Rect, reach: f32, scale: f32) -> Vec<Rect> {
+    let cluster = cluster(card, scale);
     let (side, below) = ((REVEAL_SIDE * scale).round(), (REVEAL_BELOW * scale).round());
-    let top = card.y - reach;
-    Rect::new(capsule.x - side, top, capsule.w + 2. * side, capsule.bottom() + below - top)
+    let (top, middle) = (card.y - reach, cluster.middle);
+    let height = middle.bottom() + below - top;
+    let mut zones = vec![Rect::new(middle.x - side, top, middle.w + 2. * side, height)];
+    if let Some(close) = cluster.close {
+        let left = (close.x - side).max(middle.right());
+        zones.push(Rect::new(left, top, card.right() - left, height));
+    }
+    zones
 }
 
 /// Whether `card` has room for its controls, at `scale`, with rows of `row` pixels.
@@ -353,6 +377,7 @@ fn quiet(tabs: &Tabs) -> bool {
         || matches!(tabs.press, Press::Divider | Press::Terminal)
         || tabs.menu.is_some()
         || tabs.context.is_some()
+        || tabs.confirm.is_some()
         || tabs.rename.is_some()
         || tabs.settings.is_some()
 }
@@ -420,8 +445,10 @@ fn nearby(
     if (point.y as f32) < top {
         return None;
     }
-    let near: Vec<_> =
-        cards.iter().filter(|(_, card)| reveal_zone(*card, reach, scale).contains(point)).collect();
+    let near: Vec<_> = cards
+        .iter()
+        .filter(|(_, card)| reveal_zones(*card, reach, scale).iter().any(|z| z.contains(point)))
+        .collect();
     let held = near.iter().find(|(_, card)| card.contains(point)).or(near.first());
     held.map(|(index, _)| *index)
 }
@@ -516,11 +543,16 @@ pub fn draw(tabs: &Tabs, layout: &Layout, palette: &Palette, layer: &mut Layer, 
             let shown = effects.reveal(id, near, quiet, now);
             let hovered = tabs.control.filter(|&(pane, _)| pane == index).map(|(_, c)| c);
             let hover = effects.hover(id, hovered, now);
+            // Controls under the focused pane, as it moves over this one, are not drawn.
+            let covered = |rect| index != tab.focus && hidden(rect, focused, resting);
             let cluster = cluster(card, layout.scale);
-            if shown <= 0. || index != tab.focus && hidden(cluster.capsule, focused, resting) {
+            let middle = !covered(cluster.middle);
+            let close = cluster.close.filter(|&close| !covered(close));
+            if shown <= 0. || !middle && close.is_none() {
                 continue;
             }
-            draw_cluster(layer, layout, palette, cluster, shown, hover, tab.zoom);
+            let cluster = Cluster { close, ..cluster };
+            draw_cluster(layer, layout, palette, cluster, middle, shown, hover, tab.zoom);
         }
     }
     divider::draw(tabs, layout, palette, layer, now);
@@ -557,48 +589,58 @@ pub fn draw(tabs: &Tabs, layout: &Layout, palette: &Palette, layer: &mut Layer, 
     }
 }
 
-/// Draw a pane's `cluster` of controls, `shown` that far, and each lit by its `hover` level: a
-/// floating capsule holding the grip's dots, then the button that zooms the pane or, while it is
-/// `zoomed`, back.
+/// Draw a pane's `cluster` of controls, the `middle` ones too or only the close button, `shown`
+/// that far, and each lit by its `hover` level: flat on the pane, the grip's dots, the button that
+/// zooms the pane or, while it is `zoomed`, back, and the one that closes it, lit like the
+/// window's close button.
+#[allow(clippy::too_many_arguments)]
 fn draw_cluster(
     layer: &mut Layer,
     layout: &Layout,
     palette: &Palette,
     cluster: Cluster,
+    middle: bool,
     shown: f32,
-    hover: [f32; 2],
+    hover: [f32; 3],
     zoomed: bool,
 ) {
-    // It drops into place as it appears.
+    // They drop into place as they appear, and fade in together.
     let dy = ((shown - 1.) * layout.px(4.)).round();
     let lower = |rect: Rect| Rect { y: rect.y + dy, ..rect };
-    let (capsule, line) = (lower(cluster.capsule), layout.px(1.).max(1.));
-    let radius = layout.curve(capsule.h / 2.);
-    let shadow = Rect { y: capsule.y + line, ..capsule };
-    layer.rounded_alpha(shadow, radius, BLACK, 0.18 * shown);
-    layer.rounded_alpha(capsule, radius, palette.popup_outline, 0.92 * shown);
-    layer.rounded_alpha(capsule.inset(line), radius - line, palette.popup, 0.92 * shown);
-
-    let (grip, zoom) = (lower(cluster.grip), lower(cluster.zoom));
-    let (x, y) = (grip.right(), capsule.center().1 - layout.px(6.));
-    layer.rect(
-        Rect::new(x, y.round(), line, layout.px(12.)),
-        mix(palette.popup, palette.separator, shown),
-    );
-    for (segment, level) in [grip, zoom].into_iter().zip(hover) {
-        let lit = segment.inset(layout.px(2.));
-        layer.rounded_alpha(lit, layout.radius(9.), palette.hover, level * shown);
-    }
-
-    let color = |level| mix(palette.popup, mix(palette.muted, palette.foreground, level), shown);
-    let (radius, step) = (layout.px(DOT) / 2., layout.px(DOT_STEP));
-    let (x, y) = grip.center();
-    for offset in [-step, 0., step] {
-        layout.dot(layer, (x + offset, y), radius, color(hover[0]));
-    }
-    let glyph = if zoomed { UNZOOM_GLYPH } else { ZOOM_GLYPH };
+    let mut buttons = Layer::default();
+    let light = |layer: &mut Layer, rect: Rect, color, alpha| {
+        layer.rounded_alpha(lower(rect).inset(layout.px(2.)), layout.radius(9.), color, alpha);
+    };
+    let color = |level| mix(palette.muted, palette.foreground, level);
     let width = (1.3 * layout.scale).max(1.);
-    layer.icon(zoom.center(), layout.px(5.), width, glyph, color(hover[1]));
+
+    if middle {
+        for (segment, level) in [cluster.grip, cluster.zoom].into_iter().zip(hover) {
+            if level > 0. {
+                light(&mut buttons, segment, palette.foreground, LIT * level);
+            }
+        }
+        let (radius, step) = (layout.px(DOT) / 2., layout.px(DOT_STEP));
+        let (x, y) = lower(cluster.grip).center();
+        for offset in [-step, 0., step] {
+            layout.dot(&mut buttons, (x + offset, y), radius, color(hover[0]));
+        }
+        let glyph = if zoomed { UNZOOM_GLYPH } else { ZOOM_GLYPH };
+        buttons.icon(lower(cluster.zoom).center(), layout.px(5.), width, glyph, color(hover[1]));
+    }
+
+    if let Some(close) = cluster.close {
+        let level = hover[2];
+        if level > 0. {
+            light(&mut buttons, close, palette.danger, level);
+        }
+        let cross = [[-1., -1., 1., 1.], [-1., 1., 1., -1.]];
+        let glyph = mix(palette.muted, WHITE, level);
+        buttons.icon(lower(close).center(), layout.px(4.), width, &cross, glyph);
+    }
+
+    buttons.fade(shown, palette.terminal);
+    layer.extend(buttons);
 }
 
 /// Draw `text`, the live pane's text size, centred over its `card`, `shown` that far.
@@ -932,14 +974,30 @@ mod tests {
     fn controls_sit_inside_the_top_of_the_card() {
         let card = Rect::new(100., 48., 300., 200.);
         let cluster = cluster(card, 1.);
-        assert_eq!(cluster.capsule, Rect::new(221., 54., 58., 22.));
+        assert_eq!(cluster.middle, Rect::new(221., 54., 58., 22.));
         assert_eq!(cluster.grip, Rect::new(221., 54., 30., 22.));
         assert_eq!(cluster.zoom, Rect::new(251., 54., 28., 22.));
-        assert_eq!(cluster.capsule.center().0, card.center().0);
+        assert_eq!(cluster.middle.center().0, card.center().0);
+        // The close button, in the top right corner, level with them.
+        assert_eq!(cluster.close, Some(Rect::new(366., 54., 28., 22.)));
         // At twice the scale.
         let cluster = super::cluster(Rect::new(0., 96., 600., 400.), 2.);
-        assert_eq!(cluster.capsule, Rect::new(242., 108., 116., 44.));
+        assert_eq!(cluster.middle, Rect::new(242., 108., 116., 44.));
         assert_eq!((cluster.grip.w, cluster.zoom.x), (60., 302.));
+        assert_eq!(cluster.close, Some(Rect::new(532., 108., 56., 44.)));
+    }
+
+    #[test]
+    fn close_needs_room_beside_the_middle() {
+        // The middle spans 42..100 of a card 142 wide: the close button at 108 keeps 8 from it.
+        let close = |w: f32| super::cluster(Rect::new(0., 0., w, 200.), 1.).close;
+        assert_eq!(close(142.), Some(Rect::new(108., 6., 28., 22.)));
+        assert_eq!(close(140.), None);
+        // Without it, the middle controls stay, and nothing is hit there.
+        let cards = [(0, Rect::new(0., 48., 140., 300.))];
+        let at = |x: f64| hit(&cards, 40., PhysicalPosition::new(x, 60.), 1.);
+        assert_eq!((at(50.), at(120.)), (Some((0, Control::Grip)), None));
+        assert_eq!(reveal_zones(cards[0].1, 0., 1.).len(), 1);
     }
 
     #[test]
@@ -954,6 +1012,13 @@ mod tests {
         assert_eq!(at(629., 60.), None);
         assert_eq!(at(600., 53.), None, "the border above is not a control");
         assert_eq!(at(600., 76.), None);
+        // Each close button, 6 inside the right of its card: 758..786 and 358..386.
+        assert_eq!(at(770., 60.), Some((1, Control::Close)));
+        assert_eq!(at(358., 54.), Some((0, Control::Close)));
+        assert_eq!(at(757., 60.), None);
+        assert_eq!(at(786., 60.), None, "the room beside the border is not a control");
+        assert_eq!(at(770., 76.), None);
+        assert_eq!(at(400., 60.), None, "between the cards");
         // A bar over the panes keeps the pointer.
         assert_eq!(hit(&cards, 80., PhysicalPosition::new(600., 60.), 1.), None);
     }
@@ -961,9 +1026,12 @@ mod tests {
     #[test]
     fn controls_show_near_them() {
         let cards = [(0, Rect::new(8., 48., 784., 284.)), (1, Rect::new(8., 348., 784., 284.))];
-        let zone = reveal_zone(cards[1].1, 8., 1.);
+        let zones = reveal_zones(cards[1].1, 8., 1.);
+        let zone = zones[0];
         assert_eq!(zone, Rect::new(315., 340., 170., 64.));
-        let cluster = cluster(cards[1].1, 1.).capsule;
+        // Beside the close button, to the right of the card, as high.
+        assert_eq!(zones[1], Rect::new(702., 340., 90., 64.));
+        let cluster = cluster(cards[1].1, 1.).middle;
         assert!(zone.contains(PhysicalPosition::new(cluster.x.into(), cluster.y.into())));
         assert!(zone.contains(PhysicalPosition::new(cluster.right() as f64 - 1., 375.)));
 
@@ -977,6 +1045,13 @@ mod tests {
         assert_eq!(at(400., 339.), None);
         assert_eq!(at(400., 48.), Some(0));
         assert_eq!(nearby(&cards, 60., 8., PhysicalPosition::new(400., 50.), 1.), None);
+        // Nearing the close button shows them all, as nearing the middle does.
+        assert_eq!(at(780., 360.), Some(1));
+        assert_eq!(at(702., 393.), Some(1));
+        assert_eq!(at(701., 360.), None, "between the two");
+        assert_eq!(at(780., 404.), None);
+        assert_eq!(at(780., 339.), None);
+        assert_eq!(at(780., 60.), Some(0));
 
         // Zones reaching over a narrow neighbour show the controls of the pane under the pointer.
         let narrow = [(0, Rect::new(0., 48., 100., 300.)), (1, Rect::new(100., 48., 100., 300.))];

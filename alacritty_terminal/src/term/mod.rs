@@ -13,6 +13,7 @@ use bitflags::bitflags;
 use log::{debug, trace};
 use unicode_width::UnicodeWidthChar;
 
+use crate::cwd::ReportedDirectory;
 use crate::event::{Event, EventListener};
 use crate::grid::{Dimensions, Grid, GridIterator, Scroll};
 use crate::index::{self, Boundary, Column, Direction, Line, Point, Side};
@@ -274,6 +275,9 @@ pub struct Term<T> {
 
     pub selection: Option<Selection>,
 
+    /// Working directory the shell last reported, through `OSC 7` or `OSC 9 ; 9`.
+    pub reported_directory: Option<ReportedDirectory>,
+
     /// Currently active grid.
     ///
     /// Tracks the screen buffer currently in use. While the alternate screen buffer is active,
@@ -439,6 +443,7 @@ impl<T> Term<T> {
             title_stack: Default::default(),
             is_focused: Default::default(),
             selection: Default::default(),
+            reported_directory: Default::default(),
             title: Default::default(),
             mode: Default::default(),
         }
