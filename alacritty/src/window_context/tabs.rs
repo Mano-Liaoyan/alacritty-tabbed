@@ -904,7 +904,8 @@ pub fn window_event(
             }
             // Panes take the pointer only where nothing above them, nor a selection, has it.
             let free = tabs.press != Press::Terminal && tabs.menu.is_none();
-            let over_panes = free && layout.hit(position) == Hit::Terminal;
+            let under = layout.hit(position);
+            let over_panes = free && under == Hit::Terminal;
             if (tabs.press == Press::Divider || over_panes) && divider::moved(ctx, position) {
                 return Some(WindowEvent::CursorLeft { device_id });
             }
@@ -915,8 +916,10 @@ pub fn window_event(
                 return None;
             }
 
-            // A pane is grabbed by its handle, or anywhere with the modifiers that drag it.
-            let handle = panes::handle_at(tabs, &layout, position).filter(|_| free);
+            // A pane is grabbed by its handle, or anywhere with the modifiers that drag it; a
+            // fanned shelf covers the handles under it.
+            let shelf = matches!(under, Hit::Icon(..));
+            let handle = panes::handle_at(tabs, &layout, position).filter(|_| free && !shelf);
             if tabs.handle != handle {
                 tabs.handle = handle;
                 redraw(ctx);
