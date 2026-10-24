@@ -171,7 +171,8 @@ impl Field {
     fn color(self) -> Option<bool> {
         match (self, self.key().map(|key| key.kind)) {
             (Field::PaneHighlight, _) => Some(false),
-            (_, Some(Kind::Color { cells } | Kind::Colors(_, cells))) => Some(cells),
+            (_, Some(Kind::Color)) => Some(false),
+            (_, Some(Kind::Colors(_, cells))) => Some(cells),
             _ => None,
         }
     }
@@ -1084,9 +1085,7 @@ impl Settings {
                         (_, Some(Kind::Pair(..))) => control_at(rect, 2. * count + px(8.), px(30.)),
                         (_, Some(Kind::Text(_))) => control_at(rect, px(240.), px(30.)),
                         (_, Some(Kind::Face(_))) => control_at(rect, px(320.), px(30.)),
-                        (_, Some(Kind::Color { cells })) => {
-                            control_at(rect, px(32.) + if cells { cell } else { hex }, px(30.))
-                        },
+                        (_, Some(Kind::Color)) => control_at(rect, px(32.) + hex, px(30.)),
                         (_, Some(Kind::Colors(_, cells))) => {
                             let field = if cells { cell } else { hex };
                             control_at(rect, 2. * (px(32.) + field) + px(16.), px(30.))
