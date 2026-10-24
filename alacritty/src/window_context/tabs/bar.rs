@@ -460,7 +460,7 @@ fn ends(controls: f32, scale: f32) -> [f32; 2] {
 /// Where the logo and the names beside it go, from `left` in a bar `bar` high, and where the tab
 /// track begins after them: an `icon` is a square as wide as the bar's buttons are tall less
 /// some, and names `text` wide take at most 160 logical pixels. Without either the track begins
-/// at `left`.
+/// at `left`. The track sits as far from the logo as the logo from the window's edge.
 fn brand(
     left: f32,
     icon: bool,
@@ -474,7 +474,7 @@ fn brand(
     let label = text.map(|text| Rect::new(after, 0., text.min(px(160.)).ceil(), bar));
     let track = match (label, mark) {
         (Some(label), _) => label.right() + px(4.),
-        (None, Some(mark)) => mark.right() + px(21.),
+        (None, Some(mark)) => mark.right() + px(MARGIN),
         (None, None) => left,
     };
     (mark, label, track)
@@ -1576,7 +1576,7 @@ mod tests {
         assert_eq!(label.unwrap().w, 160.);
         // Icon only, as in a narrow window.
         let (mark, label, track) = brand(left, true, None, bar, 1.);
-        assert_eq!((label, track), (None, mark.unwrap().right() + 21.));
+        assert_eq!((label, track), (None, mark.unwrap().right() + MARGIN));
         // Names only begin where the icon would.
         let (mark, label, _) = brand(left, false, Some(50.), bar, 1.);
         assert_eq!((mark, label.unwrap().x), (None, left));
