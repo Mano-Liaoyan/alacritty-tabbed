@@ -22,6 +22,7 @@ mod cwd;
 mod divider;
 mod dnd;
 mod fonts;
+mod frame;
 mod fullscreen;
 pub mod hooks;
 mod icons;
@@ -74,7 +75,7 @@ use winit::event::{
 };
 use winit::event_loop::EventLoopProxy;
 use winit::keyboard::{Key, ModifiersState, NamedKey};
-use winit::window::{CursorIcon, Window as WinitWindow, WindowAttributes, WindowId};
+use winit::window::{CursorIcon, WindowAttributes, WindowId};
 
 use alacritty_terminal::event::{Event as TerminalEvent, Notify, OnResize};
 use alacritty_terminal::event_loop::{EventLoop as PtyEventLoop, Msg, Notifier};
@@ -96,6 +97,8 @@ use crate::window_context::WindowContext;
 use app_settings::AppSettings;
 use bar::{BAR, Hit, INSET, Layout, MARGIN};
 use dnd::{Drag, Source, Target};
+pub use frame::Frame;
+use frame::{Restore, frame, restore};
 pub use fullscreen::FullscreenState;
 use paint::Image;
 pub use paint::Rect;
@@ -122,16 +125,6 @@ pub fn next_id() -> WindowId {
 const PANE_DRAG: ModifiersState = ModifiersState::CONTROL.union(ModifiersState::ALT);
 #[cfg(target_os = "macos")]
 const PANE_DRAG: ModifiersState = ModifiersState::SUPER.union(ModifiersState::ALT);
-
-/// How the window is shown, which decides its resize border and the corners it cuts.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum Frame {
-    #[default]
-    Normal,
-    Maximized,
-    /// Fills the screen; like maximized, without resize borders.
-    Fullscreen,
-}
 
 /// How a window's terminals are coming to an end.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1382,55 +1375,6 @@ pub fn route<S: BuildHasher>(
     None
 }
 
-/// How `window` lies on its screen, to draw it. Fullscreen also when it covers its whole monitor
-/// unmaximized: X11 window managers make windows fullscreen without the application knowing,
-/// which Wayland tells it.
-fn frame(window: &WinitWindow) -> Frame {
-    let covering = || {
-        let monitor = window.current_monitor();
-        let screen = monitor.as_ref().map(|monitor| (monitor.position(), monitor.size()));
-        covers(window.outer_position().ok().map(|position| (position, window.outer_size())), screen)
-    };
-    frame_of(window.fullscreen().is_some(), window.is_maximized(), covering)
-}
-
-/// The frame of a window fullscreen or maximized as the platform knows, else fullscreen when it
-/// is `covering` its monitor; maximized windows cover it too where nothing else is on screen.
-fn frame_of(fullscreen: bool, maximized: bool, covering: impl FnOnce() -> bool) -> Frame {
-    match (fullscreen, maximized) {
-        (true, _) => Frame::Fullscreen,
-        (_, true) => Frame::Maximized,
-        _ if covering() => Frame::Fullscreen,
-        _ => Frame::Normal,
-    }
-}
-
-/// What the restore button of a window drawn in `frame` does, when the platform knows it to be
-/// `fullscreen` or not.
-#[derive(Debug, PartialEq, Eq)]
-enum Restore {
-    LeaveFullscreen,
-    /// Leave a fullscreen the window manager made, which the platform did not see.
-    LeaveOtherFullscreen,
-    ToggleMaximized,
-}
-
-fn restore(frame: Frame, fullscreen: bool) -> Restore {
-    match (fullscreen, frame) {
-        (true, _) => Restore::LeaveFullscreen,
-        (false, Frame::Fullscreen) => Restore::LeaveOtherFullscreen,
-        _ => Restore::ToggleMaximized,
-    }
-}
-
-/// Whether a window at `outer` is exactly the monitor at `screen`, both known.
-fn covers(
-    outer: Option<(PhysicalPosition<i32>, PhysicalSize<u32>)>,
-    screen: Option<(PhysicalPosition<i32>, PhysicalSize<u32>)>,
-) -> bool {
-    outer.is_some() && outer == screen
-}
-
 /// Show or hide the caption, and fit the terminals in their panels below the bar.
 ///
 /// The window's state is only queried on `resize`, since that is slow on some platforms.
@@ -2459,39 +2403,6 @@ mod tests {
             assert_eq!(fullscreen.spacing(), maximized.spacing());
             assert_eq!(fullscreen.margin() > 0., panel);
         }
-    }
-
-    #[test]
-    fn a_window_covering_its_monitor_is_fullscreen() {
-        let at = |x, y, w, h| Some((PhysicalPosition::new(x, y), PhysicalSize::new(w, h)));
-        let screen = at(1920, 0, 2560, 1440);
-        assert!(covers(at(1920, 0, 2560, 1440), screen));
-        // Maximized below a panel, or the right size on another monitor, is not.
-        assert!(!covers(at(1920, 32, 2560, 1408), screen));
-        assert!(!covers(at(0, 0, 2560, 1440), screen));
-        // Unknown places, as on Wayland, which reports fullscreen itself.
-        assert!(!covers(None, None));
-        assert!(!covers(None, screen));
-    }
-
-    #[test]
-    fn frames_and_what_restore_does() {
-        use Frame::*;
-        // What the platform knows wins; covering the monitor counts only unmaximized.
-        for (fullscreen, maximized, covering, frame) in [
-            (true, false, true, Fullscreen),
-            (true, true, true, Fullscreen),
-            (false, true, true, Maximized),
-            (false, true, false, Maximized),
-            (false, false, true, Fullscreen),
-            (false, false, false, Normal),
-        ] {
-            assert_eq!(frame_of(fullscreen, maximized, || covering), frame);
-        }
-        assert_eq!(restore(Fullscreen, true), Restore::LeaveFullscreen);
-        assert_eq!(restore(Fullscreen, false), Restore::LeaveOtherFullscreen);
-        assert_eq!(restore(Maximized, false), Restore::ToggleMaximized);
-        assert_eq!(restore(Normal, false), Restore::ToggleMaximized);
     }
 
     #[test]
