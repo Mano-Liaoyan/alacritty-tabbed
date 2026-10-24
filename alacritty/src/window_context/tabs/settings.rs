@@ -3477,10 +3477,16 @@ mod tests {
         let config = UiConfig::default();
         // The opacity is the window's, and the gap between panes the fork's look.
         let mut settings = Settings::new(&config, Page::Window, || ());
-        let control = |settings: &Settings, row| {
+        // A slider takes presses only where it shows, so each is scrolled to the middle of the
+        // viewport: how far down the page it sits depends on the interface's font.
+        let control = |settings: &mut Settings, row| {
+            let panel = settings.panel(&layout);
+            let middle = panel.settings.as_ref().unwrap().control(row).center().1;
+            let scroll = panel.scrolled + middle - panel.viewport.center().1;
+            settings.card_scroll = scroll.clamp(0., panel.scroll_max);
             settings.panel(&layout).settings.as_ref().unwrap().control(row)
         };
-        let opacity = control(&settings, Row::Opacity);
+        let opacity = control(&mut settings, Row::Opacity);
         let press = |settings: &mut Settings, point| {
             settings.moved(&layout, point);
             settings.press(&layout, point, MouseButton::Left, &config, || ());
@@ -3501,7 +3507,7 @@ mod tests {
         assert_eq!(settings.edited.opacity, 1.);
 
         settings.show(Page::Appearance);
-        let gap = control(&settings, Row::Gap);
+        let gap = control(&mut settings, Row::Gap);
         let (start, length) = RowsPanel::track(gap, &layout);
         press(&mut settings, at(start, gap.center().1));
         assert_eq!(settings.edited.pane_gap, 0);
