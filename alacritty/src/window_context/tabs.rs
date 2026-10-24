@@ -765,6 +765,11 @@ pub fn window_event(
             let tabs = &ctx.display.tabs;
             let bar = (tabs.caption && tabs.frame != Frame::Fullscreen).then_some(f64::from(BAR));
             platform::place_buttons(ctx.display.window.winit(), bar);
+            // The buttons ride on a bar that is not pinned, and hide with it.
+            let (scale, now) = (tabs.scale as f32, Instant::now());
+            let offset = tabs.autohide.offset((BAR * scale).round(), now) / scale;
+            let offset = bar.map(|_| f64::from(offset));
+            platform::slide_buttons(ctx.display.window.winit(), offset, tabs.autohide.gone(now));
             dock::install(proxy);
         }
     }
