@@ -12,7 +12,8 @@ publish = false
 # (`png`) or with more features (`windows-sys`); cargo unifies those features across the
 # workspace. `resvg` draws SVG profile icons; without default features it has no text or font
 # support, and it reuses the `tiny-skia` already in Cargo.lock. The font picker lists fonts with
-# the libraries crossfont already uses on each platform.
+# the libraries crossfont already uses on each platform. On macOS the AppKit bindings, upstream's
+# own, place the window buttons beside the bar.
 
 [dependencies]
 png = { version = "0.17.5", default-features = false }
@@ -23,6 +24,16 @@ yeslogic-fontconfig-sys = "5.0.0"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 core-text = "20.1.0"
+objc2-app-kit = { version = "0.3.1", default-features = false, features = [
+    "std",
+    "objc2-core-foundation",
+    "NSButton",
+    "NSControl",
+    "NSResponder",
+    "NSView",
+    "NSWindow",
+] }
+objc2-core-foundation = { version = "0.3.1", default-features = false, features = ["std", "CFCGTypes"] }
 
 [target.'cfg(windows)'.dependencies]
 dwrote = "0.11.5"

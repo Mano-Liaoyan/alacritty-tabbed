@@ -6,9 +6,11 @@ use std::sync::Arc;
 use std::{env, fs};
 
 use alacritty_tabbed_deps::core_text;
+use alacritty_tabbed_deps::objc2_app_kit::{NSView, NSWindowButton};
 use core_text::font_descriptor::CTFontDescriptor;
 use winit::platform::macos::WindowAttributesExtMacOS;
-use winit::window::WindowAttributes;
+use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+use winit::window::{Window, WindowAttributes};
 
 use super::paint::Image;
 
@@ -20,6 +22,51 @@ pub fn attributes(attributes: WindowAttributes) -> WindowAttributes {
         .with_title_hidden(true)
         .with_titlebar_transparent(true)
         .with_fullsize_content_view(true)
+}
+
+/// Center the system's window buttons on a bar `bar` points tall, as far from the window's left
+/// edge as from its top, or leave them to the system without one.
+///
+/// The bar moves the window itself, from its empty space only: the system's caption under it no
+/// longer does, so a tab is dragged rather than the window. The system lays its buttons out again
+/// as the window resizes, so this is repeated before each frame.
+pub fn place_buttons(window: &Window, bar: Option<f64>) {
+    let Ok(handle) = window.window_handle() else { return };
+    let RawWindowHandle::AppKit(handle) = handle.as_raw() else { return };
+    // Window events are handled on the main thread.
+    let view = unsafe { handle.ns_view.cast::<NSView>().as_ref() };
+    let Some(window) = view.window() else { return };
+    window.setMovable(bar.is_none());
+    let Some(bar) = bar else { return };
+
+    let buttons = [
+        NSWindowButton::CloseButton,
+        NSWindowButton::MiniaturizeButton,
+        NSWindowButton::ZoomButton,
+    ];
+    let buttons: Vec<_> =
+        buttons.into_iter().filter_map(|b| window.standardWindowButton(b)).collect();
+    let Some(container) = buttons.first().and_then(|b| unsafe { b.superview()?.superview() })
+    else {
+        return;
+    };
+    let first = buttons[0].frame();
+    let step = buttons.get(1).map_or(20., |b| b.frame().origin.x - first.origin.x);
+
+    // The container's height places the buttons, which keep their distance from its bottom.
+    let left = (bar - first.size.height) / 2.;
+    let height = left + first.origin.y + first.size.height;
+    let mut frame = container.frame();
+    if frame.size.height != height {
+        frame.size.height = height;
+        frame.origin.y = window.frame().size.height - height;
+        container.setFrame(frame);
+    }
+    for (index, button) in buttons.iter().enumerate() {
+        let mut origin = button.frame().origin;
+        origin.x = left + index as f64 * step;
+        button.setFrameOrigin(origin);
+    }
 }
 
 /// Icon of the application bundle a program belongs to.

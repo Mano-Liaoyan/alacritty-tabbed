@@ -758,6 +758,12 @@ pub fn window_event(
 ) -> Option<WindowEvent> {
     if let WindowEvent::RedrawRequested = event {
         fullscreen::before_draw(ctx, config, proxy, clipboard);
+        #[cfg(target_os = "macos")]
+        {
+            let tabs = &ctx.display.tabs;
+            let bar = (tabs.caption && tabs.frame != Frame::Fullscreen).then_some(f64::from(BAR));
+            platform::place_buttons(ctx.display.window.winit(), bar);
+        }
     }
     if let WindowEvent::Resized(size) = event {
         // Minimizing reports an empty size, which the terminal ignores too.
