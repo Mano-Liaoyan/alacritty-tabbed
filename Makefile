@@ -57,12 +57,16 @@ $(APP_NAME)-%: $(TARGET)-%
 	@cp -fRp $(APP_TEMPLATE) $(APP_DIR)
 # tabbed: the fork's logo
 	@cp -fp $(ASSETS_DIR)/logo/tabbed/alacritty-tabbed.icns $(APP_DIR)/$(APP_NAME)/Contents/Resources/alacritty.icns
+# tabbed: the fork's name in the menu bar, the Dock and permission prompts
+	@sed -i '' -e 's|<string>Alacritty</string>|<string>Alacritty Tabbed</string>|' -e 's|in Alacritty |in Alacritty Tabbed |' $(APP_DIR)/$(APP_NAME)/Contents/Info.plist
 	@cp -fp $(APP_BINARY) $(APP_BINARY_DIR)
 	@cp -fp $(COMPLETIONS) $(APP_COMPLETIONS_DIR)
 	@touch -r "$(APP_BINARY)" "$(APP_DIR)/$(APP_NAME)"
 	@codesign --remove-signature "$(APP_DIR)/$(APP_NAME)"
 	@codesign --force --deep --sign - "$(APP_DIR)/$(APP_NAME)"
 	@echo "Created '$(APP_NAME)' in '$(APP_DIR)'"
+# tabbed: the bundle's file carries the fork's name, which Finder and the Dock show
+	@rm -rf "$(APP_DIR)/Alacritty Tabbed.app" && mv "$(APP_DIR)/$(APP_NAME)" "$(APP_DIR)/Alacritty Tabbed.app" && echo "Renamed it 'Alacritty Tabbed.app'"
 
 dmg: $(DMG_NAME)-native ## Create an Alacritty.dmg
 dmg-universal: $(DMG_NAME)-universal ## Create a universal Alacritty.dmg
