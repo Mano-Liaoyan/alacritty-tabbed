@@ -134,10 +134,11 @@ Panes slide and pop into place with Hyprland-like curves. Set
 profile's logo, drawn sharp at the screen's scale: the executable's largest icon
 on Windows, with each WSL distribution's own artwork and Git Bash's logo; the
 icon theme's logo on Linux, preferring SVG; the application's icon on macOS.
-About 40 common shells, tools, languages and WSL distributions have bundled logos
-where the system has none, and other programs get a terminal. A profile can set its own SVG or PNG, or an emoji.
-In a tab of several panes the logos lie on tiles; turn off **Icon tiles** under
-Appearance, or in `alacritty.toml`, to draw them bare and as large as the tiles:
+About 40 common shells, tools, languages and WSL distributions have bundled
+logos where the system has none, and other programs get a terminal. A profile
+can set its own SVG or PNG, or an emoji. In a tab of several panes the logos lie
+on tiles; turn off **Icon tiles** under Appearance, or in `alacritty.toml`, to
+draw them bare and as large as the tiles:
 
 ```toml
 [tabbed]
@@ -170,15 +171,17 @@ loaded, and saving writes only the keys that changed, under Alacritty's own
 names (`font.size`, `cursor.style.shape`, `colors.normal.red` and so on, or
 `[tabbed]` for the fork's), keeping the file's comments and its tables' forms,
 and applies them to every window. Emptying a text, a color or an optional number
-removes its key, for the default. "Edit profiles…" in the ⌄ menu opens the profiles:
-name, icon, command line, starting directory, font, environment variables, configuration overrides,
-the default profile, and whether a profile shows in the menu. The font field
-lists the system's monospaced fonts as you type; "Show all fonts" lists every
-font. Clicking the profile's icon picks one of the bundled logos, and Browse
-picks your own. Saved changes apply to the tabs already open with a profile. Browse buttons use the
-system's file pickers. Profiles can be added, duplicated, deleted, and dragged
-to reorder them. They are saved to `profiles.toml` beside `alacritty.toml`,
-which can also be edited by hand.
+removes its key, for the default.
+
+"Edit profiles…" in the ⌄ menu opens the profiles: name, icon, command line,
+starting directory, font, environment variables, configuration overrides, the
+default profile, and whether a profile shows in the menu. The font field lists
+the system's monospaced fonts as you type; "Show all fonts" lists every font.
+Clicking the profile's icon picks one of the bundled logos, and Browse picks
+your own. Saved changes apply to the tabs already open with a profile. Browse
+buttons use the system's file pickers. Profiles can be added, duplicated,
+deleted, and dragged to reorder them. They are saved to `profiles.toml` beside
+`alacritty.toml`, which can also be edited by hand.
 
 ![Settings, General page](../docs/tabs/settings.png)
 
@@ -186,9 +189,9 @@ which can also be edited by hand.
 interface font of their own, apart from the terminal's font: the system's
 interface font on macOS (San Francisco, else Helvetica Neue) and Windows
 (Segoe UI), and on Linux the first installed of Inter, Adwaita Sans, Noto Sans
-and other common interface fonts. Emphasized text uses the family's SemiBold or Medium face when it has
-one. Choose another family or size under Appearance in the settings, or in
-`alacritty.toml`; changes apply live:
+and other common interface fonts. Emphasized text uses the family's SemiBold or
+Medium face when it has one. Choose another family or size under Appearance in
+the settings, or in `alacritty.toml`; changes apply live:
 
 ```toml
 [tabbed.ui_font]
