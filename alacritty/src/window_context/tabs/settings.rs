@@ -3291,7 +3291,7 @@ impl Settings {
             Kind::Face(_) if part == 0 => "Same as normal".into(),
             Kind::Face(style) => style.into(),
             Kind::Number(number) | Kind::Pair(_, number) if number.optional => "Auto".into(),
-            Kind::Color { .. } | Kind::Colors(..) => "Auto".into(),
+            Kind::Color | Kind::Colors(..) => "Auto".into(),
             Kind::Command if key.path == "terminal.shell" => profiles::shell(config),
             Kind::Command | Kind::List | Kind::Map => "None".into(),
             _ => return None,
