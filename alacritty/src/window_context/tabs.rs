@@ -41,6 +41,8 @@ mod text;
 mod text_size;
 
 #[cfg(target_os = "macos")]
+mod dock;
+#[cfg(target_os = "macos")]
 mod macos;
 #[cfg(not(windows))]
 #[cfg_attr(target_os = "macos", allow(dead_code))]
@@ -763,6 +765,7 @@ pub fn window_event(
             let tabs = &ctx.display.tabs;
             let bar = (tabs.caption && tabs.frame != Frame::Fullscreen).then_some(f64::from(BAR));
             platform::place_buttons(ctx.display.window.winit(), bar);
+            dock::install(proxy);
         }
     }
     if let WindowEvent::Resized(size) = event {

@@ -22,7 +22,7 @@ the edges to resize. Fullscreen keeps the bar and lays out the panes as when
 maximized: the panel, the gap between panes and the rounded cards all stay.
 The layout is the same everywhere; the window controls take each system's look:
 flat buttons on Windows, round ones on Linux, and the red, yellow and green
-lights on macOS.
+lights on macOS. On macOS, right-click the Dock icon for a new window.
 
 **Tabs.** Each tab is a full Alacritty terminal with its own PTY and state;
 the tabs of a window share its renderer. Drag tabs to reorder them, close them
