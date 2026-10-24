@@ -105,6 +105,8 @@ pub fn before_draw(
     proxy: &EventLoopProxy<Event>,
     clipboard: &mut Clipboard,
 ) {
+    #[cfg(target_os = "macos")]
+    macos::after_transition(ctx, config);
     if !ctx.display.window.fullscreen.apply(ctx.display.window.winit()) {
         return;
     }
@@ -171,6 +173,97 @@ fn in_workspace(monitor: Rect, work: Rect) -> Rect {
         top: monitor.top - dy,
         right: monitor.right - dx,
         bottom: monitor.bottom - dy,
+    }
+}
+
+/// The system's animation into and out of fullscreen on macOS.
+///
+/// Winit keeps the window fullscreen until the animation out of it ends, after the window's last
+/// resize, which is when the bar takes in how the window is shown. Left at that, the bar would go
+/// on laying out, and leaving the window buttons to the system, as in fullscreen. The end of
+/// either animation is therefore watched for, to draw the window again, and the bar takes in the
+/// change then: it makes room for the window buttons again, which are placed on it before that
+/// frame, after the system laid them out again as the animation ended.
+#[cfg(target_os = "macos")]
+mod macos {
+    use std::cell::OnceCell;
+    use std::rc::Rc;
+
+    use alacritty_tabbed_deps::{objc2, objc2_app_kit, objc2_foundation};
+    use objc2::rc::Retained;
+    use objc2::runtime::{AnyObject, NSObject};
+    use objc2::{MainThreadMarker, MainThreadOnly, class, define_class, msg_send, sel};
+    use objc2_app_kit::NSWindow;
+    use objc2_foundation::ns_string;
+
+    use super::super::frame::{Frame, frame};
+    use crate::config::UiConfig;
+    use crate::window_context::WindowContext;
+
+    thread_local! {
+        static WATCHER: OnceCell<Retained<Watcher>> = const { OnceCell::new() };
+    }
+
+    define_class!(
+        /// Told when a window has entered or left fullscreen.
+        #[unsafe(super(NSObject))]
+        #[thread_kind = MainThreadOnly]
+        #[name = "AlacrittyTabbedFullscreenWatcher"]
+        struct Watcher;
+
+        impl Watcher {
+            #[unsafe(method(fullscreenChanged:))]
+            fn changed(&self, notification: &AnyObject) {
+                let window: Option<Retained<NSWindow>> = unsafe { msg_send![notification, object] };
+                // Winit's view hands the redraw over as the window is next displayed.
+                if let Some(view) = window.and_then(|window| window.contentView()) {
+                    view.setNeedsDisplay(true);
+                }
+            }
+        }
+    );
+
+    /// Take in that the window entered or left fullscreen since the bar last looked, before it is
+    /// drawn.
+    pub fn after_transition(ctx: &mut WindowContext, config: &Rc<UiConfig>) {
+        watch();
+        let window = ctx.display.window.winit();
+        let fullscreen = window.fullscreen().is_some();
+        if fullscreen == (ctx.display.tabs.frame == Frame::Fullscreen)
+            || frame(window) == ctx.display.tabs.frame
+        {
+            return;
+        }
+        super::super::sync(ctx, config, true);
+        super::super::redraw(ctx);
+    }
+
+    /// Watch every window for the end of its animation into or out of fullscreen, once.
+    fn watch() {
+        let Some(mtm) = MainThreadMarker::new() else { return };
+        WATCHER.with(|watcher| {
+            if watcher.get().is_some() {
+                return;
+            }
+            let target: Retained<Watcher> = unsafe { msg_send![Watcher::alloc(mtm), init] };
+            let center: Retained<AnyObject> =
+                unsafe { msg_send![class!(NSNotificationCenter), defaultCenter] };
+            for name in [
+                ns_string!("NSWindowDidEnterFullScreenNotification"),
+                ns_string!("NSWindowDidExitFullScreenNotification"),
+            ] {
+                let _: () = unsafe {
+                    msg_send![
+                        &center,
+                        addObserver: &*target,
+                        selector: sel!(fullscreenChanged:),
+                        name: name,
+                        object: None::<&AnyObject>,
+                    ]
+                };
+            }
+            let _ = watcher.set(target);
+        });
     }
 }
 

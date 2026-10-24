@@ -162,7 +162,8 @@ impl Layout {
         let button =
             |x: f32, width: f32| Rect::new(x, ((bar - control) / 2.).round(), width, control);
 
-        let lights = if mac { px(80.) } else { 0. };
+        // Fullscreen hides the window buttons, until the menu bar shows them over the bar.
+        let lights = if mac && tabs.frame != Frame::Fullscreen { px(80.) } else { 0. };
         // GNOME's and KDE's round window buttons end as far from the window's edge as the logo
         // begins, so the bar's two ends mirror each other.
         let trailing =
@@ -172,8 +173,8 @@ impl Layout {
 
         // The bar's first thing, the logo, its names, the track or else the first tab, begins at
         // the edge of the panes' cards below, as the window's controls end at it on the right.
-        // macOS puts it beside its window buttons instead.
-        let left = if mac { lights + px(7.) } else { margin };
+        // macOS puts it beside its window buttons instead, when they are shown.
+        let left = if lights > 0. { lights + px(7.) } else { margin };
         let on_track = tabs.configs.as_ref().is_none_or(|(config, _)| config.tabbed.tab_track);
         let default = Brand::default();
         let config = tabs.configs.as_ref().map_or(&default, |(config, _)| &config.tabbed.brand);
