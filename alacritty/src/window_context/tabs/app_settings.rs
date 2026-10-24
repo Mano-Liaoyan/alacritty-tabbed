@@ -14,6 +14,8 @@ use crate::display::color::Rgb;
 
 use super::profiles;
 
+pub mod upstream;
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct AppSettings {
     pub corners: Corners,
@@ -39,6 +41,8 @@ pub struct AppSettings {
     pub restore_session: RestoreSession,
     /// The logo and names at the left of the tab bar.
     pub brand: Brand,
+    /// Alacritty's own settings, under its own keys, as [`upstream::KEYS`] lists them.
+    pub upstream: Vec<upstream::State>,
 }
 
 impl AppSettings {
@@ -58,6 +62,7 @@ impl AppSettings {
             wheel_zoom: window.wheel_zoom,
             restore_session: window.restore_session,
             brand: window.brand.clone(),
+            upstream: upstream::read(config),
         }
     }
 
@@ -83,8 +88,8 @@ impl AppSettings {
     /// The configuration `text` with the settings that differ from `before` set.
     ///
     /// The fork's keys an older version kept in `[window]` are moved to `[tabbed]` first.
-    fn edit(&self, before: &AppSettings, text: &str) -> Result<String, toml_edit::TomlError> {
-        let mut document: DocumentMut = text.parse()?;
+    fn edit(&self, before: &AppSettings, text: &str) -> Result<String, String> {
+        let mut document: DocumentMut = text.parse().map_err(|err| format!("{err}"))?;
         migrate(&mut document);
         if self.opacity != before.opacity {
             document.entry("window").or_insert_with(section)["opacity"] = number(self.opacity);
@@ -156,6 +161,8 @@ impl AppSettings {
                 },
             }
         }
+        let keys = upstream::edit(&self.upstream, &before.upstream, document.as_item_mut());
+        keys.map_err(|(_, error)| error)?;
         Ok(document.to_string())
     }
 }
@@ -279,6 +286,7 @@ mod tests {
             wheel_zoom: true,
             restore_session: RestoreSession::Off,
             brand: Brand::default(),
+            upstream: upstream::read(&UiConfig::default()),
         }
     }
 
@@ -322,7 +330,9 @@ mod tests {
         assert_eq!(tabbed["pane_highlight"].as_str(), Some("#ff9500"));
         // What is written is what the configuration reads.
         let config = UiConfig::deserialize(toml::Value::Table(config)).unwrap();
-        assert_eq!(AppSettings::new(&config), changed);
+        // The file's own keys of Alacritty, which the settings left alone, are read as they are.
+        let read = AppSettings::new(&config);
+        assert_eq!(AppSettings { upstream: changed.upstream.clone(), ..read }, changed);
     }
 
     #[test]

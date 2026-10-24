@@ -145,12 +145,32 @@ icon_tiles = true  # false: no tile behind the logos in a tab's deck.
 ```
 
 **Settings panel.** Like Windows Terminal's, the settings list the
-application's pages above the profiles. **General** holds the session restore,
-the pinned tab bar and Ctrl+wheel text zoom. The gear opens **Appearance**: the
-corners, the interface font and its size, the background opacity, the
-terminal panel, the pane gap, the focus highlight, the tab track, the icon tiles and the logo,
-saved to `alacritty.toml` (changing only those keys, and keeping its comments)
-and applied to every window. "Edit profiles…" in the ⌄ menu opens the profiles:
+application's pages above the profiles, each page in titled groups of rows. They
+cover every option of `alacritty(5)` that holds a value, grouped as the terminal
+settings of VS Code and Zed are:
+
+| Page | Sections |
+| --- | --- |
+| General | Startup (session restore, startup mode, window size and position, working directory), Behaviour (pinned tab bar, Ctrl+wheel text zoom, programs setting titles), Configuration (live reload, IPC socket, imports), Environment |
+| Window | Window (title, class, level, decorations and their theme, resizing by cells), Background (opacity, blur, see-through cell colors), Padding |
+| Appearance | The fork's look: Shape (corners, terminal panel, pane gap, focus highlight), Interface (font and size, tab track, icon tiles), Logo |
+| Font | Font (family, style, size), Styles (bold, italic, bold italic), Spacing (cell spacing, glyph offset), Rendering (box drawing, bold in bright colors) |
+| Colors | Primary, the normal, bright and dim palettes, cursor and selection, search and hints, the line indicator and footer bar |
+| Cursor | Shape, blinking, thickness and hollow outline, blink interval and timeout, the vi mode's style |
+| Terminal | Shell, Scrolling, Selection (copy on select, word separators, OSC 52), Mouse and keyboard (hiding the pointer, Option as Alt on macOS, hint keys), Bell |
+| Advanced | Rendering (renderer, EGL, render timer, damage), Logging |
+
+Switches, segmented choices, menus for longer lists of choices, number fields
+with steppers, and color wells with a picker edit them; options that work only
+on some systems are shown only there. Key and mouse bindings, hint rules and
+indexed colors are lists of their own and are still edited in the file.
+
+`alacritty.toml` stays the source of truth: the pages show the configuration as
+loaded, and saving writes only the keys that changed, under Alacritty's own
+names (`font.size`, `cursor.style.shape`, `colors.normal.red` and so on, or
+`[tabbed]` for the fork's), keeping the file's comments and its tables' forms,
+and applies them to every window. Emptying a text, a color or an optional number
+removes its key, for the default. "Edit profiles…" in the ⌄ menu opens the profiles:
 name, icon, command line, starting directory, font, environment variables, configuration overrides,
 the default profile, and whether a profile shows in the menu. The font field
 lists the system's monospaced fonts as you type; "Show all fonts" lists every
