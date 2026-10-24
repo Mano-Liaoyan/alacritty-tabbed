@@ -894,7 +894,12 @@ mod tests {
             }
         }
         assert_eq!(config.window.dimensions().map(|d| (d.columns, d.lines)), Some((120, 40)));
-        assert_eq!(config.terminal.shell.as_ref().map(|shell| shell.args().len()), Some(3));
+        // Windows programs parse their own command line, so there it is one argument.
+        let args: &[&str] = match cfg!(windows) {
+            true => &["-l -c 'tmux new'"],
+            false => &["-l", "-c", "tmux new"],
+        };
+        assert_eq!(config.terminal.shell.as_ref().unwrap().args(), args);
         let style = "[cursor.style]\nshape = \"Beam\"\nblinking = \"Always\"\n";
         assert!(edited.contains(style), "{edited}");
         assert!(edited.contains("[env]\nTERM = \"xterm-256color\"\nA = \"b=c\"\n"), "{edited}");
