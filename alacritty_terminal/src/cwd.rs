@@ -19,7 +19,7 @@ pub struct ReportedDirectory {
 
 impl ReportedDirectory {
     /// Parse the payload of an operating system command, without its `ESC ]` and terminator.
-    pub fn parse(payload: &[u8]) -> Option<Self> {
+    pub(crate) fn parse(payload: &[u8]) -> Option<Self> {
         if let Some(url) = payload.strip_prefix(b"7;") {
             return Self::parse_url(url);
         }
@@ -85,7 +85,7 @@ enum State {
 
 /// Scanner for working directory reports in a terminal's output, across reads.
 #[derive(Debug, Default)]
-pub struct Scanner {
+pub(crate) struct Scanner {
     state: State,
     /// Whether `CommandEscape` returns to `Skip` rather than `Command`.
     skipping: bool,
@@ -94,7 +94,7 @@ pub struct Scanner {
 
 impl Scanner {
     /// Scan the next `bytes` of output, returning the last directory they complete a report of.
-    pub fn scan(&mut self, bytes: &[u8]) -> Option<ReportedDirectory> {
+    pub(crate) fn scan(&mut self, bytes: &[u8]) -> Option<ReportedDirectory> {
         let mut reported = None;
         let mut index = 0;
         while index < bytes.len() {

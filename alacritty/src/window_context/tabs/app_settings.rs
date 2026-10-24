@@ -376,7 +376,7 @@ mod tests {
     }
 
     #[test]
-    fn round_three_settings_are_written_and_left_alone() {
+    fn bar_session_and_brand_settings_are_written_and_left_alone() {
         let brand = Brand { show: false, icon: "bundled:opensuse".into(), ..Brand::default() };
         let changed = AppSettings {
             pin_tab_bar: false,

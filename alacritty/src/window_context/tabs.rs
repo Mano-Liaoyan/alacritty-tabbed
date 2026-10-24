@@ -22,6 +22,7 @@ mod cwd;
 mod divider;
 mod dnd;
 mod fonts;
+mod frame;
 mod fullscreen;
 pub mod hooks;
 mod icons;
@@ -32,10 +33,12 @@ mod peek;
 mod profiles;
 mod rename;
 pub mod restore;
+mod session;
 mod settings;
 mod split;
 mod tear;
 mod text;
+mod text_size;
 
 #[cfg(target_os = "macos")]
 mod macos;
@@ -54,18 +57,13 @@ use windows as platform;
 
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::error::Error;
 use std::hash::BuildHasher;
 use std::mem;
-#[cfg(not(windows))]
-use std::os::unix::io::{AsRawFd, RawFd};
-use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use crossfont::Size as FontSize;
 use log::error;
 use winit::dpi::{PhysicalPosition, PhysicalSize};
 use winit::event::{
@@ -73,38 +71,41 @@ use winit::event::{
 };
 use winit::event_loop::EventLoopProxy;
 use winit::keyboard::{Key, ModifiersState, NamedKey};
-use winit::window::{CursorIcon, Window as WinitWindow, WindowAttributes, WindowId};
+use winit::window::{CursorIcon, WindowAttributes, WindowId};
 
 use alacritty_terminal::event::{Event as TerminalEvent, Notify, OnResize};
-use alacritty_terminal::event_loop::{EventLoop as PtyEventLoop, Msg, Notifier};
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::sync::FairMutex;
 use alacritty_terminal::term::{ClipboardType, Term};
-use alacritty_terminal::tty::{self, Options as PtyOptions};
+use alacritty_terminal::tty::Options as PtyOptions;
 use alacritty_terminal::vte::ansi::NamedColor;
 
 use crate::cli::{ParsedOptions, WindowOptions};
 use crate::clipboard::Clipboard;
 use crate::config::font::Font;
-use crate::config::tabbed::{Corners, UiFont as UiFontConfig};
+use crate::config::tabbed::{Corners, MAX_PANE_GAP, UiFont as UiFontConfig};
 use crate::config::{Action, BindingKey, BindingMode, UiConfig};
 use crate::display::SizeInfo;
-use crate::event::{Event, EventProxy, EventType, InlineSearchState, SearchState};
-use crate::input::FONT_SIZE_STEP;
+use crate::event::{Event, EventProxy, EventType};
 use crate::window_context::WindowContext;
 
 use app_settings::AppSettings;
 use bar::{BAR, Hit, INSET, Layout, MARGIN};
 use dnd::{Drag, Source, Target};
+pub use frame::Frame;
+use frame::{Restore, frame, restore};
 pub use fullscreen::FullscreenState;
 use paint::Image;
 pub use paint::Rect;
 use panes::Control;
 use profiles::{Profile, Profiles};
+use session::Session;
 use settings::{Page, Settings};
 use split::{Axis, Divider, Side, Split};
 pub use tear::{Live, Torn, adopt, take as take_torn};
 use text::UiFont;
+pub use text_size::{FontChange, set_live_font, zoom_live};
+use text_size::{ZOOM_MIN_POINTS, ZOOM_RANGE, ZOOM_WHEEL, note_font, wheel_steps};
 
 /// Ids for the terminals of new tabs, far from the platform's window ids.
 static NEXT_ID: AtomicU64 = AtomicU64::new(1 << 62);
@@ -121,30 +122,6 @@ const PANE_DRAG: ModifiersState = ModifiersState::CONTROL.union(ModifiersState::
 #[cfg(target_os = "macos")]
 const PANE_DRAG: ModifiersState = ModifiersState::SUPER.union(ModifiersState::ALT);
 
-/// Modifiers that zoom the focused pane's text with the wheel, exactly; macOS zooms the screen
-/// with Control.
-#[cfg(not(target_os = "macos"))]
-const ZOOM_WHEEL: ModifiersState = ModifiersState::CONTROL;
-#[cfg(target_os = "macos")]
-const ZOOM_WHEEL: ModifiersState = ModifiersState::SUPER;
-
-/// Logical pixels a touchpad scrolls for each step of a text zoom.
-const ZOOM_PIXELS: f64 = 24.;
-/// Smallest and largest text of a zoomed pane, relative to its configured size, and smallest in
-/// points.
-const ZOOM_RANGE: (f32, f32) = (0.5, 4.);
-const ZOOM_MIN_POINTS: f32 = 4.;
-
-/// How the window is shown, which decides its resize border and the corners it cuts.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum Frame {
-    #[default]
-    Normal,
-    Maximized,
-    /// Fills the screen; like maximized, without resize borders.
-    Fullscreen,
-}
-
 /// How a window's terminals are coming to an end.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Ending {
@@ -152,15 +129,6 @@ pub enum Ending {
     Window,
     /// Its last tab was closed.
     Tabs,
-}
-
-/// A change of the live pane's text size.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum FontChange {
-    /// Larger or smaller by steps.
-    By(i32),
-    /// Back to the size of its configuration.
-    Reset,
 }
 
 /// Tabs of one window.
@@ -318,30 +286,6 @@ enum Press {
 struct Menu {
     profiles: Vec<Profile>,
     selected: usize,
-}
-
-/// Per-terminal state of a [`WindowContext`], kept aside while its tab is inactive.
-struct Session {
-    terminal: Arc<FairMutex<Term<EventProxy>>>,
-    notifier: Notifier,
-    search_state: SearchState,
-    inline_search_state: InlineSearchState,
-    cursor_blink_timed_out: bool,
-    prev_bell_cmd: Option<Instant>,
-    preserve_title: bool,
-    window_config: ParsedOptions,
-    #[cfg(not(windows))]
-    master_fd: RawFd,
-    shell_pid: u32,
-    /// The pane's configuration, with its profile's overrides and padding.
-    config: Rc<UiConfig>,
-    /// Size of the pane's terminal.
-    size: SizeInfo,
-    /// Size of the pane's text, in the window's pixels, while it is zoomed away from its
-    /// configuration's.
-    zoom: Option<FontSize>,
-    /// Whether another window took over the terminal, which then keeps running.
-    adopted: bool,
 }
 
 /// Something to do with the tabs, from the bar or the keyboard.
@@ -693,9 +637,8 @@ fn place<S>(
     let (tab, index) = match target {
         Target::Merge(tab) => {
             let (tab, id) = (shift(tab), moved.id);
-            let (beside, axis, side) =
-                join_spot(&tabs[tab].layout, &Split::Pane(id), area, min, spacing);
-            tabs[tab].join(Tab::new(moved), beside, axis, side);
+            let (beside, axis) = join_spot(&tabs[tab].layout, &Split::Pane(id), area, min, spacing);
+            tabs[tab].join(Tab::new(moved), beside, axis, Side::After);
             (tab, tabs[tab].position(id).unwrap_or_default())
         },
         Target::Dock { axis, side, .. } => {
@@ -721,16 +664,17 @@ fn reorder<S>(tabs: &mut Vec<Tab<S>>, active: &mut usize, to: usize) {
     tabs.insert(*active, tab);
 }
 
-/// Where `new` joins the panes of `group` in `area`, each keeping `min`, `spacing` apart, as
-/// [`Split::spot`] finds; beside them all when it fits nowhere, as before there was a check.
+/// Where `new` joins the panes of `group` in `area`, after the pane or all of them, each keeping
+/// `min`, `spacing` apart, as [`Split::spot`] finds; beside them all when it fits nowhere, as
+/// before there was a check.
 fn join_spot(
     group: &Split<WindowId>,
     new: &Split<WindowId>,
     area: Rect,
     min: (f32, f32),
     spacing: f32,
-) -> (Option<WindowId>, Axis, Side) {
-    group.spot(new, area, min, spacing).unwrap_or((None, split::auto_axis(area), Side::After))
+) -> (Option<WindowId>, Axis) {
+    group.spot(new, area, min, spacing).unwrap_or((None, split::auto_axis(area)))
 }
 
 /// Group the active tab with the tab `into`, which takes its place and its focus: docked beside
@@ -752,7 +696,11 @@ fn group<S>(
             Some(pane) => (Some(pane.id), axis, side),
             None => return false,
         },
-        None => join_spot(&tabs[into].layout, &tabs[from].layout, area, min, spacing),
+        None => {
+            let (beside, axis) =
+                join_spot(&tabs[into].layout, &tabs[from].layout, area, min, spacing);
+            (beside, axis, Side::After)
+        },
     };
     let tab = tabs.remove(from);
     let into = if into > from { into - 1 } else { into };
@@ -761,116 +709,6 @@ fn group<S>(
     tabs[into].focus = tabs[into].position(focus).unwrap_or_default();
     *active = into;
     true
-}
-
-impl Session {
-    /// Start a terminal for a new pane, with the settings of `profile`, in `directory` or else
-    /// the profile's, showing the text `history` saved from a pane before its shell starts.
-    fn spawn(
-        ctx: &WindowContext,
-        config: &Rc<UiConfig>,
-        proxy: &EventLoopProxy<Event>,
-        profile: Option<&Profile>,
-        directory: Option<PathBuf>,
-        history: Option<&str>,
-    ) -> Result<(WindowId, Self), Box<dyn Error>> {
-        let options = profile.map_or_else(Vec::new, Profile::overrides);
-        let mut window_config = ParsedOptions::from_options(&options);
-        let config = pane_config(config, &mut window_config, ctx.display.tabs.inset);
-        let mut pty_config = config.pty_config();
-        if let Some(profile) = profile {
-            profile.apply(&mut pty_config);
-        }
-        if directory.is_some() {
-            pty_config.working_directory = directory;
-        }
-
-        let id = next_id();
-        let event_proxy = EventProxy::new(proxy.clone(), id);
-        let size = ctx.display.size_info;
-        let mut terminal = Term::new(config.term_options(), &size, event_proxy.clone());
-        if let Some(history) = history {
-            restore::replay(&mut terminal, history);
-        }
-        let terminal = Arc::new(FairMutex::new(terminal));
-
-        #[cfg(windows)]
-        let marker = cwd::mark(&mut pty_config);
-        // Shells and `alacritty msg` refer to the window, not the tab.
-        let pty = tty::new(&pty_config, size.into(), ctx.id().into())?;
-        #[cfg(not(windows))]
-        let (master_fd, shell_pid) = (pty.file().as_raw_fd(), pty.child().id());
-        #[cfg(windows)]
-        let shell_pid = pty.child_watcher().pid().map_or(0, |pid| pid.get());
-        #[cfg(windows)]
-        cwd::register(shell_pid, marker);
-        let event_loop =
-            PtyEventLoop::new(terminal.clone(), event_proxy, pty, pty_config.drain_on_exit, false)?;
-        let notifier = Notifier(event_loop.channel());
-        event_loop.spawn();
-
-        Ok((id, Self {
-            terminal,
-            notifier,
-            window_config,
-            search_state: Default::default(),
-            inline_search_state: Default::default(),
-            cursor_blink_timed_out: false,
-            prev_bell_cmd: None,
-            preserve_title: false,
-            #[cfg(not(windows))]
-            master_fd,
-            shell_pid,
-            config,
-            size,
-            zoom: None,
-            adopted: false,
-        }))
-    }
-
-    /// The pane's font at its size, in a window of `scale`.
-    fn font(&self, scale: f32) -> Font {
-        let size = self.zoom.unwrap_or_else(|| self.config.font.size().scale(scale));
-        self.config.font.clone().with_size(size)
-    }
-
-    /// Exchange this terminal with the window's live one, and its text size, which the window's
-    /// display takes.
-    fn swap(&mut self, ctx: &mut WindowContext) {
-        let scale = ctx.display.window.scale_factor as f32;
-        let incoming = self.font(scale).size();
-        mem::swap(&mut self.terminal, &mut ctx.terminal);
-        mem::swap(&mut self.notifier, &mut ctx.notifier);
-        mem::swap(&mut self.search_state, &mut ctx.search_state);
-        mem::swap(&mut self.inline_search_state, &mut ctx.inline_search_state);
-        mem::swap(&mut self.cursor_blink_timed_out, &mut ctx.cursor_blink_timed_out);
-        mem::swap(&mut self.prev_bell_cmd, &mut ctx.prev_bell_cmd);
-        mem::swap(&mut self.preserve_title, &mut ctx.preserve_title);
-        mem::swap(&mut self.window_config, &mut ctx.window_config);
-        #[cfg(not(windows))]
-        mem::swap(&mut self.master_fd, &mut ctx.master_fd);
-        mem::swap(&mut self.shell_pid, &mut ctx.shell_pid);
-        self.config = ctx.config.clone();
-        self.size = ctx.display.size_info;
-        let live = mem::replace(&mut ctx.display.font_size, incoming);
-        self.zoom = (live != self.config.font.size().scale(scale)).then_some(live);
-    }
-
-    /// Hand the terminal to another window, which keeps it running.
-    fn into_live(mut self) -> Live {
-        self.adopted = true;
-        Live {
-            terminal: self.terminal.clone(),
-            notifier: Notifier(self.notifier.0.clone()),
-            search_state: mem::take(&mut self.search_state),
-            inline_search_state: mem::take(&mut self.inline_search_state),
-            window_config: mem::take(&mut self.window_config),
-            preserve_title: self.preserve_title,
-            #[cfg(not(windows))]
-            master_fd: self.master_fd,
-            shell_pid: self.shell_pid,
-        }
-    }
 }
 
 /// The configuration of a pane: the window's with the pane's `overrides`, padded by `inset`
@@ -884,14 +722,6 @@ fn pad(config: Rc<UiConfig>, inset: u8) -> Rc<UiConfig> {
     let (x, y) = config.window.padding(1.);
     let padding = format!("window.padding={{x={},y={}}}", x as u8 + inset, y as u8 + inset);
     ParsedOptions::from_options(&[padding]).override_config_rc(config)
-}
-
-impl Drop for Session {
-    fn drop(&mut self) {
-        if !self.adopted {
-            let _ = self.notifier.0.send(Msg::Shutdown);
-        }
-    }
 }
 
 /// Let the bar replace the system's caption.
@@ -1399,55 +1229,6 @@ pub fn route<S: BuildHasher>(
     None
 }
 
-/// How `window` lies on its screen, to draw it. Fullscreen also when it covers its whole monitor
-/// unmaximized: X11 window managers make windows fullscreen without the application knowing,
-/// which Wayland tells it.
-fn frame(window: &WinitWindow) -> Frame {
-    let covering = || {
-        let monitor = window.current_monitor();
-        let screen = monitor.as_ref().map(|monitor| (monitor.position(), monitor.size()));
-        covers(window.outer_position().ok().map(|position| (position, window.outer_size())), screen)
-    };
-    frame_of(window.fullscreen().is_some(), window.is_maximized(), covering)
-}
-
-/// The frame of a window fullscreen or maximized as the platform knows, else fullscreen when it
-/// is `covering` its monitor; maximized windows cover it too where nothing else is on screen.
-fn frame_of(fullscreen: bool, maximized: bool, covering: impl FnOnce() -> bool) -> Frame {
-    match (fullscreen, maximized) {
-        (true, _) => Frame::Fullscreen,
-        (_, true) => Frame::Maximized,
-        _ if covering() => Frame::Fullscreen,
-        _ => Frame::Normal,
-    }
-}
-
-/// What the restore button of a window drawn in `frame` does, when the platform knows it to be
-/// `fullscreen` or not.
-#[derive(Debug, PartialEq, Eq)]
-enum Restore {
-    LeaveFullscreen,
-    /// Leave a fullscreen the window manager made, which the platform did not see.
-    LeaveOtherFullscreen,
-    ToggleMaximized,
-}
-
-fn restore(frame: Frame, fullscreen: bool) -> Restore {
-    match (fullscreen, frame) {
-        (true, _) => Restore::LeaveFullscreen,
-        (false, Frame::Fullscreen) => Restore::LeaveOtherFullscreen,
-        _ => Restore::ToggleMaximized,
-    }
-}
-
-/// Whether a window at `outer` is exactly the monitor at `screen`, both known.
-fn covers(
-    outer: Option<(PhysicalPosition<i32>, PhysicalSize<u32>)>,
-    screen: Option<(PhysicalPosition<i32>, PhysicalSize<u32>)>,
-) -> bool {
-    outer.is_some() && outer == screen
-}
-
 /// Show or hide the caption, and fit the terminals in their panels below the bar.
 ///
 /// The window's state is only queried on `resize`, since that is slow on some platforms.
@@ -1506,7 +1287,7 @@ fn sync(ctx: &mut WindowContext, config: &Rc<UiConfig>, resize: bool) {
     tabs.caption = shown;
     // A bar that is not pinned is drawn over the panes, which take the whole window.
     tabs.autohide.pinned = config.tabbed.pin_tab_bar;
-    let gap = f32::from(config.tabbed.pane_gap.min(48));
+    let gap = f32::from(config.tabbed.pane_gap.min(MAX_PANE_GAP));
     let regap = mem::replace(&mut tabs.gap, gap) != gap;
     let (offset, inset) = match shown {
         false => (0, 0),
@@ -2077,75 +1858,6 @@ fn toggle_pin(config: &UiConfig, proxy: &EventLoopProxy<Event>) {
     }
 }
 
-/// Give the live pane text of `size`, in the window's pixels.
-pub fn set_live_font(ctx: &mut WindowContext, size: FontSize) {
-    if ctx.display.font_size != size {
-        ctx.display.font_size = size;
-        ctx.display.pending_update.set_font(ctx.config.font.clone().with_size(size));
-        note_font(ctx);
-        redraw(ctx);
-    }
-}
-
-/// Make the live pane's text larger or smaller, within its bounds, or as configured again.
-pub fn zoom_live(ctx: &mut WindowContext, change: FontChange) {
-    let scale = ctx.display.window.scale_factor as f32;
-    let font = &ctx.config.font;
-    let min = FontSize::new(ZOOM_MIN_POINTS).scale(scale).as_px();
-    let size = zoomed(ctx.display.font_size, change, font.size().scale(scale), min);
-    set_live_font(ctx, size);
-}
-
-/// Text of size `current` after `change`, for text `configured` at that size, never below `min`
-/// pixels: a reset gives back the configured size exactly, which pixels would not round-trip.
-fn zoomed(current: FontSize, change: FontChange, configured: FontSize, min: f32) -> FontSize {
-    match change {
-        FontChange::By(steps) => {
-            FontSize::from_px(zoomed_px(current.as_px(), steps, configured.as_px(), min))
-        },
-        FontChange::Reset => configured,
-    }
-}
-
-/// Size in pixels of text of `current` pixels made larger by `steps`, or smaller by negative
-/// ones, within [`ZOOM_RANGE`] of its `configured` size and never below `min`.
-fn zoomed_px(current: f32, steps: i32, configured: f32, min: f32) -> f32 {
-    let (low, high) = (ZOOM_RANGE.0 * configured, ZOOM_RANGE.1 * configured);
-    // Whole pixels, which text looks best at, like the keys that zoom it.
-    let px = current.round() + steps as f32 * FONT_SIZE_STEP;
-    px.clamp(low.max(min), high.max(min))
-}
-
-/// Whole steps of a text zoom that the wheel moved by `delta`, keeping what is short of a step in
-/// `rest`: a line a step, or [`ZOOM_PIXELS`] logical pixels of a touchpad at `scale`. Turning the
-/// wheel back starts afresh.
-fn wheel_steps(delta: MouseScrollDelta, scale: f64, rest: &mut f64) -> i32 {
-    let steps = match delta {
-        MouseScrollDelta::LineDelta(_, lines) => f64::from(lines),
-        MouseScrollDelta::PixelDelta(delta) => delta.y / (ZOOM_PIXELS * scale),
-    };
-    if steps * *rest < 0. {
-        *rest = 0.;
-    }
-    *rest += steps;
-    let whole = rest.trunc();
-    *rest -= whole;
-    whole as i32
-}
-
-/// Show the live pane's text size over it when it changed, by any key or the wheel, since last
-/// seen.
-fn note_font(ctx: &mut WindowContext) {
-    let scale = ctx.display.window.scale_factor as f32;
-    let configured = ctx.config.font.size().scale(scale).as_px();
-    let percent = (100. * ctx.display.font_size.as_px() / configured).round() as u16;
-    let tabs = &mut ctx.display.tabs;
-    let live = (tabs.live_id(ctx.first), percent);
-    if tabs.live_font.replace(live).is_some_and(|(id, old)| id == live.0 && old != percent) {
-        tabs.font_hud = Some((live.0, percent, Instant::now()));
-    }
-}
-
 /// How a window ends whose tab at `index`, of `len`, is closed: an index past the tabs closes the
 /// window itself.
 fn ending(len: usize, index: usize) -> Ending {
@@ -2548,39 +2260,6 @@ mod tests {
     }
 
     #[test]
-    fn a_window_covering_its_monitor_is_fullscreen() {
-        let at = |x, y, w, h| Some((PhysicalPosition::new(x, y), PhysicalSize::new(w, h)));
-        let screen = at(1920, 0, 2560, 1440);
-        assert!(covers(at(1920, 0, 2560, 1440), screen));
-        // Maximized below a panel, or the right size on another monitor, is not.
-        assert!(!covers(at(1920, 32, 2560, 1408), screen));
-        assert!(!covers(at(0, 0, 2560, 1440), screen));
-        // Unknown places, as on Wayland, which reports fullscreen itself.
-        assert!(!covers(None, None));
-        assert!(!covers(None, screen));
-    }
-
-    #[test]
-    fn frames_and_what_restore_does() {
-        use Frame::*;
-        // What the platform knows wins; covering the monitor counts only unmaximized.
-        for (fullscreen, maximized, covering, frame) in [
-            (true, false, true, Fullscreen),
-            (true, true, true, Fullscreen),
-            (false, true, true, Maximized),
-            (false, true, false, Maximized),
-            (false, false, true, Fullscreen),
-            (false, false, false, Normal),
-        ] {
-            assert_eq!(frame_of(fullscreen, maximized, || covering), frame);
-        }
-        assert_eq!(restore(Fullscreen, true), Restore::LeaveFullscreen);
-        assert_eq!(restore(Fullscreen, false), Restore::LeaveOtherFullscreen);
-        assert_eq!(restore(Maximized, false), Restore::ToggleMaximized);
-        assert_eq!(restore(Normal, false), Restore::ToggleMaximized);
-    }
-
-    #[test]
     fn closing_the_last_tab_or_the_window() {
         assert_eq!(ending(1, 0), Ending::Tabs);
         assert_eq!(ending(0, 0), Ending::Window, "without tabs");
@@ -2590,51 +2269,6 @@ mod tests {
         assert!(tabs.closed_whole());
         assert!(!Tabs { ending: Some(Ending::Tabs), ..Tabs::default() }.closed_whole());
         assert!(!Tabs::default().closed_whole(), "the last shell exited");
-    }
-
-    #[test]
-    fn reset_text_is_exactly_as_configured() {
-        // Sizes whose pixels do not round-trip to the same size.
-        for (points, scale) in [(11.4, 1.), (12.1, 1.), (10.9, 2.), (11.25, 1.)] {
-            let configured = FontSize::new(points).scale(scale);
-            let larger = zoomed(configured, FontChange::By(3), configured, 4.);
-            assert_ne!(larger, configured);
-            assert_eq!(zoomed(larger, FontChange::Reset, configured, 4.), configured, "{points}");
-        }
-    }
-
-    #[test]
-    fn zoomed_text_stays_in_bounds() {
-        // Whole pixels, a step each.
-        assert_eq!(zoomed_px(16., 1, 16., 5.), 17.);
-        assert_eq!(zoomed_px(16.4, -3, 16., 5.), 13.);
-        // From half to four times as large as configured.
-        assert_eq!(zoomed_px(9., -5, 16., 5.), 8.);
-        assert_eq!(zoomed_px(60., 10, 16., 5.), 64.);
-        // Never smaller than the smallest text.
-        assert_eq!(zoomed_px(8., -5, 8., 5.), 5.);
-        assert_eq!(zoomed_px(8., 0, 8., 5.), 8.);
-    }
-
-    #[test]
-    fn wheel_zooms_by_whole_steps() {
-        let mut rest = 0.;
-        let lines = |y| MouseScrollDelta::LineDelta(0., y);
-        let pixels = |y| MouseScrollDelta::PixelDelta(PhysicalPosition::new(0., y));
-        assert_eq!(wheel_steps(lines(1.), 1., &mut rest), 1);
-        assert_eq!(wheel_steps(lines(-2.), 1., &mut rest), -2);
-        // A touchpad steps every 24 pixels, keeping the rest.
-        assert_eq!(wheel_steps(pixels(20.), 1., &mut rest), 0);
-        assert_eq!(wheel_steps(pixels(20.), 1., &mut rest), 1);
-        assert_eq!(wheel_steps(pixels(5.), 1., &mut rest), 0);
-        // Turning back starts afresh.
-        assert_eq!(wheel_steps(pixels(-20.), 1., &mut rest), 0);
-        assert_eq!(wheel_steps(pixels(-5.), 1., &mut rest), -1);
-        assert_eq!(wheel_steps(lines(0.5), 1., &mut rest), 0);
-        assert_eq!(wheel_steps(lines(0.5), 1., &mut rest), 1);
-        // Logical pixels: twice as many on a screen of twice the scale.
-        assert_eq!(wheel_steps(pixels(30.), 2., &mut rest), 0);
-        assert_eq!(wheel_steps(pixels(20.), 2., &mut rest), 1);
     }
 
     #[test]

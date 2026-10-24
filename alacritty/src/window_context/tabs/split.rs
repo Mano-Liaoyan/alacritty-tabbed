@@ -180,8 +180,8 @@ impl<P: Copy + PartialEq> Split<P> {
     }
 
     /// Where `new` joins this group laid out in `area`, every pane keeping at least `min`,
-    /// `spacing` apart: beside all of its panes, `None`, while they keep that much, or else beside
-    /// the roomiest pane it fits beside, as a split would. None when it fits nowhere.
+    /// `spacing` apart: after all of its panes, `None`, while they keep that much, or else after
+    /// the roomiest pane it fits after, as a split would. None when it fits nowhere.
     ///
     /// Halving the whole group soon leaves too little for a group of a few panes, while one of
     /// them still has room enough to share.
@@ -191,10 +191,10 @@ impl<P: Copy + PartialEq> Split<P> {
         area: Rect,
         min: (f32, f32),
         spacing: f32,
-    ) -> Option<(Option<P>, Axis, Side)> {
+    ) -> Option<(Option<P>, Axis)> {
         let axis = auto_axis(area);
         if self.clone().join(new.clone(), axis, Side::After).fits_in(area, min, spacing) {
-            return Some((None, axis, Side::After));
+            return Some((None, axis));
         }
         let mut panes = self.rects(area, spacing);
         // Roomiest first; a stable sort keeps the order of the tree among equals.
@@ -207,7 +207,7 @@ impl<P: Copy + PartialEq> Split<P> {
             [auto_axis(rect), other]
                 .into_iter()
                 .find(|&axis| fits(rect, axis, Side::After, new, min, spacing))
-                .map(|axis| (Some(pane), axis, Side::After))
+                .map(|axis| (Some(pane), axis))
         })
     }
 
@@ -632,7 +632,7 @@ mod tests {
         let (min, new) = ((100., 50.), Split::Pane(9));
         // Room enough: beside the whole group, along the area's longer side.
         let roomy = Rect::new(0., 0., 800., 300.);
-        assert_eq!(three().spot(&new, roomy, min, 0.), Some((None, Axis::Row, Side::After)));
+        assert_eq!(three().spot(&new, roomy, min, 0.), Some((None, Axis::Row)));
         // Four side by side, each 100 px once halved, which is too little, but pane 1 of the four
         // can share its own 200 px.
         let four = pair(
@@ -641,11 +641,11 @@ mod tests {
             pair(Axis::Row, Split::Pane(3), Split::Pane(4)),
         );
         let min = (150., 50.);
-        assert_eq!(four.spot(&new, roomy, min, 0.), Some((Some(1), Axis::Column, Side::After)));
+        assert_eq!(four.spot(&new, roomy, min, 0.), Some((Some(1), Axis::Column)));
         // The roomiest pane goes first, the other way when its longer side leaves too little.
         let area = Rect::new(0., 0., 1000., 300.);
         let wide = (300., 50.);
-        assert_eq!(three().spot(&new, area, wide, 0.), Some((Some(1), Axis::Column, Side::After)));
+        assert_eq!(three().spot(&new, area, wide, 0.), Some((Some(1), Axis::Column)));
         // Nowhere to go.
         assert_eq!(four.spot(&new, Rect::new(0., 0., 400., 100.), min, 0.), None);
     }
