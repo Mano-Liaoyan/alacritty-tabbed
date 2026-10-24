@@ -173,7 +173,7 @@ impl Layout {
             |x: f32, width: f32| Rect::new(x, ((bar - control) / 2.).round(), width, control);
 
         // Fullscreen hides the window buttons, until the menu bar shows them over the bar.
-        let lights = if mac && tabs.frame != Frame::Fullscreen { px(80.) } else { 0. };
+        let lights = if mac && !tabs.lights_hidden { px(80.) } else { 0. };
         // GNOME's and KDE's round window buttons end as far from the window's edge as the logo
         // begins, so the bar's two ends mirror each other.
         let trailing =

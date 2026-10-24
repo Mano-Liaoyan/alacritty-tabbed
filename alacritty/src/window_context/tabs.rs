@@ -221,6 +221,8 @@ pub struct Tabs {
     /// Radius of the window's corners in points, where the system rounds them and says by how
     /// much; else the bar's own.
     window_radius: Option<f32>,
+    /// Whether the system hides the window buttons, being fullscreen or on its way into it.
+    lights_hidden: bool,
     /// Whether the terminal is held in a panel, rather than filling the window.
     panel: bool,
 }
@@ -773,7 +775,7 @@ pub fn window_event(
         #[cfg(target_os = "macos")]
         {
             let tabs = &ctx.display.tabs;
-            let bar = (tabs.caption && tabs.frame != Frame::Fullscreen).then_some(f64::from(BAR));
+            let bar = (tabs.caption && !tabs.lights_hidden).then_some(f64::from(BAR));
             platform::place_buttons(ctx.display.window.winit(), bar);
             // The buttons ride on a bar that is not pinned, and hide with it.
             let (scale, now) = (tabs.scale as f32, Instant::now());
