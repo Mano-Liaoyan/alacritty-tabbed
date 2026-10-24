@@ -341,12 +341,10 @@ configuration instead.
 
 ## Syncing with upstream
 
-The fork's code lives in its own files, such as
-`alacritty/src/window_context/tabs/`; upstream files only gain thin hooks, each
-marked with a `// tabbed:` comment. Upstream is brought in with
-`git merge upstream/master`, never a rebase. Run `scripts/patch-surface.sh` to
-see how much of upstream's code the fork touches; the
-[Upstream sync](workflows/upstream-sync.yml) workflow tries the merge weekly.
+The fork keeps its changes to upstream's files small, so that merging upstream
+stays cheap; the rules are in [CLAUDE.md](../CLAUDE.md). The
+[Upstream sync](workflows/upstream-sync.yml) workflow tries the merge weekly and
+opens an issue when it conflicts.
 
 ## Alacritty
 
