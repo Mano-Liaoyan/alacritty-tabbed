@@ -216,6 +216,9 @@ pub struct Tabs {
     corners: Option<Corners>,
     /// Whether the window's corners are cut out of it, which needs a transparent window.
     cut: bool,
+    /// Radius of the window's corners in points, where the system rounds them and says by how
+    /// much; else the bar's own.
+    window_radius: Option<f32>,
     /// Whether the terminal is held in a panel, rather than filling the window.
     panel: bool,
 }
@@ -365,6 +368,11 @@ impl Tabs {
     /// Whether the modifiers that drag a pane are held, where there is anything to drag it to.
     fn pane_drag(&self) -> bool {
         self.modifiers == PANE_DRAG && self.count() > 1
+    }
+
+    /// Radius of the panes' panels in points, following the window's corners.
+    fn panel_radius(&self) -> f32 {
+        bar::panel_radius(self.window_radius.unwrap_or(bar::RADIUS))
     }
 
     /// The card a pane placed at `rect` is drawn in, inside its margin.
@@ -766,6 +774,11 @@ pub fn window_event(
             let bar = (tabs.caption && tabs.frame != Frame::Fullscreen).then_some(f64::from(BAR));
             platform::place_buttons(ctx.display.window.winit(), bar);
             dock::install(proxy);
+            // A fullscreen window has no corners to follow.
+            if ctx.display.tabs.frame == Frame::Normal {
+                let radius = platform::corner_radius(ctx.display.window.winit());
+                ctx.display.tabs.window_radius = Some(radius as f32);
+            }
         }
     }
     if let WindowEvent::Resized(size) = event {

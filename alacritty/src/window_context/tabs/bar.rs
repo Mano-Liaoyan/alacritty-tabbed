@@ -41,6 +41,14 @@ pub const INSET: f32 = 4.;
 pub const RADIUS: f32 = 18.;
 /// Radius of the terminal's panel, and of the panels in the settings.
 pub const PANEL_RADIUS: f32 = RADIUS - MARGIN;
+
+/// Radius of the terminal's panel in a window whose corners are rounded by `window` points:
+/// concentric with them, though no less than half as round, where the window's are too tight for
+/// the margin.
+pub fn panel_radius(window: f32) -> f32 {
+    (window - MARGIN).max(window / 2.)
+}
+
 /// Space between the top of the window and the tab track.
 const TRACK_TOP: f32 = 6.;
 /// Space between the tab track and its tabs.
@@ -128,6 +136,8 @@ pub struct Layout {
     border: f32,
     /// Whether the terminal is held in a panel, with a margin around it.
     pub panel: bool,
+    /// Radius of the terminal's panel in logical pixels, following the window's corners.
+    pub panel_radius: f32,
     pub height: f32,
     /// Distance between the left edges of neighbouring tabs.
     step: f32,
@@ -257,6 +267,7 @@ impl Layout {
             round: tabs.corners.unwrap_or_default() == Corners::Round,
             border,
             panel,
+            panel_radius: tabs.panel_radius(),
             height,
             step,
             mark: mark.zip(image),
@@ -1314,6 +1325,15 @@ mod tests {
         motion: impl Fn(usize) -> (f32, f32),
     ) -> Icons {
         deck(front, count, focus, scale, ROW_MAX, chip_size(count), motion).icons
+    }
+
+    #[test]
+    fn the_panel_follows_the_window_corners() {
+        // Concentric with the bar's own corners, as before, and with macOS 26's.
+        assert_eq!(panel_radius(RADIUS), PANEL_RADIUS);
+        assert_eq!(panel_radius(16.), 8.);
+        // Corners too tight for the margin stay half as round.
+        assert_eq!(panel_radius(10.), 5.);
     }
 
     #[test]

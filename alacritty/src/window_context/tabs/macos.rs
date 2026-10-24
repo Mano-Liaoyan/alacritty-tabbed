@@ -184,3 +184,32 @@ pub fn advances(
         }
     }))
 }
+
+/// Radius of the window's corners in points, as the system rounds them.
+///
+/// AppKit only tells it privately, so where it does not, it is taken from the system's version:
+/// macOS 26 rounds windows more than the ones before it.
+pub fn corner_radius(window: &Window) -> f64 {
+    use alacritty_tabbed_deps::objc2::runtime::NSObjectProtocol;
+    use alacritty_tabbed_deps::objc2::{msg_send, sel};
+    use alacritty_tabbed_deps::objc2_foundation::NSProcessInfo;
+
+    let told = || {
+        let RawWindowHandle::AppKit(handle) = window.window_handle().ok()?.as_raw() else {
+            return None;
+        };
+        // Window events are handled on the main thread.
+        let view = unsafe { handle.ns_view.cast::<NSView>().as_ref() };
+        let window = view.window()?;
+        let selector = sel!(_cornerRadius);
+        if !window.respondsToSelector(selector) {
+            return None;
+        }
+        let radius: f64 = unsafe { msg_send![&*window, _cornerRadius] };
+        (radius.is_finite() && radius > 0.).then_some(radius)
+    };
+    told().unwrap_or_else(|| {
+        let version = NSProcessInfo::processInfo().operatingSystemVersion();
+        if version.majorVersion >= 26 { 16. } else { 10. }
+    })
+}
