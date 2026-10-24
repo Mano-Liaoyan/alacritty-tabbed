@@ -155,7 +155,7 @@ impl Field {
     /// own settings, and numbers and colors.
     fn right_aligned(self) -> bool {
         match self {
-            Field::Key(..) => self.number().is_some() || self.color().is_some(),
+            Field::Key(..) => self.number().is_some() || self.color(),
             field => field.is_app_setting(),
         }
     }
@@ -167,14 +167,10 @@ impl Field {
         face || matches!(self, Field::Font | Field::UiFont)
     }
 
-    /// Whether the field holds a color, and whether it may name the cell's.
-    fn color(self) -> Option<bool> {
-        match (self, self.key().map(|key| key.kind)) {
-            (Field::PaneHighlight, _) => Some(false),
-            (_, Some(Kind::Color)) => Some(false),
-            (_, Some(Kind::Colors(_, cells))) => Some(cells),
-            _ => None,
-        }
+    /// Whether the field holds a color.
+    fn color(self) -> bool {
+        self == Field::PaneHighlight
+            || matches!(self.key().map(|key| key.kind), Some(Kind::Color | Kind::Colors(..)))
     }
 
     fn label(self) -> &'static str {
@@ -1108,7 +1104,7 @@ impl Settings {
                     let fields_of = row.fields();
                     match (fields_of.as_slice(), kind) {
                         // A color's field is beside its well, which is left of it.
-                        (&[field], _) if field.color().is_some() => {
+                        (&[field], _) if field.color() => {
                             fields[field.index()] =
                                 Rect { x: control.x + px(32.), w: control.w - px(32.), ..control }
                         },
@@ -1191,7 +1187,7 @@ impl Settings {
                     }
                     for field in row.fields() {
                         let rect = fields[field.index()];
-                        if field.color().is_some() {
+                        if field.color() {
                             buttons.push((Target::Well(field), well(rect, layout)));
                         }
                         if field.stepper() {
