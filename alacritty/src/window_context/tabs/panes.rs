@@ -396,15 +396,6 @@ fn with_controls(tabs: &Tabs, scale: f32) -> (Vec<(usize, Rect)>, f32) {
     (cards.filter(|&(_, card)| fits(card, tabs.cells.1, scale)).collect(), top)
 }
 
-/// The pane of the active tab whose control is at `point`, and which control.
-pub fn control_at(
-    tabs: &Tabs,
-    layout: &Layout,
-    point: PhysicalPosition<f64>,
-) -> Option<(usize, Control)> {
-    control(tabs, point, layout.scale)
-}
-
 /// The pane of the active tab whose control is at `point`, at `scale`, and which control.
 pub fn control(tabs: &Tabs, point: PhysicalPosition<f64>, scale: f32) -> Option<(usize, Control)> {
     let (cards, top) = with_controls(tabs, scale);

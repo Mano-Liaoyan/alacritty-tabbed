@@ -1088,7 +1088,7 @@ pub fn window_event(
             // window's resize borders keep the pointer over the controls near them.
             let resize = matches!(under, Hit::Resize(_));
             let control =
-                panes::control_at(tabs, &layout, position).filter(|_| free && !shelf && !resize);
+                panes::control(tabs, position, layout.scale).filter(|_| free && !shelf && !resize);
             if mem::replace(&mut tabs.control, control) != control {
                 redraw(ctx);
             }
@@ -1184,7 +1184,7 @@ pub fn window_event(
                 // Like native buttons, the zoom and close controls act on release.
                 Press::Control(index, control) => {
                     let active = tabs.active;
-                    if panes::control_at(tabs, &layout, tabs.pointer) == Some((index, control)) {
+                    if panes::control(tabs, tabs.pointer, layout.scale) == Some((index, control)) {
                         match control {
                             Control::Zoom => {
                                 focus_pane(ctx, active, index, config);
