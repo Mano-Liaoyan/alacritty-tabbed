@@ -76,6 +76,7 @@ impl State {
     }
 
     /// Whether the bar is entirely out of the window at `now`, which hides what rides on it.
+    #[cfg(any(target_os = "macos", test))]
     pub fn gone(&self, now: Instant) -> bool {
         !self.pinned && self.slide.get(now) <= 0.
     }
