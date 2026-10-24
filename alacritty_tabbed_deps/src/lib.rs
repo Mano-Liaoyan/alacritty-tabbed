@@ -16,9 +16,9 @@ pub use objc2;
 #[cfg(target_os = "macos")]
 pub use objc2_app_kit;
 #[cfg(target_os = "macos")]
-pub use objc2_foundation;
-#[cfg(target_os = "macos")]
 pub use objc2_core_foundation;
+#[cfg(target_os = "macos")]
+pub use objc2_foundation;
 
 #[cfg(windows)]
 pub use dwrote;
