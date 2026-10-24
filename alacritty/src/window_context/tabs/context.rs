@@ -469,12 +469,8 @@ fn choose(
         Source::Tab(tab) => (tab, ctx.display.tabs.tabs[tab].focus),
     };
     match item {
-        Item::SplitVertically => {
-            split(ctx, Axis::Row, config, proxy);
-        },
-        Item::SplitHorizontally => {
-            split(ctx, Axis::Column, config, proxy);
-        },
+        Item::SplitVertically => split(ctx, Axis::Row, config, proxy),
+        Item::SplitHorizontally => split(ctx, Axis::Column, config, proxy),
         Item::Zoom | Item::Unzoom => toggle_zoom(ctx),
         Item::ResetTextSize => zoom_live(ctx, FontChange::Reset),
         Item::MoveToNewTab => move_pane(ctx, (tab, pane), Target::Detach(tab + 1), config),
