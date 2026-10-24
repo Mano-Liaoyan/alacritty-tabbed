@@ -158,7 +158,7 @@ pane_highlight = \"#FF9500\"",
     }
 
     #[test]
-    fn round_three_keys_default() {
+    fn bar_session_and_brand_keys_default() {
         let tabbed = UiConfig::default().tabbed;
         assert!(tabbed.pin_tab_bar && tabbed.wheel_zoom && tabbed.icon_tiles);
         assert_eq!(tabbed.restore_session, RestoreSession::Off);
@@ -171,7 +171,7 @@ pane_highlight = \"#FF9500\"",
     }
 
     #[test]
-    fn round_three_keys_are_read() {
+    fn bar_session_and_brand_keys_are_read() {
         for (text, restore) in [
             ("off", RestoreSession::Off),
             ("layout", RestoreSession::Layout),
