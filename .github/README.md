@@ -75,8 +75,7 @@ cards, and past five the stack shows five cards and a "+N" count.
 - **Right-click** a tab for its menu: Rename Tab… or, for a group, Rename
   Group… (or double-click the title), Reset Name, Ungroup, Move Tab to New
   Window and Close Tab.
-- Click a pane to focus it. Ctrl+Shift+W closes the focused pane; × and a
-  middle click close the whole tab.
+- Click a pane to focus it.
 
 Under Appearance in the settings, or in `alacritty.toml`, set the space between
 panes and the focused pane's border colour, which the settings pick with a
