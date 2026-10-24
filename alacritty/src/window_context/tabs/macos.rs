@@ -213,3 +213,41 @@ pub fn corner_radius(window: &Window) -> f64 {
         if version.majorVersion >= 26 { 16. } else { 10. }
     })
 }
+
+/// Move the system's window buttons, placed on the bar, up with it by `offset` points, and hide
+/// them while it is `gone` out of the window; without a bar, leave them shown where the system
+/// put them.
+///
+/// Run after [`place_buttons`], before each frame, as the bar slides in and out.
+pub fn slide_buttons(window: &Window, offset: Option<f64>, gone: bool) {
+    let Ok(handle) = window.window_handle() else { return };
+    let RawWindowHandle::AppKit(handle) = handle.as_raw() else { return };
+    // Window events are handled on the main thread.
+    let view = unsafe { handle.ns_view.cast::<NSView>().as_ref() };
+    let Some(window) = view.window() else { return };
+
+    let buttons = [
+        NSWindowButton::CloseButton,
+        NSWindowButton::MiniaturizeButton,
+        NSWindowButton::ZoomButton,
+    ];
+    let buttons: Vec<_> =
+        buttons.into_iter().filter_map(|b| window.standardWindowButton(b)).collect();
+    let hidden = offset.is_some() && gone;
+    for button in buttons.iter().filter(|button| button.isHidden() != hidden) {
+        button.setHidden(hidden);
+    }
+    let Some(offset) = offset else { return };
+    let Some(container) = buttons.first().and_then(|b| unsafe { b.superview()?.superview() })
+    else {
+        return;
+    };
+
+    // The container keeps the height that placed the buttons, raised as far as the bar is.
+    let mut frame = container.frame();
+    let y = window.frame().size.height - frame.size.height - offset;
+    if frame.origin.y != y {
+        frame.origin.y = y;
+        container.setFrame(frame);
+    }
+}

@@ -93,9 +93,10 @@ pane_highlight = "#ff9500"   # Leave out for the terminal's blue.
 
 **Pin the tab bar.** The pin left of the settings gear keeps the bar shown.
 Unpinned, the panes take the whole window and the bar slides in over them when
-the pointer rests at the top edge, during a drag or a keyboard tab action, and
-slides away again once the pointer leaves it; the terminals are not resized as
-it comes and goes. The choice is saved to `alacritty.toml` for every window.
+the pointer rests at the top edge (or, in a maximized window, on the menu bar
+above it), during a drag or a keyboard tab action, and slides away again once
+the pointer leaves it; the terminals are not resized as it comes and goes. On
+macOS the window buttons ride on the bar and are hidden while it is. The choice is saved to `alacritty.toml` for every window.
 
 **Logo.** Under Appearance, hide the logo and names at the top left, or pick
 another logo (Alacritty Tabbed's, upstream Alacritty's, none, or a bundled one) and change the two names;
