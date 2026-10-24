@@ -35,10 +35,10 @@ use super::{Live, next_id, pane_config, restore};
 pub struct Session {
     pub(super) terminal: Arc<FairMutex<Term<EventProxy>>>,
     pub(super) notifier: Notifier,
-    pub(super) search_state: SearchState,
-    pub(super) inline_search_state: InlineSearchState,
-    pub(super) cursor_blink_timed_out: bool,
-    pub(super) prev_bell_cmd: Option<Instant>,
+    search_state: SearchState,
+    inline_search_state: InlineSearchState,
+    cursor_blink_timed_out: bool,
+    prev_bell_cmd: Option<Instant>,
     pub(super) preserve_title: bool,
     pub(super) window_config: ParsedOptions,
     #[cfg(not(windows))]
@@ -52,7 +52,7 @@ pub struct Session {
     /// configuration's.
     pub(super) zoom: Option<FontSize>,
     /// Whether another window took over the terminal, which then keeps running.
-    pub(super) adopted: bool,
+    adopted: bool,
 }
 
 impl Session {
