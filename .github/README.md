@@ -72,10 +72,10 @@ cards, and past five the stack shows five cards and a "+N" count.
   Move Pane to New Tab, Move Pane to New Window and Close Pane. Arrow keys,
   Enter and Escape work. When the program in the pane takes the mouse, hold
   Shift; Ctrl+right-click still expands the selection.
-- **Right-click** a tab for its menu: Rename Group… (or double-click the
-  title), Reset Name, Ungroup, Move Tab to New Window and Close Tab.
-- Click a pane to focus it. Ctrl+Shift+W closes the focused pane; × and a
-  middle click close the whole tab.
+- **Right-click** a tab for its menu: Rename Tab… or, for a group, Rename
+  Group… (or double-click the title), Reset Name, Ungroup, Move Tab to New
+  Window and Close Tab.
+- Click a pane to focus it.
 
 Under Appearance in the settings, or in `alacritty.toml`, set the space between
 panes and the focused pane's border colour, which the settings pick with a
@@ -134,10 +134,11 @@ Panes slide and pop into place with Hyprland-like curves. Set
 profile's logo, drawn sharp at the screen's scale: the executable's largest icon
 on Windows, with each WSL distribution's own artwork and Git Bash's logo; the
 icon theme's logo on Linux, preferring SVG; the application's icon on macOS.
-About 40 common shells, tools, languages and WSL distributions have bundled logos
-where the system has none, and other programs get a terminal. A profile can set its own SVG or PNG, or an emoji.
-In a tab of several panes the logos lie on tiles; turn off **Icon tiles** under
-Appearance, or in `alacritty.toml`, to draw them bare and as large as the tiles:
+About 40 common shells, tools, languages and WSL distributions have bundled
+logos where the system has none, and other programs get a terminal. A profile
+can set its own SVG or PNG, or an emoji. In a tab of several panes the logos lie
+on tiles; turn off **Icon tiles** under Appearance, or in `alacritty.toml`, to
+draw them bare and as large as the tiles:
 
 ```toml
 [tabbed]
@@ -170,15 +171,17 @@ loaded, and saving writes only the keys that changed, under Alacritty's own
 names (`font.size`, `cursor.style.shape`, `colors.normal.red` and so on, or
 `[tabbed]` for the fork's), keeping the file's comments and its tables' forms,
 and applies them to every window. Emptying a text, a color or an optional number
-removes its key, for the default. "Edit profiles…" in the ⌄ menu opens the profiles:
-name, icon, command line, starting directory, font, environment variables, configuration overrides,
-the default profile, and whether a profile shows in the menu. The font field
-lists the system's monospaced fonts as you type; "Show all fonts" lists every
-font. Clicking the profile's icon picks one of the bundled logos, and Browse
-picks your own. Saved changes apply to the tabs already open with a profile. Browse buttons use the
-system's file pickers. Profiles can be added, duplicated, deleted, and dragged
-to reorder them. They are saved to `profiles.toml` beside `alacritty.toml`,
-which can also be edited by hand.
+removes its key, for the default.
+
+"Edit profiles…" in the ⌄ menu opens the profiles: name, icon, command line,
+starting directory, font, environment variables, configuration overrides, the
+default profile, and whether a profile shows in the menu. The font field lists
+the system's monospaced fonts as you type; "Show all fonts" lists every font.
+Clicking the profile's icon picks one of the bundled logos, and Browse picks
+your own. Saved changes apply to the tabs already open with a profile. Browse
+buttons use the system's file pickers. Profiles can be added, duplicated,
+deleted, and dragged to reorder them. They are saved to `profiles.toml` beside
+`alacritty.toml`, which can also be edited by hand.
 
 ![Settings, General page](../docs/tabs/settings.png)
 
@@ -186,9 +189,9 @@ which can also be edited by hand.
 interface font of their own, apart from the terminal's font: the system's
 interface font on macOS (San Francisco, else Helvetica Neue) and Windows
 (Segoe UI), and on Linux the first installed of Inter, Adwaita Sans, Noto Sans
-and other common interface fonts. Emphasized text uses the family's SemiBold or Medium face when it has
-one. Choose another family or size under Appearance in the settings, or in
-`alacritty.toml`; changes apply live:
+and other common interface fonts. Emphasized text uses the family's SemiBold or
+Medium face when it has one. Choose another family or size under Appearance in
+the settings, or in `alacritty.toml`; changes apply live:
 
 ```toml
 [tabbed.ui_font]
@@ -341,12 +344,10 @@ configuration instead.
 
 ## Syncing with upstream
 
-The fork's code lives in its own files, such as
-`alacritty/src/window_context/tabs/`; upstream files only gain thin hooks, each
-marked with a `// tabbed:` comment. Upstream is brought in with
-`git merge upstream/master`, never a rebase. Run `scripts/patch-surface.sh` to
-see how much of upstream's code the fork touches; the
-[Upstream sync](workflows/upstream-sync.yml) workflow tries the merge weekly.
+The fork keeps its changes to upstream's files small, so that merging upstream
+stays cheap; the rules are in [CLAUDE.md](../CLAUDE.md). The
+[Upstream sync](workflows/upstream-sync.yml) workflow tries the merge weekly and
+opens an issue when it conflicts.
 
 ## Alacritty
 
