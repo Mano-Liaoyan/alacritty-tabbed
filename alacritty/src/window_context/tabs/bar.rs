@@ -41,6 +41,14 @@ pub const INSET: f32 = 4.;
 pub const RADIUS: f32 = 18.;
 /// Radius of the terminal's panel, and of the panels in the settings.
 pub const PANEL_RADIUS: f32 = RADIUS - MARGIN;
+
+/// Radius of the terminal's panel in a window whose corners are rounded by `window` points:
+/// concentric with them, though no less than half as round, where the window's are too tight for
+/// the margin.
+pub fn panel_radius(window: f32) -> f32 {
+    (window - MARGIN).max(window / 2.)
+}
+
 /// Space between the top of the window and the tab track.
 const TRACK_TOP: f32 = 6.;
 /// Space between the tab track and its tabs.
@@ -128,6 +136,8 @@ pub struct Layout {
     border: f32,
     /// Whether the terminal is held in a panel, with a margin around it.
     pub panel: bool,
+    /// Radius of the terminal's panel in logical pixels, following the window's corners.
+    pub panel_radius: f32,
     pub height: f32,
     /// Distance between the left edges of neighbouring tabs.
     step: f32,
@@ -162,7 +172,8 @@ impl Layout {
         let button =
             |x: f32, width: f32| Rect::new(x, ((bar - control) / 2.).round(), width, control);
 
-        let lights = if mac { px(80.) } else { 0. };
+        // Fullscreen hides the window buttons, until the menu bar shows them over the bar.
+        let lights = if mac && !tabs.lights_hidden { px(80.) } else { 0. };
         // GNOME's and KDE's round window buttons end as far from the window's edge as the logo
         // begins, so the bar's two ends mirror each other.
         let trailing =
@@ -172,8 +183,8 @@ impl Layout {
 
         // The bar's first thing, the logo, its names, the track or else the first tab, begins at
         // the edge of the panes' cards below, as the window's controls end at it on the right.
-        // macOS puts it beside its window buttons instead.
-        let left = if mac { lights + px(7.) } else { margin };
+        // macOS puts it beside its window buttons instead, when they are shown.
+        let left = if lights > 0. { lights + px(7.) } else { margin };
         let on_track = tabs.configs.as_ref().is_none_or(|(config, _)| config.tabbed.tab_track);
         let default = Brand::default();
         let config = tabs.configs.as_ref().map_or(&default, |(config, _)| &config.tabbed.brand);
@@ -257,6 +268,7 @@ impl Layout {
             round: tabs.corners.unwrap_or_default() == Corners::Round,
             border,
             panel,
+            panel_radius: tabs.panel_radius(),
             height,
             step,
             mark: mark.zip(image),
@@ -1314,6 +1326,15 @@ mod tests {
         motion: impl Fn(usize) -> (f32, f32),
     ) -> Icons {
         deck(front, count, focus, scale, ROW_MAX, chip_size(count), motion).icons
+    }
+
+    #[test]
+    fn the_panel_follows_the_window_corners() {
+        // Concentric with the bar's own corners, as before, and with macOS 26's.
+        assert_eq!(panel_radius(RADIUS), PANEL_RADIUS);
+        assert_eq!(panel_radius(16.), 8.);
+        // Corners too tight for the margin stay half as round.
+        assert_eq!(panel_radius(10.), 5.);
     }
 
     #[test]

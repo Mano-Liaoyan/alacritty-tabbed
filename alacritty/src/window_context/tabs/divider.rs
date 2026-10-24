@@ -15,7 +15,7 @@ use winit::window::CursorIcon;
 use crate::window_context::WindowContext;
 
 use super::anim::{Curve, Tween};
-use super::bar::{Layout, PANEL_RADIUS};
+use super::bar::Layout;
 use super::paint::{Layer, Palette, Rect, mix};
 use super::split::{Axis, Divider};
 use super::{Press, Tabs, panes, redraw, set_ratio};
@@ -225,7 +225,7 @@ pub fn draw(tabs: &Tabs, layout: &Layout, palette: &Palette, layer: &mut Layer, 
         return;
     }
     let grow = (level - 1.).clamp(0., 1.);
-    let (width, ends) = (layout.px(PILL_WIDTH), layout.px(PANEL_RADIUS));
+    let (width, ends) = (layout.px(PILL_WIDTH), layout.px(layout.panel_radius));
     let (start, span) = match divider.axis {
         Axis::Row => (divider.area.y, divider.area.h),
         Axis::Column => (divider.area.x, divider.area.w),
@@ -251,7 +251,7 @@ fn under(tabs: &Tabs, point: (f32, f32)) -> Option<usize> {
     // The band is as thick as the gap between the cards, but never too thin to hit.
     let gap = tabs.spacing() + 2. * tabs.margin();
     let reach = gap.max(BAND * scale) / 2.;
-    at(&tabs.dividers(), point, reach, (PANEL_RADIUS * scale).round())
+    at(&tabs.dividers(), point, reach, (tabs.panel_radius() * scale).round())
 }
 
 /// The divider of `dividers` within `reach` of `point`, outside `ends` from either end of it: the

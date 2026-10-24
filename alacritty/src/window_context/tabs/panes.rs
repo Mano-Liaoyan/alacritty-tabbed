@@ -19,7 +19,7 @@ use winit::dpi::PhysicalPosition;
 use winit::window::WindowId;
 
 use super::anim::{Curve, Tween, scale};
-use super::bar::{BAR, Hit, Layout, MARGIN, PANEL_RADIUS, RADIUS};
+use super::bar::{BAR, Hit, Layout, MARGIN, RADIUS};
 use super::dnd::{Source, Target};
 use super::paint::{Layer, Palette, Rect, UNZOOM_GLYPH, WHITE, ZOOM_GLYPH, mix};
 use super::split::{Axis, Side, Split};
@@ -464,7 +464,7 @@ pub fn draw(tabs: &Tabs, layout: &Layout, palette: &Palette, layer: &mut Layer, 
     let grouped = tab.panes.len() > 1;
     // Without a panel, panes are only outlined once there are several.
     let (margin, radius) = match layout.panel {
-        true => (layout.px(MARGIN), layout.radius(PANEL_RADIUS).round()),
+        true => (layout.px(MARGIN), layout.radius(layout.panel_radius).round()),
         false => (0., 0.),
     };
     let window = Rect::new(0., 0., layout.width, layout.height);
@@ -563,7 +563,7 @@ pub fn draw(tabs: &Tabs, layout: &Layout, palette: &Palette, layer: &mut Layer, 
         _ => None,
     });
     if let Some((rect, alpha)) = effects.preview(target, now) {
-        let radius = layout.radius(PANEL_RADIUS);
+        let radius = layout.radius(layout.panel_radius);
         layer.rounded_alpha(rect, radius, palette.highlight, DROP * alpha);
         layer.rounded_alpha(rect.inset(-line), radius + line, palette.highlight, DROP * alpha / 2.);
     }

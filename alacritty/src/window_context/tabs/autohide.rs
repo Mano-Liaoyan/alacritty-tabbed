@@ -8,10 +8,13 @@ use std::time::{Duration, Instant};
 
 use winit::dpi::PhysicalPosition;
 
-use super::Tabs;
 use super::anim::{Curve, Tween};
 use super::bar::BAR;
+use super::{Frame, Tabs};
 
+/// Height of the strip at the top edge the pointer rests in to bring the bar, in logical pixels:
+/// enough to stop in, on a screen edge or under the menu bar.
+const EDGE: f32 = 10.;
 /// Space below the bar the pointer may leave it by and still keep it shown, in logical pixels.
 const BAND: f32 = 12.;
 /// How long the pointer rests at the top edge before the bar comes, so crossing the edge on the
@@ -72,6 +75,12 @@ impl State {
         if self.pinned { 0. } else { (-bar * (1. - self.slide.get(now))).round() }
     }
 
+    /// Whether the bar is entirely out of the window at `now`, which hides what rides on it.
+    #[cfg(any(target_os = "macos", test))]
+    pub fn gone(&self, now: Instant) -> bool {
+        !self.pinned && self.slide.get(now) <= 0.
+    }
+
     /// Whether the bar is still moving, or waiting to, at `now`.
     pub fn running(&self, now: Instant) -> bool {
         let waiting = match self.revealed {
@@ -130,7 +139,7 @@ impl State {
 /// whether the bar changed or is waiting to.
 pub fn moved(tabs: &mut Tabs, point: PhysicalPosition<f64>, hold: bool, now: Instant) -> bool {
     let (scale, y) = (tabs.scale as f32, point.y as f32);
-    let edge = (6. * scale).round().max(tabs.margin());
+    let edge = (EDGE * scale).round().max(tabs.margin());
     let band = ((BAR + BAND) * scale).round();
     let state = &mut tabs.autohide;
     let since = state.near_since.unwrap_or(now);
@@ -145,10 +154,20 @@ pub fn moved(tabs: &mut Tabs, point: PhysicalPosition<f64>, hold: bool, now: Ins
 
 /// The pointer left the window, which hides the bar a moment later. Returns whether the bar
 /// changed or is waiting to.
+///
+/// A maximized or fullscreen window has nothing above it but the menu bar or the screen's edge:
+/// leaving it from near its top is resting at the top edge, which brings the bar and keeps it.
 pub fn left(tabs: &mut Tabs, now: Instant) -> bool {
+    let top = (BAR * tabs.scale as f32).round();
+    let above = tabs.frame != Frame::Normal && (tabs.pointer.y as f32) < top;
     let state = &mut tabs.autohide;
-    (state.near_since, state.band) = (None, false);
-    state.left_at = state.left_at.or(Some(now));
+    if above {
+        state.near_since = state.near_since.or(Some(now));
+        (state.band, state.left_at) = (true, None);
+    } else {
+        (state.near_since, state.band) = (None, false);
+        state.left_at = state.left_at.or(Some(now));
+    }
     state.tick(now) | state.running(now)
 }
 
@@ -226,6 +245,52 @@ mod tests {
         assert!(state.tick(start + ms(750)));
         assert!(!state.live());
         assert_eq!(state.offset(48., start + ms(10_000)), -48.);
+    }
+
+    #[test]
+    fn leaving_a_maximized_window_by_its_top_rests_at_the_edge() {
+        let now = Instant::now();
+        let tabs = |frame| {
+            let autohide = unpinned();
+            let mut tabs = Tabs { scale: 2., frame, autohide, ..Tabs::default() };
+            // The last place the pointer was seen, rushing to the menu bar.
+            assert!(!moved(&mut tabs, PhysicalPosition::new(300., 60.), false, now));
+            tabs.pointer = PhysicalPosition::new(300., 60.);
+            tabs
+        };
+
+        // The bar comes without the pointer moving again, and stays while it is above.
+        let mut maximized = tabs(Frame::Maximized);
+        assert!(left(&mut maximized, now));
+        assert!(maximized.autohide.running(now + ms(100)));
+        assert!(maximized.autohide.tick(now + DWELL));
+        assert!(!maximized.autohide.tick(now + ms(10_000)));
+        assert!(maximized.autohide.live());
+
+        // A window with something above it is left for that.
+        let mut normal = tabs(Frame::Normal);
+        assert!(!left(&mut normal, now));
+        assert!(!normal.autohide.tick(now + DWELL));
+
+        // Resting a few pixels from the top brings it too.
+        let mut tabs = tabs(Frame::Normal);
+        assert!(moved(&mut tabs, PhysicalPosition::new(300., 18.), false, now));
+        assert!(tabs.autohide.tick(now + DWELL));
+    }
+
+    #[test]
+    fn bar_is_gone_only_once_out_of_the_window() {
+        let now = Instant::now();
+        let mut state = State { near_since: Some(now), ..unpinned() };
+        assert!(state.gone(now));
+        state.tick(now + DWELL);
+        assert!(!state.gone(now + DWELL + ms(10)));
+        (state.near_since, state.band, state.left_at) = (None, false, Some(now + DWELL));
+        let start = now + DWELL + LINGER;
+        state.tick(start);
+        assert!(!state.gone(start + ms(10)));
+        assert!(state.gone(start + ms(10_000)));
+        assert!(!State::default().gone(now));
     }
 
     #[test]

@@ -105,6 +105,8 @@ pub fn before_draw(
     proxy: &EventLoopProxy<Event>,
     clipboard: &mut Clipboard,
 ) {
+    #[cfg(target_os = "macos")]
+    macos::after_transition(ctx, config);
     if !ctx.display.window.fullscreen.apply(ctx.display.window.winit()) {
         return;
     }
@@ -171,6 +173,160 @@ fn in_workspace(monitor: Rect, work: Rect) -> Rect {
         top: monitor.top - dy,
         right: monitor.right - dx,
         bottom: monitor.bottom - dy,
+    }
+}
+
+/// The system's animation into and out of fullscreen on macOS.
+///
+/// Winit keeps the window fullscreen until the animation out of it ends, after the window's last
+/// resize, which is when the bar takes in how the window is shown. The system shows the window
+/// buttons again as the animation begins though, where it lays them out by default: over the bar's
+/// first tab, while the bar still lays out as in fullscreen. The start of either animation is
+/// therefore watched for, to make or drop room for the buttons on the bar and place them on it as
+/// the window resizes along, and its end, to draw the window again: the system lays the buttons out
+/// once more as the animation ends, and the bar takes in how the window is shown then.
+#[cfg(target_os = "macos")]
+mod macos {
+    use std::cell::{OnceCell, RefCell};
+    use std::collections::HashMap;
+    use std::rc::Rc;
+
+    use alacritty_tabbed_deps::{objc2, objc2_app_kit, objc2_foundation};
+    use objc2::rc::Retained;
+    use objc2::runtime::{AnyObject, NSObject};
+    use objc2::{MainThreadMarker, MainThreadOnly, class, define_class, msg_send, sel};
+    use objc2_app_kit::{NSView, NSWindow};
+    use objc2_foundation::ns_string;
+    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    use winit::window::Window;
+
+    use super::super::frame::{Frame, frame};
+    use crate::config::UiConfig;
+    use crate::window_context::WindowContext;
+
+    /// How long after the animation ends the window is drawn once more, should the system lay the
+    /// buttons out again after the first frame, in seconds.
+    const SETTLE: f64 = 0.25;
+
+    thread_local! {
+        static WATCHER: OnceCell<Retained<Watcher>> = const { OnceCell::new() };
+        /// Whether each window, by its address, is fullscreen or on its way into it, as the system
+        /// last announced.
+        static ANNOUNCED: RefCell<HashMap<usize, bool>> = RefCell::new(HashMap::new());
+    }
+
+    define_class!(
+        /// Told when a window begins and ends its animation into or out of fullscreen.
+        #[unsafe(super(NSObject))]
+        #[thread_kind = MainThreadOnly]
+        #[name = "AlacrittyTabbedFullscreenWatcher"]
+        struct Watcher;
+
+        impl Watcher {
+            #[unsafe(method(willEnterFullscreen:))]
+            fn will_enter(&self, notification: &AnyObject) {
+                announce(notification, true);
+            }
+
+            #[unsafe(method(willExitFullscreen:))]
+            fn will_exit(&self, notification: &AnyObject) {
+                announce(notification, false);
+            }
+
+            #[unsafe(method(fullscreenChanged:))]
+            fn changed(&self, notification: &AnyObject) {
+                let window: Option<Retained<NSWindow>> = unsafe { msg_send![notification, object] };
+                let Some(window) = window else { return };
+                redisplay(&window);
+                let _: () = unsafe {
+                    msg_send![
+                        self,
+                        performSelector: sel!(redisplay:),
+                        withObject: &*window,
+                        afterDelay: SETTLE,
+                    ]
+                };
+            }
+
+            #[unsafe(method(redisplay:))]
+            fn redisplay_later(&self, window: &NSWindow) {
+                redisplay(window);
+            }
+        }
+    );
+
+    /// Record that the window of `notification` is going into fullscreen or out of it, and draw it.
+    fn announce(notification: &AnyObject, fullscreen: bool) {
+        let window: Option<Retained<NSWindow>> = unsafe { msg_send![notification, object] };
+        let Some(window) = window else { return };
+        let key = Retained::as_ptr(&window) as usize;
+        ANNOUNCED.with(|announced| announced.borrow_mut().insert(key, fullscreen));
+        redisplay(&window);
+    }
+
+    /// Have winit's view hand a redraw over, as the window is next displayed.
+    fn redisplay(window: &NSWindow) {
+        if let Some(view) = window.contentView() {
+            view.setNeedsDisplay(true);
+        }
+    }
+
+    /// Whether `window` is fullscreen or on its way into it, as the system last announced.
+    fn announced(window: &Window) -> Option<bool> {
+        let RawWindowHandle::AppKit(handle) = window.window_handle().ok()?.as_raw() else {
+            return None;
+        };
+        // Window events are handled on the main thread.
+        let view = unsafe { handle.ns_view.cast::<NSView>().as_ref() };
+        let key = Retained::as_ptr(&view.window()?) as usize;
+        ANNOUNCED.with(|announced| announced.borrow().get(&key).copied())
+    }
+
+    /// Take in that the window began or ended its animation into or out of fullscreen since the
+    /// bar last looked, before it is drawn.
+    pub fn after_transition(ctx: &mut WindowContext, config: &Rc<UiConfig>) {
+        watch();
+        let window = ctx.display.window.winit();
+        let tabs = &ctx.display.tabs;
+        let hidden = announced(window).unwrap_or(tabs.frame == Frame::Fullscreen);
+        let fullscreen = window.fullscreen().is_some();
+        let stale = fullscreen != (tabs.frame == Frame::Fullscreen) && frame(window) != tabs.frame;
+        if hidden == tabs.lights_hidden && !stale {
+            return;
+        }
+        ctx.display.tabs.lights_hidden = hidden;
+        super::super::sync(ctx, config, true);
+        super::super::redraw(ctx);
+    }
+
+    /// Watch every window for its animation into or out of fullscreen, once.
+    fn watch() {
+        let Some(mtm) = MainThreadMarker::new() else { return };
+        WATCHER.with(|watcher| {
+            if watcher.get().is_some() {
+                return;
+            }
+            let target: Retained<Watcher> = unsafe { msg_send![Watcher::alloc(mtm), init] };
+            let center: Retained<AnyObject> =
+                unsafe { msg_send![class!(NSNotificationCenter), defaultCenter] };
+            for (name, selector) in [
+                (ns_string!("NSWindowWillEnterFullScreenNotification"), sel!(willEnterFullscreen:)),
+                (ns_string!("NSWindowWillExitFullScreenNotification"), sel!(willExitFullscreen:)),
+                (ns_string!("NSWindowDidEnterFullScreenNotification"), sel!(fullscreenChanged:)),
+                (ns_string!("NSWindowDidExitFullScreenNotification"), sel!(fullscreenChanged:)),
+            ] {
+                let _: () = unsafe {
+                    msg_send![
+                        &center,
+                        addObserver: &*target,
+                        selector: selector,
+                        name: name,
+                        object: None::<&AnyObject>,
+                    ]
+                };
+            }
+            let _ = watcher.set(target);
+        });
     }
 }
 

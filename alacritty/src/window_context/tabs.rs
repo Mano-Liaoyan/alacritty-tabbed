@@ -41,6 +41,8 @@ mod text;
 mod text_size;
 
 #[cfg(target_os = "macos")]
+pub mod app_name;
+#[cfg(target_os = "macos")]
 mod dock;
 #[cfg(target_os = "macos")]
 mod macos;
@@ -216,6 +218,11 @@ pub struct Tabs {
     corners: Option<Corners>,
     /// Whether the window's corners are cut out of it, which needs a transparent window.
     cut: bool,
+    /// Radius of the window's corners in points, where the system rounds them and says by how
+    /// much; else the bar's own.
+    window_radius: Option<f32>,
+    /// Whether the system hides the window buttons, being fullscreen or on its way into it.
+    lights_hidden: bool,
     /// Whether the terminal is held in a panel, rather than filling the window.
     panel: bool,
 }
@@ -365,6 +372,11 @@ impl Tabs {
     /// Whether the modifiers that drag a pane are held, where there is anything to drag it to.
     fn pane_drag(&self) -> bool {
         self.modifiers == PANE_DRAG && self.count() > 1
+    }
+
+    /// Radius of the panes' panels in points, following the window's corners.
+    fn panel_radius(&self) -> f32 {
+        bar::panel_radius(self.window_radius.unwrap_or(bar::RADIUS))
     }
 
     /// The card a pane placed at `rect` is drawn in, inside its margin.
@@ -763,9 +775,19 @@ pub fn window_event(
         #[cfg(target_os = "macos")]
         {
             let tabs = &ctx.display.tabs;
-            let bar = (tabs.caption && tabs.frame != Frame::Fullscreen).then_some(f64::from(BAR));
+            let bar = (tabs.caption && !tabs.lights_hidden).then_some(f64::from(BAR));
             platform::place_buttons(ctx.display.window.winit(), bar);
+            // The buttons ride on a bar that is not pinned, and hide with it.
+            let (scale, now) = (tabs.scale as f32, Instant::now());
+            let offset = tabs.autohide.offset((BAR * scale).round(), now) / scale;
+            let offset = bar.map(|_| f64::from(offset));
+            platform::slide_buttons(ctx.display.window.winit(), offset, tabs.autohide.gone(now));
             dock::install(proxy);
+            // A fullscreen window has no corners to follow.
+            if ctx.display.tabs.frame == Frame::Normal {
+                let radius = platform::corner_radius(ctx.display.window.winit());
+                ctx.display.tabs.window_radius = Some(radius as f32);
+            }
         }
     }
     if let WindowEvent::Resized(size) = event {
