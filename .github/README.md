@@ -72,8 +72,9 @@ cards, and past five the stack shows five cards and a "+N" count.
   Move Pane to New Tab, Move Pane to New Window and Close Pane. Arrow keys,
   Enter and Escape work. When the program in the pane takes the mouse, hold
   Shift; Ctrl+right-click still expands the selection.
-- **Right-click** a tab for its menu: Rename Group… (or double-click the
-  title), Reset Name, Ungroup, Move Tab to New Window and Close Tab.
+- **Right-click** a tab for its menu: Rename Tab… or, for a group, Rename
+  Group… (or double-click the title), Reset Name, Ungroup, Move Tab to New
+  Window and Close Tab.
 - Click a pane to focus it. Ctrl+Shift+W closes the focused pane; × and a
   middle click close the whole tab.
 
