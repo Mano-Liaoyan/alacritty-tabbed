@@ -17,7 +17,7 @@ pub struct Tabbed {
 
 impl Tabbed {
     /// Scan the next `bytes` the PTY wrote for working directory reports.
-    pub fn scan(&mut self, bytes: &[u8]) {
+    pub(crate) fn scan(&mut self, bytes: &[u8]) {
         if let Some(directory) = self.scanner.scan(bytes) {
             self.reported_directory = Some(directory);
         }
