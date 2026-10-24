@@ -693,9 +693,8 @@ fn place<S>(
     let (tab, index) = match target {
         Target::Merge(tab) => {
             let (tab, id) = (shift(tab), moved.id);
-            let (beside, axis, side) =
-                join_spot(&tabs[tab].layout, &Split::Pane(id), area, min, spacing);
-            tabs[tab].join(Tab::new(moved), beside, axis, side);
+            let (beside, axis) = join_spot(&tabs[tab].layout, &Split::Pane(id), area, min, spacing);
+            tabs[tab].join(Tab::new(moved), beside, axis, Side::After);
             (tab, tabs[tab].position(id).unwrap_or_default())
         },
         Target::Dock { axis, side, .. } => {
@@ -721,16 +720,17 @@ fn reorder<S>(tabs: &mut Vec<Tab<S>>, active: &mut usize, to: usize) {
     tabs.insert(*active, tab);
 }
 
-/// Where `new` joins the panes of `group` in `area`, each keeping `min`, `spacing` apart, as
-/// [`Split::spot`] finds; beside them all when it fits nowhere, as before there was a check.
+/// Where `new` joins the panes of `group` in `area`, after the pane or all of them, each keeping
+/// `min`, `spacing` apart, as [`Split::spot`] finds; beside them all when it fits nowhere, as
+/// before there was a check.
 fn join_spot(
     group: &Split<WindowId>,
     new: &Split<WindowId>,
     area: Rect,
     min: (f32, f32),
     spacing: f32,
-) -> (Option<WindowId>, Axis, Side) {
-    group.spot(new, area, min, spacing).unwrap_or((None, split::auto_axis(area), Side::After))
+) -> (Option<WindowId>, Axis) {
+    group.spot(new, area, min, spacing).unwrap_or((None, split::auto_axis(area)))
 }
 
 /// Group the active tab with the tab `into`, which takes its place and its focus: docked beside
@@ -752,7 +752,11 @@ fn group<S>(
             Some(pane) => (Some(pane.id), axis, side),
             None => return false,
         },
-        None => join_spot(&tabs[into].layout, &tabs[from].layout, area, min, spacing),
+        None => {
+            let (beside, axis) =
+                join_spot(&tabs[into].layout, &tabs[from].layout, area, min, spacing);
+            (beside, axis, Side::After)
+        },
     };
     let tab = tabs.remove(from);
     let into = if into > from { into - 1 } else { into };
