@@ -24,11 +24,16 @@ yeslogic-fontconfig-sys = "5.0.0"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 core-text = "20.1.0"
+objc2 = "0.6.1"
+objc2-foundation = { version = "0.3.1", default-features = false, features = ["std", "NSString"] }
 objc2-app-kit = { version = "0.3.1", default-features = false, features = [
     "std",
     "objc2-core-foundation",
+    "NSApplication",
     "NSButton",
     "NSControl",
+    "NSMenu",
+    "NSMenuItem",
     "NSResponder",
     "NSView",
     "NSWindow",

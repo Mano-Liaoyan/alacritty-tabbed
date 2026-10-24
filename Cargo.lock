@@ -100,8 +100,10 @@ version = "0.1.0"
 dependencies = [
  "core-text",
  "dwrote",
+ "objc2 0.6.3",
  "objc2-app-kit 0.3.2",
  "objc2-core-foundation",
+ "objc2-foundation 0.3.2",
  "png",
  "resvg",
  "windows-sys 0.59.0",
