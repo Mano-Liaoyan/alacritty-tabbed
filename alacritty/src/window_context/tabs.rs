@@ -1986,12 +1986,11 @@ fn open(
     select(ctx, ctx.display.tabs.tabs.len() - 1, config);
 }
 
-/// Split the live pane, putting a new one with the same profile beside it, on `side` along
+/// Split the live pane, putting a new one with the same profile beside it, after it along
 /// `axis`, and focus the new pane, if there is room for it.
 pub fn split(
     ctx: &mut WindowContext,
     axis: Axis,
-    side: Side,
     config: &Rc<UiConfig>,
     proxy: &EventLoopProxy<Event>,
 ) {
@@ -2000,7 +1999,7 @@ pub fn split(
     let min = min_pane(&ctx.display.size_info);
     // A split unzooms the tab, so the pane is cut where its layout places it.
     let rect = tabs.placed().get(tab.focus).map_or_else(|| tabs.area(), |&(_, rect)| rect);
-    if !split::fits(rect, axis, side, &Split::Pane(()), min, tabs.spacing()) {
+    if !split::fits(rect, axis, Side::After, &Split::Pane(()), min, tabs.spacing()) {
         return;
     }
 
@@ -2029,7 +2028,7 @@ pub fn split(
     let (active, focus) = ctx.display.tabs.live();
     let tab = &mut ctx.display.tabs.tabs[active];
     let target = tab.panes[focus].id;
-    let index = tab.insert(target, pane, axis, side);
+    let index = tab.insert(target, pane, axis, Side::After);
     focus_pane(ctx, active, index, config);
 }
 

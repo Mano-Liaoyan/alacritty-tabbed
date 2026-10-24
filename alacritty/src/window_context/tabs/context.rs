@@ -21,7 +21,7 @@ use super::anim::{Curve, Tween};
 use super::bar::{Hit, ITEM_RADIUS, Layout, MARGIN, TRACK_RADIUS};
 use super::dnd::{Source, Target};
 use super::paint::{BLACK, Layer, Palette, Rect, UNZOOM_GLYPH, ZOOM_GLYPH, mix};
-use super::split::{Axis, Side, Split};
+use super::split::{Axis, Split};
 use super::tear::{can_tear, tear_off};
 use super::{
     FontChange, Press, Tab, Tabs, close as close_tab, close_pane, focus_pane, move_pane, redraw,
@@ -470,10 +470,10 @@ fn choose(
     };
     match item {
         Item::SplitVertically => {
-            split(ctx, Axis::Row, Side::After, config, proxy);
+            split(ctx, Axis::Row, config, proxy);
         },
         Item::SplitHorizontally => {
-            split(ctx, Axis::Column, Side::After, config, proxy);
+            split(ctx, Axis::Column, config, proxy);
         },
         Item::Zoom | Item::Unzoom => toggle_zoom(ctx),
         Item::ResetTextSize => zoom_live(ctx, FontChange::Reset),
@@ -592,6 +592,7 @@ pub fn draw(tabs: &Tabs, layout: &Layout, palette: &Palette, now: Instant) -> Op
 #[cfg(test)]
 mod tests {
     use super::super::Pane;
+    use super::super::split::Side;
     use super::*;
 
     const METRICS: Metrics = Metrics { width: 200., row: 30., gap: 10., pad: 5. };
