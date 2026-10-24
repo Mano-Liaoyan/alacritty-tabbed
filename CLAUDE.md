@@ -23,6 +23,22 @@ Keep the fork's diff against upstream files minimal so upstream merges stay chea
   `.github/workflows/patch-surface.yml`.
 - Do not send pull requests upstream.
 
+## Local macOS install
+
+The maintainer's Mac runs the app from `main`. The setup lives in `.git/`, so it is untracked:
+
+- Git hooks (`post-checkout`, `post-commit`, `post-merge`, `post-rewrite`) run
+  `.git/local/install-alacritty.sh --hook`. On `main` it builds in the background and installs
+  `/Applications/Alacritty Tabbed.app`, logging to `target/install-alacritty.log`. To install
+  another branch, run the script directly.
+- The checkout is sparse and leaves out `extra/osx/`: macOS keeps registering upstream's empty
+  template `extra/osx/Alacritty.app` and lists it beside the real app. Build the bundle with the
+  install script, which takes the template from git; plain `make app` needs it on disk.
+  `git sparse-checkout disable` brings it back.
+- Keep `/Applications/Alacritty Tabbed.app` the only registered copy: the script deletes its build
+  in `target/release/osx`. Check with `lsregister -dump | grep 'path:.*Alacritty'` (lsregister is
+  in `/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/`).
+
 ## Commits
 
 - Commit with the repository-local git identity and signing; do not override them.
