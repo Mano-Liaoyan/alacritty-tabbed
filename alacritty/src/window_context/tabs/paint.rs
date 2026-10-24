@@ -612,4 +612,12 @@ mod tests {
         assert_eq!((rect.x, rect.y, rect.width, rect.height), (12., 8., 30., 4.));
         assert_eq!((layer.texts[0].0, layer.texts[0].1), (7., -6.));
     }
+
+    #[test]
+    fn overlaps() {
+        let left = Rect::new(0., 40., 400., 600.);
+        let right = Rect::new(400., 40., 400., 600.);
+        assert!(left.intersects(&Rect { x: 399., ..right }));
+        assert!(!left.intersects(&right), "touching is not overlapping");
+    }
 }

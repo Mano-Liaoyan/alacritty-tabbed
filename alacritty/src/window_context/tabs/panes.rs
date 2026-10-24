@@ -667,7 +667,7 @@ fn border(
     let color = mix(palette.card_outline, palette.highlight, light);
     // A lit border grows by whole pixels.
     let width = if light > 0. { (thin + (thick - thin) * light).round() } else { thin };
-    if above.is_none_or(|above| !overlap(card, above)) {
+    if above.is_none_or(|above| !card.intersects(&above)) {
         layer.corners(card, radii, palette.chrome, color, width);
     }
     // The straight edges, between the corners' curves.
@@ -689,11 +689,7 @@ fn border(
 /// Whether controls at `rect` are under the focused pane's card while it moves: drawn at
 /// `focused`, away from its place `resting`.
 fn hidden(rect: Rect, focused: Option<Rect>, resting: Option<Rect>) -> bool {
-    focused.is_some_and(|focused| Some(focused) != resting && overlap(rect, focused))
-}
-
-fn overlap(a: Rect, b: Rect) -> bool {
-    a.x < b.right() && b.x < a.right() && a.y < b.bottom() && b.y < a.bottom()
+    focused.is_some_and(|focused| Some(focused) != resting && rect.intersects(&focused))
 }
 
 /// The smallest rectangle holding both `a` and `b`.
@@ -880,12 +876,6 @@ mod tests {
         assert!(hidden(plate, Some(card), Some(Rect { h: 300., ..card })));
         assert!(!hidden(plate, Some(Rect { h: 300., ..card }), Some(card)));
         assert!(!hidden(plate, None, None));
-    }
-
-    #[test]
-    fn overlaps() {
-        assert!(overlap(LEFT, Rect { x: 399., ..RIGHT }));
-        assert!(!overlap(LEFT, RIGHT), "touching is not overlapping");
     }
 
     /// Covered area, by counting whole pixels.
