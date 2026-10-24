@@ -1,6 +1,7 @@
 #define IDI_ICON 0x101
 
-IDI_ICON ICON "alacritty.ico"
+// tabbed: the fork's logo
+IDI_ICON ICON "../../extra/logo/tabbed/alacritty-tabbed.ico"
 
 #define RT_MANIFEST 24
 #define APP_MANIFEST 1

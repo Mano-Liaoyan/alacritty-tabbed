@@ -55,6 +55,8 @@ $(APP_NAME)-%: $(TARGET)-%
 	@scdoc < $(MANPAGE-ESCAPES) | gzip -c > $(APP_EXTRAS_DIR)/alacritty-escapes.7.gz
 	@tic -xe alacritty,alacritty-direct -o $(APP_EXTRAS_DIR) $(TERMINFO)
 	@cp -fRp $(APP_TEMPLATE) $(APP_DIR)
+# tabbed: the fork's logo
+	@cp -fp $(ASSETS_DIR)/logo/tabbed/alacritty-tabbed.icns $(APP_DIR)/$(APP_NAME)/Contents/Resources/alacritty.icns
 	@cp -fp $(APP_BINARY) $(APP_BINARY_DIR)
 	@cp -fp $(COMPLETIONS) $(APP_COMPLETIONS_DIR)
 	@touch -r "$(APP_BINARY)" "$(APP_DIR)/$(APP_NAME)"

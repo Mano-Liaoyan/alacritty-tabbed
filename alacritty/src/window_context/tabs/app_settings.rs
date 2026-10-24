@@ -404,7 +404,7 @@ mod tests {
         let text = "# Mine.\n[tabbed.brand]\ntitle = \"Work\" # Kept.\n";
         let edited = defaults().edit(&changed, text).unwrap();
         assert!(edited.contains("title = \"Work\" # Kept.\n"), "{edited}");
-        for key in ["pin_tab_bar = true", "show = true", "icon = \"alacritty\""] {
+        for key in ["pin_tab_bar = true", "show = true", "icon = \"tabbed\""] {
             assert!(edited.contains(key), "{key}: {edited}");
         }
         // Unchanged, the file is left byte for byte.

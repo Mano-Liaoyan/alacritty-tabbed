@@ -304,7 +304,7 @@ fn segments(track: Rect, widths: &[f32], inset: f32) -> Vec<Rect> {
 enum Logos {
     /// The selected profile, whose first cell is the program's own icon.
     Profile,
-    /// The tab bar's logo, whose first cells are Alacritty's and none.
+    /// The tab bar's logo, whose first cells are Alacritty Tabbed's, Alacritty's and none.
     Brand,
 }
 
@@ -313,7 +313,9 @@ impl Logos {
     fn leading(self) -> &'static [(&'static str, &'static str)] {
         match self {
             Logos::Profile => &[("Program's own icon", "")],
-            Logos::Brand => &[("Alacritty", "alacritty"), ("None", "")],
+            Logos::Brand => {
+                &[("Alacritty Tabbed", "tabbed"), ("Alacritty", "alacritty"), ("None", "")]
+            },
         }
     }
 
@@ -3671,10 +3673,11 @@ mod tests {
     fn logo_cells_stand_for_icons() {
         let first = icons::names().next().unwrap();
         let bundled = format!("{}{first}", icons::BUNDLED_PREFIX);
-        assert_eq!(Logos::Brand.icon(0), "alacritty");
-        assert_eq!(Logos::Brand.icon(1), "");
-        assert_eq!(Logos::Brand.icon(2), bundled);
-        assert_eq!(Logos::Brand.name(1), "None");
+        assert_eq!(Logos::Brand.icon(0), "tabbed");
+        assert_eq!(Logos::Brand.icon(1), "alacritty");
+        assert_eq!(Logos::Brand.icon(2), "");
+        assert_eq!(Logos::Brand.icon(3), bundled);
+        assert_eq!(Logos::Brand.name(2), "None");
         assert_eq!(Logos::Profile.icon(0), "");
         assert_eq!(Logos::Profile.icon(1), bundled);
         for kind in [Logos::Brand, Logos::Profile] {
@@ -3721,7 +3724,7 @@ mod tests {
         settings.show(Page::Appearance);
         assert_eq!(settings.page, Page::Appearance);
         settings.logos = Some(LogoPicker { kind: Logos::Brand, highlighted: 0, first: 0 });
-        settings.pick_logo(2);
+        settings.pick_logo(3);
         assert!(settings.logos.is_none());
         *settings.text_mut(Field::BrandTitle) = "Work".into();
         settings.text_mut(Field::BrandSubtitle).clear();

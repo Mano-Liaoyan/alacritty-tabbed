@@ -1,3 +1,7 @@
+<p align="center">
+    <img width="160" alt="Alacritty Tabbed logo" src="../extra/logo/tabbed/alacritty-tabbed.svg">
+</p>
+
 # Alacritty Tabbed
 
 Alacritty Tabbed ([`alacritty-tabbed`](https://github.com/Mano-Liaoyan/alacritty-tabbed))
@@ -94,7 +98,7 @@ slides away again once the pointer leaves it; the terminals are not resized as
 it comes and goes. The choice is saved to `alacritty.toml` for every window.
 
 **Logo.** Under Appearance, hide the logo and names at the top left, or pick
-another logo (Alacritty's, none, or a bundled one) and change the two names;
+another logo (Alacritty Tabbed's, upstream Alacritty's, none, or a bundled one) and change the two names;
 `{host}` stands for the computer's name. An SVG or PNG file can be set in
 `alacritty.toml`.
 
@@ -121,7 +125,7 @@ wheel_zoom = true        # Ctrl+wheel (Cmd+wheel on macOS) zooms the focused pan
 
 [tabbed.brand]
 show = true              # The logo and names at the top left of the tab bar.
-icon = "alacritty"       # "alacritty", "" (none), "bundled:<name>" or an .svg/.png path.
+icon = "tabbed"          # "tabbed", "alacritty" (upstream's), "" (none), "bundled:<name>" or an .svg/.png path.
 title = "Alacritty"      # "" hides the line.
 subtitle = "{host}"      # {host} is the computer's name; "" hides the line.
 ```
@@ -354,3 +358,8 @@ opens an issue when it conflicts.
 Everything else, from installation to configuration, is as in Alacritty
 itself: see upstream's [README.md](../README.md), [INSTALL.md](../INSTALL.md)
 and [CONTRIBUTING.md](../CONTRIBUTING.md).
+
+The one difference is the logo: where INSTALL.md installs
+`extra/logo/alacritty-term.svg` as the desktop icon, install
+[`extra/logo/tabbed/alacritty-tabbed.svg`](../extra/logo/tabbed/alacritty-tabbed.svg)
+instead. The Windows and macOS builds already carry it.

@@ -48,7 +48,8 @@ use crate::display::SizeInfo;
 
 /// Window icon for `_NET_WM_ICON` property.
 #[cfg(all(feature = "x11", not(any(target_os = "macos", windows))))]
-const WINDOW_ICON: &[u8] = include_bytes!("../../extra/logo/compat/alacritty-term.png");
+// tabbed: the fork's logo
+const WINDOW_ICON: &[u8] = include_bytes!("../../extra/logo/tabbed/alacritty-tabbed-64.png");
 
 /// This should match the definition of IDI_ICON from `alacritty.rc`.
 #[cfg(windows)]

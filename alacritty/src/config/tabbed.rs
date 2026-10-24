@@ -108,7 +108,8 @@ pub enum RestoreSession {
 #[derive(ConfigDeserialize, Serialize, Debug, Clone, PartialEq, Eq)]
 pub struct Brand {
     pub show: bool,
-    /// `alacritty`, `bundled:<name>` for a bundled logo, a path to an image, or empty for none.
+    /// `tabbed` for Alacritty Tabbed's logo, `alacritty` for Alacritty's, `bundled:<name>` for a
+    /// bundled logo, a path to an image, or empty for none.
     pub icon: String,
     /// Names beside the icon, where `{host}` stands for the computer's; empty hides a line.
     pub title: String,
@@ -119,7 +120,7 @@ impl Default for Brand {
     fn default() -> Self {
         Self {
             show: true,
-            icon: "alacritty".into(),
+            icon: "tabbed".into(),
             title: DEFAULT_NAME.into(),
             subtitle: "{host}".into(),
         }
@@ -166,7 +167,7 @@ pane_highlight = \"#FF9500\"",
         assert!(brand.show);
         assert_eq!(
             (&*brand.icon, &*brand.title, &*brand.subtitle),
-            ("alacritty", "Alacritty", "{host}")
+            ("tabbed", "Alacritty", "{host}")
         );
     }
 
