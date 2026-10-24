@@ -162,7 +162,7 @@ impl Layout {
         let button =
             |x: f32, width: f32| Rect::new(x, ((bar - control) / 2.).round(), width, control);
 
-        let lights = if mac { px(72.) } else { 0. };
+        let lights = if mac { px(80.) } else { 0. };
         // GNOME's and KDE's round window buttons end as far from the window's edge as the logo
         // begins, so the bar's two ends mirror each other.
         let trailing =

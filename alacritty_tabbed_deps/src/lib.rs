@@ -11,6 +11,10 @@ pub use fontconfig_sys;
 
 #[cfg(target_os = "macos")]
 pub use core_text;
+#[cfg(target_os = "macos")]
+pub use objc2_app_kit;
+#[cfg(target_os = "macos")]
+pub use objc2_core_foundation;
 
 #[cfg(windows)]
 pub use dwrote;
