@@ -1987,21 +1987,21 @@ fn open(
 }
 
 /// Split the live pane, putting a new one with the same profile beside it, on `side` along
-/// `axis`, and focus the new pane. Returns whether there was room for it.
+/// `axis`, and focus the new pane, if there is room for it.
 pub fn split(
     ctx: &mut WindowContext,
     axis: Axis,
     side: Side,
     config: &Rc<UiConfig>,
     proxy: &EventLoopProxy<Event>,
-) -> bool {
+) {
     let tabs = &ctx.display.tabs;
-    let Some(tab) = tabs.tabs.get(tabs.active) else { return false };
+    let Some(tab) = tabs.tabs.get(tabs.active) else { return };
     let min = min_pane(&ctx.display.size_info);
     // A split unzooms the tab, so the pane is cut where its layout places it.
     let rect = tabs.placed().get(tab.focus).map_or_else(|| tabs.area(), |&(_, rect)| rect);
     if !split::fits(rect, axis, side, &Split::Pane(()), min, tabs.spacing()) {
-        return false;
+        return;
     }
 
     let name = tab.pane().profile.clone();
@@ -2021,7 +2021,7 @@ pub fn split(
         Ok(pane) => pane,
         Err(err) => {
             error!("Could not split pane: {err}");
-            return false;
+            return;
         },
     };
 
@@ -2031,7 +2031,6 @@ pub fn split(
     let target = tab.panes[focus].id;
     let index = tab.insert(target, pane, axis, side);
     focus_pane(ctx, active, index, config);
-    true
 }
 
 /// Smallest size of a pane, in pixels, for terminals of `size`'s cells and padding.
