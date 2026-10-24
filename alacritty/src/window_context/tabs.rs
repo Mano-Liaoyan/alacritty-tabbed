@@ -1088,7 +1088,7 @@ pub fn window_event(
             // window's resize borders keep the pointer over the controls near them.
             let resize = matches!(under, Hit::Resize(_));
             let control =
-                panes::control_at(tabs, &layout, position).filter(|_| free && !shelf && !resize);
+                panes::control(tabs, position, layout.scale).filter(|_| free && !shelf && !resize);
             if mem::replace(&mut tabs.control, control) != control {
                 redraw(ctx);
             }
@@ -1184,7 +1184,7 @@ pub fn window_event(
                 // Like native buttons, the zoom and close controls act on release.
                 Press::Control(index, control) => {
                     let active = tabs.active;
-                    if panes::control_at(tabs, &layout, tabs.pointer) == Some((index, control)) {
+                    if panes::control(tabs, tabs.pointer, layout.scale) == Some((index, control)) {
                         match control {
                             Control::Zoom => {
                                 focus_pane(ctx, active, index, config);
@@ -1804,7 +1804,7 @@ fn click(
             close(ctx, index, config)
         },
         (Hit::Tab(index) | Hit::Icon(index, _) | Hit::Close(index), MouseButton::Right) => {
-            context::open_tab(ctx, index, config, proxy)
+            context::open_tab(ctx, index)
         },
         (Hit::New, MouseButton::Left) => run(ctx, Command::New, config, proxy),
         (Hit::Menu, MouseButton::Left) => {
@@ -1986,22 +1986,21 @@ fn open(
     select(ctx, ctx.display.tabs.tabs.len() - 1, config);
 }
 
-/// Split the live pane, putting a new one with the same profile beside it, on `side` along
-/// `axis`, and focus the new pane. Returns whether there was room for it.
+/// Split the live pane, putting a new one with the same profile beside it, after it along
+/// `axis`, and focus the new pane, if there is room for it.
 pub fn split(
     ctx: &mut WindowContext,
     axis: Axis,
-    side: Side,
     config: &Rc<UiConfig>,
     proxy: &EventLoopProxy<Event>,
-) -> bool {
+) {
     let tabs = &ctx.display.tabs;
-    let Some(tab) = tabs.tabs.get(tabs.active) else { return false };
+    let Some(tab) = tabs.tabs.get(tabs.active) else { return };
     let min = min_pane(&ctx.display.size_info);
     // A split unzooms the tab, so the pane is cut where its layout places it.
     let rect = tabs.placed().get(tab.focus).map_or_else(|| tabs.area(), |&(_, rect)| rect);
-    if !split::fits(rect, axis, side, &Split::Pane(()), min, tabs.spacing()) {
-        return false;
+    if !split::fits(rect, axis, Side::After, &Split::Pane(()), min, tabs.spacing()) {
+        return;
     }
 
     let name = tab.pane().profile.clone();
@@ -2021,7 +2020,7 @@ pub fn split(
         Ok(pane) => pane,
         Err(err) => {
             error!("Could not split pane: {err}");
-            return false;
+            return;
         },
     };
 
@@ -2029,9 +2028,8 @@ pub fn split(
     let (active, focus) = ctx.display.tabs.live();
     let tab = &mut ctx.display.tabs.tabs[active];
     let target = tab.panes[focus].id;
-    let index = tab.insert(target, pane, axis, side);
+    let index = tab.insert(target, pane, axis, Side::After);
     focus_pane(ctx, active, index, config);
-    true
 }
 
 /// Smallest size of a pane, in pixels, for terminals of `size`'s cells and padding.

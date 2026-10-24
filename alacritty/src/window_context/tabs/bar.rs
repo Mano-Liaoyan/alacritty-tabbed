@@ -769,7 +769,6 @@ pub fn badge(
     rect: Rect,
     image: Option<&Arc<Image>>,
     text: &str,
-    font: &UiFont,
     colors: (Rgb, Rgb, Rgb),
 ) {
     match image {
@@ -777,7 +776,7 @@ pub fn badge(
         None => {
             let (surface, accent, _) = colors;
             layer.rounded(rect, layout.curve(rect.w / 4.), mix(surface, accent, 0.3));
-            layer.label(rect, text, font, accent, true);
+            layer.label(rect, text, &layout.font, accent, true);
         },
     }
 }
@@ -966,7 +965,7 @@ impl Tabs {
             let mut fade = 0.;
             if count == 1 {
                 let pane = tab.pane();
-                badge(layer, &layout, front, pane.icon.as_ref(), &pane.badge, font, colors(0, 1.));
+                badge(layer, &layout, front, pane.icon.as_ref(), &pane.badge, colors(0, 1.));
             } else {
                 let motion = |pane: usize| {
                     let (_, fan, lift) = self.bar_effects.get(tab.panes[pane].id, now);
@@ -1019,7 +1018,7 @@ impl Tabs {
                             let inner = card_image(icon, tiles);
                             into.image_alpha(inner, image, palette.foreground, alpha);
                         },
-                        None => badge(into, &layout, icon, None, text, font, colors(pane, alpha)),
+                        None => badge(into, &layout, icon, None, text, colors(pane, alpha)),
                     }
                 };
                 // From the back: the panes left out of the deck, which come out from behind its
@@ -1092,7 +1091,7 @@ impl Tabs {
                 carried.rounded_alpha(shadow, layout.curve(shadow.w / 4.), BLACK, 0.3);
                 let colors = (palette.raised, palette.accent(&pane.title), palette.foreground);
                 carried.rounded(icon.inset(-px(1.)), layout.curve(size / 4.), palette.raised);
-                badge(&mut carried, &layout, icon, pane.icon.as_ref(), &pane.badge, font, colors);
+                badge(&mut carried, &layout, icon, pane.icon.as_ref(), &pane.badge, colors);
             }
         }
 
@@ -1147,7 +1146,7 @@ impl Tabs {
                         let image = profile.image(config);
                         let colors = (surface, palette.accent(name), palette.foreground);
                         let (image, text) = (image.as_ref(), &profile.badge());
-                        badge(&mut top, &layout, icon_rect, image, text, font, colors);
+                        badge(&mut top, &layout, icon_rect, image, text, colors);
                     },
                     None => top.gear(icon_rect.center(), px(8.), palette.muted, surface),
                 }

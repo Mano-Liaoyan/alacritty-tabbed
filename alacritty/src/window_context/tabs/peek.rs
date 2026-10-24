@@ -386,9 +386,7 @@ pub fn draw(
             let colors = (palette.popup, ink(accent), ink(palette.foreground));
             match &pane.icon {
                 Some(image) => layer.image_alpha(place(badge), image, palette.foreground, shown),
-                None => {
-                    bar::badge(&mut layer, layout, place(badge), None, &pane.badge, font, colors)
-                },
+                None => bar::badge(&mut layer, layout, place(badge), None, &pane.badge, colors),
             }
             let text_y = y + (header - line) / 2.;
             let left = badge.right() + px(6.);

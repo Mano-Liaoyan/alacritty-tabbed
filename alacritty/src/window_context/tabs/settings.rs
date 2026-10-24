@@ -155,7 +155,7 @@ impl Field {
     /// own settings, and numbers and colors.
     fn right_aligned(self) -> bool {
         match self {
-            Field::Key(..) => self.number().is_some() || self.color().is_some(),
+            Field::Key(..) => self.number().is_some() || self.color(),
             field => field.is_app_setting(),
         }
     }
@@ -167,13 +167,10 @@ impl Field {
         face || matches!(self, Field::Font | Field::UiFont)
     }
 
-    /// Whether the field holds a color, and whether it may name the cell's.
-    fn color(self) -> Option<bool> {
-        match (self, self.key().map(|key| key.kind)) {
-            (Field::PaneHighlight, _) => Some(false),
-            (_, Some(Kind::Color { cells } | Kind::Colors(_, cells))) => Some(cells),
-            _ => None,
-        }
+    /// Whether the field holds a color.
+    fn color(self) -> bool {
+        self == Field::PaneHighlight
+            || matches!(self.key().map(|key| key.kind), Some(Kind::Color | Kind::Colors(..)))
     }
 
     fn label(self) -> &'static str {
@@ -1084,9 +1081,7 @@ impl Settings {
                         (_, Some(Kind::Pair(..))) => control_at(rect, 2. * count + px(8.), px(30.)),
                         (_, Some(Kind::Text(_))) => control_at(rect, px(240.), px(30.)),
                         (_, Some(Kind::Face(_))) => control_at(rect, px(320.), px(30.)),
-                        (_, Some(Kind::Color { cells })) => {
-                            control_at(rect, px(32.) + if cells { cell } else { hex }, px(30.))
-                        },
+                        (_, Some(Kind::Color)) => control_at(rect, px(32.) + hex, px(30.)),
                         (_, Some(Kind::Colors(_, cells))) => {
                             let field = if cells { cell } else { hex };
                             control_at(rect, 2. * (px(32.) + field) + px(16.), px(30.))
@@ -1109,7 +1104,7 @@ impl Settings {
                     let fields_of = row.fields();
                     match (fields_of.as_slice(), kind) {
                         // A color's field is beside its well, which is left of it.
-                        (&[field], _) if field.color().is_some() => {
+                        (&[field], _) if field.color() => {
                             fields[field.index()] =
                                 Rect { x: control.x + px(32.), w: control.w - px(32.), ..control }
                         },
@@ -1192,7 +1187,7 @@ impl Settings {
                     }
                     for field in row.fields() {
                         let rect = fields[field.index()];
-                        if field.color().is_some() {
+                        if field.color() {
                             buttons.push((Target::Well(field), well(rect, layout)));
                         }
                         if field.stepper() {
@@ -3296,7 +3291,7 @@ impl Settings {
             Kind::Face(_) if part == 0 => "Same as normal".into(),
             Kind::Face(style) => style.into(),
             Kind::Number(number) | Kind::Pair(_, number) if number.optional => "Auto".into(),
-            Kind::Color { .. } | Kind::Colors(..) => "Auto".into(),
+            Kind::Color | Kind::Colors(..) => "Auto".into(),
             Kind::Command if key.path == "terminal.shell" => profiles::shell(config),
             Kind::Command | Kind::List | Kind::Map => "None".into(),
             _ => return None,

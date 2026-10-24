@@ -21,7 +21,7 @@ use super::anim::{Curve, Tween};
 use super::bar::{Hit, ITEM_RADIUS, Layout, MARGIN, TRACK_RADIUS};
 use super::dnd::{Source, Target};
 use super::paint::{BLACK, Layer, Palette, Rect, UNZOOM_GLYPH, ZOOM_GLYPH, mix};
-use super::split::{Axis, Side, Split};
+use super::split::{Axis, Split};
 use super::tear::{can_tear, tear_off};
 use super::{
     FontChange, Press, Tab, Tabs, close as close_tab, close_pane, focus_pane, move_pane, redraw,
@@ -380,12 +380,7 @@ pub fn press(
 }
 
 /// Open the menu of the tab at `index` at the pointer.
-pub fn open_tab(
-    ctx: &mut WindowContext,
-    index: usize,
-    _config: &Rc<UiConfig>,
-    _proxy: &EventLoopProxy<Event>,
-) {
+pub fn open_tab(ctx: &mut WindowContext, index: usize) {
     let tabs = &ctx.display.tabs;
     let Some(tab) = tabs.tabs.get(index) else { return };
     let tear = can_tear(tabs, Source::Tab(index));
@@ -474,12 +469,8 @@ fn choose(
         Source::Tab(tab) => (tab, ctx.display.tabs.tabs[tab].focus),
     };
     match item {
-        Item::SplitVertically => {
-            split(ctx, Axis::Row, Side::After, config, proxy);
-        },
-        Item::SplitHorizontally => {
-            split(ctx, Axis::Column, Side::After, config, proxy);
-        },
+        Item::SplitVertically => split(ctx, Axis::Row, config, proxy),
+        Item::SplitHorizontally => split(ctx, Axis::Column, config, proxy),
         Item::Zoom | Item::Unzoom => toggle_zoom(ctx),
         Item::ResetTextSize => zoom_live(ctx, FontChange::Reset),
         Item::MoveToNewTab => move_pane(ctx, (tab, pane), Target::Detach(tab + 1), config),
@@ -597,6 +588,7 @@ pub fn draw(tabs: &Tabs, layout: &Layout, palette: &Palette, now: Instant) -> Op
 #[cfg(test)]
 mod tests {
     use super::super::Pane;
+    use super::super::split::Side;
     use super::*;
 
     const METRICS: Metrics = Metrics { width: 200., row: 30., gap: 10., pad: 5. };

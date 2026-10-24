@@ -69,10 +69,8 @@ pub enum Kind {
     Text(&'static str),
     /// A font's family and style, with the style's placeholder.
     Face(&'static str),
-    /// A color, which may also name the color of the cell under it.
-    Color {
-        cells: bool,
-    },
+    /// A color.
+    Color,
     /// Two colors, in the keys `parts` of a table, which may name the cell's.
     Colors([&'static str; 2], bool),
     /// A command line, written as its program and arguments.
@@ -184,7 +182,7 @@ const fn palette(paths: [&'static str; 8], section: &'static str, auto: bool) ->
         section: &'static str,
         description: &'static str,
     ) -> Key {
-        key(Area::Colors, section, path, name, description, Kind::Color { cells: false })
+        key(Area::Colors, section, path, name, description, Kind::Color)
     }
     [
         color(paths[0], NAMES[0], section, description),
@@ -279,10 +277,10 @@ pub const KEYS: &[Key] = &[
     key(Font, "Rendering", "font.builtin_box_drawing", "Built-in box drawing", "Lines and blocks drawn, not the font's", Kind::Switch),
     key(Font, "Rendering", "colors.draw_bold_text_with_bright_colors", "Bold in bright colors", "Bold text takes the bright colors", Kind::Switch),
     // Colors.
-    key(Colors, "Primary", "colors.primary.foreground", "Foreground", "Of the text", Kind::Color { cells: false }),
-    key(Colors, "Primary", "colors.primary.background", "Background", "Behind the text", Kind::Color { cells: false }),
-    key(Colors, "Primary", "colors.primary.dim_foreground", "Dim foreground", "Empty: worked out from the foreground", Kind::Color { cells: false }),
-    key(Colors, "Primary", "colors.primary.bright_foreground", "Bright foreground", "Of bold text; empty: the foreground", Kind::Color { cells: false }).needs("colors.draw_bold_text_with_bright_colors"),
+    key(Colors, "Primary", "colors.primary.foreground", "Foreground", "Of the text", Kind::Color),
+    key(Colors, "Primary", "colors.primary.background", "Background", "Behind the text", Kind::Color),
+    key(Colors, "Primary", "colors.primary.dim_foreground", "Dim foreground", "Empty: worked out from the foreground", Kind::Color),
+    key(Colors, "Primary", "colors.primary.bright_foreground", "Bright foreground", "Of bold text; empty: the foreground", Kind::Color).needs("colors.draw_bold_text_with_bright_colors"),
     NORMAL[0], NORMAL[1], NORMAL[2], NORMAL[3], NORMAL[4], NORMAL[5], NORMAL[6], NORMAL[7],
     BRIGHT[0], BRIGHT[1], BRIGHT[2], BRIGHT[3], BRIGHT[4], BRIGHT[5], BRIGHT[6], BRIGHT[7],
     DIM[0], DIM[1], DIM[2], DIM[3], DIM[4], DIM[5], DIM[6], DIM[7],
@@ -316,7 +314,7 @@ pub const KEYS: &[Key] = &[
     key(Terminal, "Mouse and keyboard", "hints.alphabet", "Hint keys", "Letters that label hints", Kind::Text("jfkdls;ahgurieowpq")),
     key(Terminal, "Bell", "bell.duration", "Visual bell", "Milliseconds it flashes; 0 for none", Kind::Number(whole(0., 10_000., 50.))),
     key(Terminal, "Bell", "bell.animation", "Animation", "How the flash fades", Kind::Choice(ANIMATIONS)).needs("bell.duration"),
-    key(Terminal, "Bell", "bell.color", "Flash color", "Of the visual bell", Kind::Color { cells: false }).needs("bell.duration"),
+    key(Terminal, "Bell", "bell.color", "Flash color", "Of the visual bell", Kind::Color).needs("bell.duration"),
     key(Terminal, "Bell", "bell.command", "Bell command", "Run at each bell; empty runs none", Kind::Command),
     // Advanced.
     key(Advanced, "Rendering", "debug.renderer", "Renderer", "Empty picks the best the system offers", Kind::Choice(&[("", "Auto"), ("glsl3", "GLSL 3"), ("gles2", "GLES 2"), ("gles2pure", "Pure GLES 2")])),
@@ -431,7 +429,7 @@ impl Key {
                 let known = choices.iter().find(|(choice, _)| choice.eq_ignore_ascii_case(&name));
                 state.text[0] = known.map_or(name, |(choice, _)| (*choice).into());
             },
-            Kind::Number(_) | Kind::Text(_) | Kind::Color { .. } => {
+            Kind::Number(_) | Kind::Text(_) | Kind::Color => {
                 state.text[0] = show(get(root, self.path))
             },
             Kind::Pair(parts, number) => {
@@ -520,7 +518,7 @@ impl Key {
                     }
                 }
             },
-            Kind::Color { cells } => match self.color(&state.text[0], cells)? {
+            Kind::Color => match self.color(&state.text[0], false)? {
                 Some(color) => set(root, &path, value(color)),
                 None => remove(root, &path),
             },

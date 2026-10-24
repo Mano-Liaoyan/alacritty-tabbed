@@ -34,7 +34,6 @@ jobs:
           git config user.name "upstream-sync"
           git config user.email "upstream-sync@users.noreply.github.com"
           behind=$(git rev-list --count HEAD..upstream/master)
-          echo "behind=$behind" >> "$GITHUB_OUTPUT"
           {
             echo "## Upstream sync"
             echo
