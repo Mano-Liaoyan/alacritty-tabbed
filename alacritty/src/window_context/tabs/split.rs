@@ -180,8 +180,8 @@ impl<P: Copy + PartialEq> Split<P> {
     }
 
     /// Where `new` joins this group laid out in `area`, every pane keeping at least `min`,
-    /// `spacing` apart: beside all of its panes, `None`, while they keep that much, or else beside
-    /// the roomiest pane it fits beside, as a split would, after it. None when it fits nowhere.
+    /// `spacing` apart: after all of its panes, `None`, while they keep that much, or else after
+    /// the roomiest pane it fits after, as a split would. None when it fits nowhere.
     ///
     /// Halving the whole group soon leaves too little for a group of a few panes, while one of
     /// them still has room enough to share.
