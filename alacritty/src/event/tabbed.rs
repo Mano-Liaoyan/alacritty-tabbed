@@ -33,6 +33,9 @@ pub struct State {
 
 impl State {
     pub fn new(cli_options: &CliOptions) -> Self {
+        // Before the event loop starts, which builds the application menu from the name.
+        #[cfg(target_os = "macos")]
+        tabs::app_name::set();
         Self { saved: None, closed: Default::default(), plain: restore::plain(cli_options) }
     }
 }

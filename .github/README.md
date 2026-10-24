@@ -359,7 +359,11 @@ Everything else, from installation to configuration, is as in Alacritty
 itself: see upstream's [README.md](../README.md), [INSTALL.md](../INSTALL.md)
 and [CONTRIBUTING.md](../CONTRIBUTING.md).
 
-The one difference is the logo: where INSTALL.md installs
+The differences are the logo and the name. Where INSTALL.md installs
 `extra/logo/alacritty-term.svg` as the desktop icon, install
 [`extra/logo/tabbed/alacritty-tabbed.svg`](../extra/logo/tabbed/alacritty-tabbed.svg)
-instead. The Windows and macOS builds already carry it.
+instead. The Windows and macOS builds already carry it. On macOS, `make app`
+builds `target/release/osx/Alacritty Tabbed.app`, rather than `Alacritty.app`,
+which the menu bar and the Dock name Alacritty Tabbed; copy it to
+`/Applications` under that name. It keeps upstream's bundle identifier,
+`org.alacritty`, and so its preferences and the permissions granted to it.

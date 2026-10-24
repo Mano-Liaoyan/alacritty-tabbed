@@ -41,6 +41,8 @@ mod text;
 mod text_size;
 
 #[cfg(target_os = "macos")]
+pub mod app_name;
+#[cfg(target_os = "macos")]
 mod dock;
 #[cfg(target_os = "macos")]
 mod macos;
