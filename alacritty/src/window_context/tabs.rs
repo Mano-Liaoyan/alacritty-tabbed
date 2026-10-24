@@ -1804,7 +1804,7 @@ fn click(
             close(ctx, index, config)
         },
         (Hit::Tab(index) | Hit::Icon(index, _) | Hit::Close(index), MouseButton::Right) => {
-            context::open_tab(ctx, index, config, proxy)
+            context::open_tab(ctx, index)
         },
         (Hit::New, MouseButton::Left) => run(ctx, Command::New, config, proxy),
         (Hit::Menu, MouseButton::Left) => {

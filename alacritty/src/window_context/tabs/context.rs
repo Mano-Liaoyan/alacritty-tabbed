@@ -380,12 +380,7 @@ pub fn press(
 }
 
 /// Open the menu of the tab at `index` at the pointer.
-pub fn open_tab(
-    ctx: &mut WindowContext,
-    index: usize,
-    _config: &Rc<UiConfig>,
-    _proxy: &EventLoopProxy<Event>,
-) {
+pub fn open_tab(ctx: &mut WindowContext, index: usize) {
     let tabs = &ctx.display.tabs;
     let Some(tab) = tabs.tabs.get(index) else { return };
     let tear = can_tear(tabs, Source::Tab(index));
