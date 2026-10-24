@@ -86,7 +86,7 @@ use alacritty_terminal::vte::ansi::NamedColor;
 use crate::cli::{ParsedOptions, WindowOptions};
 use crate::clipboard::Clipboard;
 use crate::config::font::Font;
-use crate::config::tabbed::{Corners, UiFont as UiFontConfig};
+use crate::config::tabbed::{Corners, MAX_PANE_GAP, UiFont as UiFontConfig};
 use crate::config::{Action, BindingKey, BindingMode, UiConfig};
 use crate::display::SizeInfo;
 use crate::event::{Event, EventProxy, EventType, InlineSearchState, SearchState};
@@ -1506,7 +1506,7 @@ fn sync(ctx: &mut WindowContext, config: &Rc<UiConfig>, resize: bool) {
     tabs.caption = shown;
     // A bar that is not pinned is drawn over the panes, which take the whole window.
     tabs.autohide.pinned = config.tabbed.pin_tab_bar;
-    let gap = f32::from(config.tabbed.pane_gap.min(48));
+    let gap = f32::from(config.tabbed.pane_gap.min(MAX_PANE_GAP));
     let regap = mem::replace(&mut tabs.gap, gap) != gap;
     let (offset, inset) = match shown {
         false => (0, 0),
