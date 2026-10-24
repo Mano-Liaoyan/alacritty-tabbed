@@ -276,7 +276,7 @@ impl Row {
             Row::TabTrack => "Behind the tabs",
             Row::IconTiles => "Behind the icons in tabs",
             Row::Logo => "Top left of the tab bar",
-            Row::LogoIcon => "Alacritty's, a bundled logo or none",
+            Row::LogoIcon => "Alacritty Tabbed's, Alacritty's, a bundled logo or none",
             Row::LogoText => "{host} is this computer's name",
             Row::Key(key) => KEYS[usize::from(key)].description,
         }

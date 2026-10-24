@@ -90,16 +90,23 @@ const BUNDLED: &[Logo] = &[
 ];
 const TERMINAL: Logo = logo!("terminal", svg, [], false);
 
-/// Alacritty's logo, shown in the caption.
+/// Alacritty Tabbed's logo, shown in the caption and the settings.
 pub fn logo() -> Arc<Image> {
+    static LOGO: OnceLock<Arc<Image>> = OnceLock::new();
+    let logo = include_bytes!("../../../extra/logo/tabbed/alacritty-tabbed.svg");
+    LOGO.get_or_init(|| Image::svg(logo, false).expect("invalid embedded logo")).clone()
+}
+
+/// Upstream Alacritty's logo, which the tab bar can show instead.
+pub fn alacritty_logo() -> Arc<Image> {
     static LOGO: OnceLock<Arc<Image>> = OnceLock::new();
     let logo = include_bytes!("../../../extra/logo/compat/alacritty-term.svg");
     LOGO.get_or_init(|| Image::svg(logo, false).expect("invalid embedded logo")).clone()
 }
 
-/// The icon at the left of the tab bar, as the configuration names it: Alacritty's logo with
-/// `alacritty`, a bundled logo with `bundled:<name>`, else an image file, `~` expanded; none when
-/// empty.
+/// The icon at the left of the tab bar, as the configuration names it: Alacritty Tabbed's logo
+/// with `tabbed`, Alacritty's with `alacritty`, a bundled logo with `bundled:<name>`, else an
+/// image file, `~` expanded; none when empty.
 ///
 /// An image file is read again until it loads, so a file fixed after the fact shows without a
 /// restart; each value that shows nothing is reported once.
@@ -108,7 +115,8 @@ pub fn brand(icon: &str) -> Option<Arc<Image>> {
     static MISSING: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
     let image = match icon.trim() {
         "" => return None,
-        "alacritty" => Some(logo()),
+        "tabbed" => Some(logo()),
+        "alacritty" => Some(alacritty_logo()),
         icon => match icon.strip_prefix(BUNDLED_PREFIX) {
             Some(name) => named(name),
             None => {
@@ -255,6 +263,7 @@ mod tests {
     #[test]
     fn bundled_logos_load() {
         logo();
+        alacritty_logo();
         for name in names() {
             assert!(named(name).is_some(), "{name}");
         }
@@ -263,7 +272,8 @@ mod tests {
 
     #[test]
     fn brand_icons_follow_the_configuration() {
-        assert!(Arc::ptr_eq(&brand("alacritty").unwrap(), &logo()));
+        assert!(Arc::ptr_eq(&brand("tabbed").unwrap(), &logo()));
+        assert!(Arc::ptr_eq(&brand("alacritty").unwrap(), &alacritty_logo()));
         assert!(brand("").is_none());
         assert!(brand("bundled:opensuse").is_some());
         assert!(brand(" bundled:opensuse ").is_some());

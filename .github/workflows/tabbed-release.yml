@@ -34,7 +34,7 @@ jobs:
         run: |
           mkdir -p "$NAME/man"
           cp target/release/alacritty extra/alacritty.info extra/linux/Alacritty.desktop \
-            extra/logo/alacritty-term.svg extra/completions/* "$NAME"
+            extra/logo/tabbed/alacritty-tabbed.svg extra/completions/* "$NAME"
           for page in extra/man/*.scd; do
             scdoc < "$page" | gzip -c > "$NAME/man/$(basename "${page%.scd}").gz"
           done

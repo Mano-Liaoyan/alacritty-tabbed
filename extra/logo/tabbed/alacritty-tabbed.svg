@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
+  <!-- Alacritty Tabbed: three sessions held like a hand of cards, Alacritty's in front. -->
+  <defs>
+    <linearGradient id="front" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffb21a"/>
+      <stop offset="1" stop-color="#ff4d0d"/>
+    </linearGradient>
+    <linearGradient id="middle" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#6c6c75"/>
+      <stop offset="1" stop-color="#4f4f57"/>
+    </linearGradient>
+    <linearGradient id="back" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#4a4a52"/>
+      <stop offset="1" stop-color="#34343a"/>
+    </linearGradient>
+  </defs>
+  <g transform="translate(-33.14 -15.03) scale(1.2561) rotate(-10 64 64)">
+    <g transform="rotate(24 64 123.2)">
+      <rect x="37" y="28" width="54" height="68" rx="13" fill="url(#back)"/>
+      <rect x="37.75" y="28.75" width="52.5" height="66.5" rx="12.25" fill="none" stroke="#fff" stroke-opacity=".12" stroke-width="1.5"/>
+    </g>
+    <g transform="rotate(12 64 123.2)">
+      <rect x="37" y="28" width="54" height="68" rx="13" fill="url(#middle)"/>
+      <rect x="37.75" y="28.75" width="52.5" height="66.5" rx="12.25" fill="none" stroke="#fff" stroke-opacity=".12" stroke-width="1.5"/>
+    </g>
+    <rect x="37" y="28" width="54" height="68" rx="13" fill="url(#front)"/>
+    <rect x="37.75" y="28.75" width="52.5" height="66.5" rx="12.25" fill="none" stroke="#fff" stroke-opacity=".12" stroke-width="1.5"/>
+    <path transform="translate(44.8 42.8) scale(0.6)" fill="#17171a" fill-rule="evenodd" d="M32 4 L60 60 L46 60 L32 30 L18 60 L4 60 Z M32 37 L39 50 L32 60 L25 50 Z"/>
+  </g>
+</svg>
