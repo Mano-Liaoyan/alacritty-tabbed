@@ -25,9 +25,9 @@ It keeps Alacritty's terminal, renderer and `alacritty.toml`, and adds what goes
 them: a tab bar, split panes, shell profiles and a settings panel. It is not an official
 Alacritty release. Upstream's own README is in [README.md](../README.md).
 
-https://github.com/user-attachments/assets/60177fb0-3a55-42bc-ba54-cbfd2758c2e3
+https://github.com/user-attachments/assets/24b23c01-c1cd-4202-bbf7-5b289cd60036
 
-https://github.com/user-attachments/assets/04621226-b6f9-4bb0-a56d-64aa4cbf6436
+https://github.com/user-attachments/assets/e14ff37e-833b-4914-b4b2-3c39b6dedb09
 
 ## Compared with Alacritty
 
