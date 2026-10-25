@@ -749,11 +749,7 @@ pub fn launch(config: &UiConfig, options: &WindowOptions, pty: &mut PtyOptions, 
         return;
     }
     let Some(profile) = Profiles::load(config).default_profile().cloned() else { return };
-    let directory = pty.working_directory.take();
-    profile.apply(pty);
-    if options.terminal_options.working_directory.is_some() {
-        pty.working_directory = directory;
-    }
+    profile.launch(pty, options.terminal_options.working_directory.is_some());
     *tabs.first_profile.borrow_mut() = Some(profile);
 }
 

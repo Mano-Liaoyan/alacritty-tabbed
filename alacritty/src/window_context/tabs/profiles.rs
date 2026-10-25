@@ -23,7 +23,8 @@ pub struct Profile {
     /// Command line; empty uses the shell from `alacritty.toml`.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub command: String,
-    /// Starting directory; empty starts in the home directory.
+    /// Starting directory; empty starts a new tab in the home directory, and a window in the
+    /// directory Alacritty was started in.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub directory: String,
     /// Image file, a bundled logo as `bundled:name`, or text such as an emoji; empty uses the
@@ -168,6 +169,16 @@ impl Profile {
             if directory.is_empty() { home::home_dir() } else { Some(expand(directory).into()) };
         pty_config.env.extend(self.env.clone());
     }
+
+    /// Start a window's first terminal with this profile, in the directory Alacritty was started
+    /// in when it was given one or the profile names none.
+    pub fn launch(&self, pty_config: &mut PtyOptions, directory_given: bool) {
+        let directory = pty_config.working_directory.take();
+        self.apply(pty_config);
+        if directory_given || self.directory.trim().is_empty() {
+            pty_config.working_directory = directory;
+        }
+    }
 }
 
 /// Program of the shell set in `alacritty.toml`, or the system's.
@@ -289,6 +300,21 @@ fn expand_variables(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn first_terminal_keeps_the_directory_it_was_started_in() {
+        let started = Some(PathBuf::from("/started/here"));
+        let launch = |directory: &str, given: bool| {
+            let profile = Profile { directory: directory.into(), ..Profile::new("Shell", "") };
+            let mut pty_config =
+                PtyOptions { working_directory: started.clone(), ..Default::default() };
+            profile.launch(&mut pty_config, given);
+            pty_config.working_directory
+        };
+        assert_eq!(launch("", false), started);
+        assert_eq!(launch("/profile", false), Some(PathBuf::from("/profile")));
+        assert_eq!(launch("/profile", true), started);
+    }
 
     #[test]
     fn profiles_round_trip_through_toml() {
