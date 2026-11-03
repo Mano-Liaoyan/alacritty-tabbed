@@ -13,6 +13,7 @@ use alacritty_tabbed_deps::png;
 use log::warn;
 use png::{ColorType, Decoder, Transformations};
 
+use super::job::Job;
 use super::paint::Image;
 use super::{platform, profiles};
 
@@ -69,7 +70,7 @@ const BUNDLED: &[Logo] = &[
     logo!("julia", svg, ["julia"], false),
     logo!("r", svg, ["r"], false),
     logo!("haskell", svg, ["ghci", "ghc", "stack", "cabal"], false),
-    logo!("postgresql", svg, ["psql"], false),
+    logo!("postgresql", svg, ["psql", "postgres", "pgcli"], false),
     logo!("sqlite", svg, ["sqlite"], false),
     // Editors and tools.
     logo!("neovim", svg, ["nvim"], false),
@@ -78,6 +79,17 @@ const BUNDLED: &[Logo] = &[
     logo!("htop", svg, ["htop"], true),
     logo!("btop", svg, ["btop"], false),
     logo!("git", svg, ["git", "git-bash"], false),
+    // AI coding agents.
+    logo!("claude", svg, ["claude"], false),
+    logo!("codex", svg, ["codex"], false),
+    logo!("gemini", svg, ["gemini"], false),
+    logo!("copilot", svg, ["copilot"], true),
+    logo!("opencode", svg, ["opencode"], true),
+    logo!("goose", svg, ["goose"], true),
+    logo!("amp", svg, ["amp"], true),
+    logo!("qwen", svg, ["qwen"], false),
+    logo!("pi", svg, ["pi"], false),
+    logo!("deepseek", svg, ["dsh", "deepseek"], false),
     // WSL distributions, by name.
     logo!("ubuntu", svg, ["ubuntu"], false),
     logo!("debian", svg, ["debian"], false),
@@ -225,11 +237,34 @@ fn bundled_name(command: &str) -> Option<String> {
     Some(name)
 }
 
-fn bundled(name: &str) -> Option<Arc<Image>> {
-    // Distributions are named like `Ubuntu-24.04`.
-    let logo = BUNDLED.iter().find(|logo| {
+/// Logos of runtimes, which programs written for them run in.
+const RUNTIMES: [&str; 3] = ["nodejs", "bun", "deno"];
+
+/// The bundled logo of the program a job runs: its executable's, or that of the name it gives
+/// itself, or for a runtime such as Node that of its script, or of the package the script lies in.
+pub fn job(job: &Job) -> Option<Arc<Image>> {
+    let logo = |name: &str| find(&bundled_name(name)?);
+    let runtime = |logo: &&Logo| RUNTIMES.contains(&logo.name);
+    let own = job.name.iter().chain(job.command.first());
+    let mut logos: Vec<_> = own.filter_map(|name| logo(name)).collect();
+    if logos.iter().any(runtime) {
+        let script = job.command.iter().skip(1).find(|arg| !arg.starts_with('-'));
+        let parts = script.into_iter().flat_map(|script| Path::new(script).iter().rev());
+        logos.extend(parts.filter_map(|part| logo(part.to_str()?)));
+    }
+    named(logos.iter().find(|logo| !runtime(logo)).or(logos.first())?.name)
+}
+
+/// The bundled logo for a program: distributions are named like `Ubuntu-24.04`, and packages
+/// like `gemini-cli`.
+fn find(name: &str) -> Option<&'static Logo> {
+    BUNDLED.iter().find(|logo| {
         logo.programs.iter().any(|known| name == *known || name.starts_with(&format!("{known}-")))
-    })?;
+    })
+}
+
+fn bundled(name: &str) -> Option<Arc<Image>> {
+    let logo = find(name)?;
     image(logo.data, logo.tint)
 }
 
@@ -298,5 +333,31 @@ mod tests {
         assert!(bundled("ubuntu-24.04").is_some());
         assert!(bundled("pwsh").is_some());
         assert!(bundled("unknown").is_none());
+    }
+
+    #[test]
+    fn jobs_find_their_bundled_logo() {
+        let logo = |name: Option<&str>, command: &[&str]| {
+            let command = command.iter().map(|&arg| arg.into()).collect();
+            job(&Job { name: name.map(Into::into), command })
+        };
+        let is =
+            |image: Option<Arc<Image>>, name| Arc::ptr_eq(&image.unwrap(), &named(name).unwrap());
+        assert!(is(logo(Some("claude.exe"), &[]), "claude"));
+        assert!(is(logo(Some("python3"), &["python3", "claude.py"]), "python"));
+        assert!(is(logo(Some("vim"), &["vim", "claude.md"]), "vim"));
+        // A Node program, by the name it gives itself, its script or its package.
+        assert!(is(logo(Some("node"), &["claude"]), "claude"));
+        assert!(is(logo(Some("node.exe"), &["node", "/npm/@openai/codex/bin/codex.js"]), "codex"));
+        assert!(is(
+            logo(Some("node"), &["node", "--x", "/npm/@google/gemini-cli/dist/index.js"]),
+            "gemini"
+        ));
+        let pi = "/npm/@earendil-works/pi-coding-agent/dist/bundle/cli.js";
+        assert!(is(logo(Some("node"), &["node", pi]), "pi"));
+        assert!(is(logo(Some("node"), &["node", "/npm/@deepseek-ai/dsh/lib/bin.js"]), "deepseek"));
+        assert!(is(logo(Some("node"), &["node", "server.js"]), "nodejs"));
+        assert!(logo(Some("unknown.exe"), &[]).is_none());
+        assert!(logo(None, &[]).is_none());
     }
 }

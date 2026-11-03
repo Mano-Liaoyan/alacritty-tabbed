@@ -977,7 +977,7 @@ impl Tabs {
             let mut fade = 0.;
             if count == 1 {
                 let pane = tab.pane();
-                badge(layer, &layout, front, pane.icon.as_ref(), &pane.badge, colors(0, 1.));
+                badge(layer, &layout, front, pane.image(), &pane.badge, colors(0, 1.));
             } else {
                 let motion = |pane: usize| {
                     let (_, fan, lift) = self.bar_effects.get(tab.panes[pane].id, now);
@@ -1020,8 +1020,8 @@ impl Tabs {
                         let backed = if order < shown(count) { 1. } else { fan.min(1.) };
                         into.rounded_alpha(cut, layout.curve(cut.w / 4.), surface, backed);
                     }
-                    let Pane { icon: image, badge: text, .. } = &tab.panes[pane];
-                    match image {
+                    let Pane { badge: text, .. } = &tab.panes[pane];
+                    match tab.panes[pane].image() {
                         Some(image) => {
                             if tiles {
                                 let card = mix(surface, palette.foreground, 0.16 + 0.1 * lift);
@@ -1103,7 +1103,7 @@ impl Tabs {
                 carried.rounded_alpha(shadow, layout.curve(shadow.w / 4.), BLACK, 0.3);
                 let colors = (palette.raised, palette.accent(&pane.title), palette.foreground);
                 carried.rounded(icon.inset(-px(1.)), layout.curve(size / 4.), palette.raised);
-                badge(&mut carried, &layout, icon, pane.icon.as_ref(), &pane.badge, colors);
+                badge(&mut carried, &layout, icon, pane.image(), &pane.badge, colors);
             }
         }
 

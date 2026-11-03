@@ -253,6 +253,8 @@ struct Pane<S = Session> {
     title: String,
     badge: String,
     icon: Option<Arc<Image>>,
+    /// Logo of the program running in the pane, shown instead of its icon.
+    job: Option<Arc<Image>>,
     /// Name of the profile the pane was opened with.
     profile: Option<String>,
     /// Terminal of a pane that is not live; the live one's lives in the window context.
@@ -568,6 +570,11 @@ impl<S> Tab<S> {
 }
 
 impl<S> Pane<S> {
+    /// The image the pane shows: the running program's logo, else its own icon.
+    fn image(&self) -> Option<&Arc<Image>> {
+        self.job.as_ref().or(self.icon.as_ref())
+    }
+
     /// A pane opened with `profile`, or else with the configuration's shell.
     fn new(id: WindowId, profile: Option<&Profile>, config: &UiConfig, session: Option<S>) -> Self {
         let (name, badge, icon) = match profile {
@@ -578,7 +585,7 @@ impl<S> Pane<S> {
             },
         };
         let (title, profile) = (name.clone(), profile.map(|profile| profile.name.clone()));
-        Self { id, name, title, badge, icon, profile, session }
+        Self { id, name, title, badge, icon, job: None, profile, session }
     }
 }
 
@@ -1187,6 +1194,26 @@ pub fn window_event(
         _ => (),
     }
     Some(event)
+}
+
+/// Show the logo of the program running in the pane `id`, if any window has it.
+pub fn follow_job<S: BuildHasher>(
+    windows: &mut HashMap<WindowId, WindowContext, S>,
+    id: WindowId,
+) -> bool {
+    let Some(ctx) =
+        windows.values_mut().find(|ctx| ctx.display.tabs.locate(ctx.first, id).is_some())
+    else {
+        return false;
+    };
+    let (tab, index) = ctx.display.tabs.locate(ctx.first, id).unwrap();
+    let job = confirm::running(ctx, tab, index).and_then(|job| icons::job(&job));
+    let pane = &mut ctx.display.tabs.tabs[tab].panes[index];
+    if pane.job.as_ref().map(Arc::as_ptr) != job.as_ref().map(Arc::as_ptr) {
+        pane.job = job;
+        redraw(ctx);
+    }
+    true
 }
 
 /// Route a terminal event to its tab, returning the event the window should handle.
@@ -2062,7 +2089,16 @@ mod tests {
 
     fn pane(id: u64, session: Option<u64>) -> Pane<u64> {
         let (name, title, badge) = (String::new(), String::new(), String::new());
-        Pane { id: WindowId::from(id), name, title, badge, icon: None, profile: None, session }
+        Pane {
+            id: WindowId::from(id),
+            name,
+            title,
+            badge,
+            icon: None,
+            job: None,
+            profile: None,
+            session,
+        }
     }
 
     impl Model {

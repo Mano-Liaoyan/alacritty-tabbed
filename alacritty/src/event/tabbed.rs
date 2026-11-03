@@ -5,7 +5,7 @@
 
 use std::error::Error;
 use std::mem;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use log::{error, warn};
 use winit::event::WindowEvent;
@@ -14,7 +14,8 @@ use winit::window::WindowId;
 
 use crate::cli::{Options as CliOptions, WindowOptions};
 use crate::config::tabbed::RestoreSession;
-use crate::event::{Event, Processor};
+use crate::event::{Event, EventType, Processor};
+use crate::scheduler::{TimerId, Topic};
 use crate::window_context::WindowContext;
 use crate::window_context::tabs::hooks::torn_window;
 use crate::window_context::tabs::{self, Torn, restore};
@@ -128,6 +129,18 @@ impl Processor {
     /// Hand the events of the terminals of other panes than the live ones to their panes,
     /// returning those left for the processor.
     pub(super) fn route(&mut self, event: Event) -> Option<Event> {
+        // A pane's icon follows the program running in it, looked at a moment after its output.
+        match (&event.payload, event.window_id) {
+            (EventType::Terminal(_), Some(id)) => {
+                let timer = TimerId::new(Topic::Frame, id);
+                if !self.scheduler.scheduled(timer) {
+                    let check = Event::new(EventType::Frame, id);
+                    self.scheduler.schedule(check, Duration::from_secs(1), false, timer);
+                }
+            },
+            (EventType::Frame, Some(id)) if tabs::follow_job(&mut self.windows, id) => return None,
+            _ => (),
+        }
         tabs::route(&mut self.windows, &self.config, event.payload, event.window_id)
     }
 

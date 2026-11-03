@@ -384,7 +384,7 @@ pub fn draw(
             let badge = Rect::new(x, y + ((header - icon) / 2.).round(), icon, icon);
             let accent = palette.accent(title);
             let colors = (palette.popup, ink(accent), ink(palette.foreground));
-            match &pane.icon {
+            match pane.image() {
                 Some(image) => layer.image_alpha(place(badge), image, palette.foreground, shown),
                 None => bar::badge(&mut layer, layout, place(badge), None, &pane.badge, colors),
             }

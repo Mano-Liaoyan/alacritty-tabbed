@@ -13,11 +13,14 @@ publish = false
 # workspace. `resvg` draws SVG profile icons; without default features it has no text or font
 # support, and it reuses the `tiny-skia` already in Cargo.lock. The font picker lists fonts with
 # the libraries crossfont already uses on each platform. On macOS the AppKit bindings, upstream's
-# own, place the window buttons beside the bar and read how round its corners are.
+# own, place the window buttons beside the bar and read how round its corners are. `sysinfo`,
+# with only its process support, names the program running in a pane on every platform, for its
+# tab's logo.
 
 [dependencies]
 png = { version = "0.17.5", default-features = false }
 resvg = { version = "0.45.1", default-features = false }
+sysinfo = { version = "0.36.1", default-features = false, features = ["system"] }
 
 [target.'cfg(not(any(target_os = "macos", windows)))'.dependencies]
 yeslogic-fontconfig-sys = "5.0.0"

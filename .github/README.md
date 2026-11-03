@@ -133,6 +133,11 @@ the program's own icon (its executable on Windows, the icon theme on Linux, the
 application on macOS), or one of about 40 bundled logos for common shells, tools,
 languages and WSL distributions.
 
+While a known program runs in a pane, its tab shows that program's logo instead, and goes
+back to the profile's when it exits: Python, Node, `psql` and the other bundled tools, and
+AI agents such as Claude Code, Codex, Gemini, Copilot, opencode, goose, Amp, Qwen Code, pi
+and DeepSeek Harness, including those that run on Node.
+
 Until you save profiles, the menu offers the installed shells: PowerShell, Windows
 PowerShell, Command Prompt, Git Bash and each WSL distribution on Windows, and the shells
 in `/etc/shells` elsewhere. **Edit profiles…** in the menu sets each profile's name, logo,
@@ -292,8 +297,8 @@ hidden = false                  # true leaves it out of the menu.
 
 Icons can be SVG and PNG files everywhere, `.ico`, `.exe` and `.dll` files on Windows,
 and `.icns` files or application bundles on macOS. On Linux, logos come from the
-program's desktop entry or icon theme. The bundled logos, from devicon, Simple Icons and
-the projects themselves, are listed with their licences in
+program's desktop entry or icon theme. The bundled logos, from devicon, Simple Icons, Lobe
+Icons and the projects themselves, are listed with their licences in
 [`alacritty/res/icons/LICENSES.md`](../alacritty/res/icons/LICENSES.md).
 
 ### Splits start in the pane's directory
