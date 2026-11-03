@@ -8,17 +8,24 @@ The logos remain trademarks of their owners.
 | --- | --- | --- |
 | `alma.svg` | [devicon](https://github.com/devicons/devicon) `icons/almalinux/almalinux-original.svg` | MIT |
 | `alpine.svg` | [Simple Icons](https://github.com/simple-icons/simple-icons) `icons/alpinelinux.svg`, single color, tinted when drawn | CC0-1.0 |
+| `amp.svg` | [Lobe Icons](https://github.com/lobehub/lobe-icons) `packages/static-svg/icons/amp.svg`, single color, tinted when drawn | MIT |
 | `arch.svg` | [devicon](https://github.com/devicons/devicon) `icons/archlinux/archlinux-original.svg` | MIT |
 | `bash.svg` | [odb/official-bash-logo](https://github.com/odb/official-bash-logo) `assets/Logos/Icons/SVG/128x128.svg` | MIT |
 | `btop.svg` | [aristocratos/btop](https://github.com/aristocratos/btop) `Img/icon.svg` | Apache-2.0 |
 | `bun.svg` | [devicon](https://github.com/devicons/devicon) `icons/bun/bun-original.svg` | MIT |
+| `claude.svg` | Drawn for Alacritty Tabbed, pixel for pixel, after the block-character mascot Claude Code prints (` ▐▛███▜▌` / `▝▜█████▛▘` / `  ▘▘ ▝▝`), with crisp edges | Apache-2.0, like this repository |
+| `codex.svg` | [Lobe Icons](https://github.com/lobehub/lobe-icons) `packages/static-svg/icons/codex-color.svg` | MIT |
+| `copilot.svg` | [Lobe Icons](https://github.com/lobehub/lobe-icons) `packages/static-svg/icons/githubcopilot.svg`, single color, tinted when drawn | MIT |
 | `debian.svg` | [devicon](https://github.com/devicons/devicon) `icons/debian/debian-original.svg` | MIT |
+| `deepseek.svg` | [Lobe Icons](https://github.com/lobehub/lobe-icons) `packages/static-svg/icons/deepseek-color.svg` | MIT |
 | `deno.svg` | [Simple Icons](https://github.com/simple-icons/simple-icons) `icons/deno.svg`, single color, tinted when drawn | CC0-1.0 |
 | `docker.svg` | [devicon](https://github.com/devicons/devicon) `icons/docker/docker-original.svg` | MIT |
 | `elvish.svg` | [elves/elvish](https://github.com/elves/elvish) `branding/logo.svg` | BSD-2-Clause |
 | `fedora.svg` | [devicon](https://github.com/devicons/devicon) `icons/fedora/fedora-original.svg` | MIT |
 | `fish.svg` | [Simple Icons](https://github.com/simple-icons/simple-icons) `icons/fishshell.svg`, single color, tinted when drawn | CC0-1.0 |
+| `gemini.svg` | [Lobe Icons](https://github.com/lobehub/lobe-icons) `packages/static-svg/icons/gemini-color.svg` | MIT |
 | `git.svg` | [devicon](https://github.com/devicons/devicon) `icons/git/git-original.svg` | MIT |
+| `goose.svg` | [Lobe Icons](https://github.com/lobehub/lobe-icons) `packages/static-svg/icons/goose.svg`, single color, tinted when drawn | MIT |
 | `haskell.svg` | [devicon](https://github.com/devicons/devicon) `icons/haskell/haskell-original.svg` | MIT |
 | `helix.svg` | [Simple Icons](https://github.com/simple-icons/simple-icons) `icons/helix.svg`, single color, tinted when drawn | CC0-1.0 |
 | `htop.svg` | [Simple Icons](https://github.com/simple-icons/simple-icons) `icons/htop.svg`, single color, tinted when drawn | CC0-1.0 |
@@ -30,11 +37,14 @@ The logos remain trademarks of their owners.
 | `neovim.svg` | [devicon](https://github.com/devicons/devicon) `icons/neovim/neovim-original.svg` | MIT |
 | `nodejs.svg` | [devicon](https://github.com/devicons/devicon) `icons/nodejs/nodejs-original.svg` | MIT |
 | `nushell.svg` | [Simple Icons](https://github.com/simple-icons/simple-icons) `icons/nushell.svg`, single color, tinted when drawn | CC0-1.0 |
+| `opencode.svg` | [Lobe Icons](https://github.com/lobehub/lobe-icons) `packages/static-svg/icons/opencode.svg`, single color, tinted when drawn | MIT |
 | `opensuse.svg` | [devicon](https://github.com/devicons/devicon) `icons/opensuse/opensuse-original.svg` | MIT |
+| `pi.svg` | Drawn after the logo [pi](https://github.com/earendil-works/pi) draws in `packages/coding-agent/src/modes/interactive/components/pi-logo.ts` | MIT |
 | `podman.svg` | [devicon](https://github.com/devicons/devicon) `icons/podman/podman-original.svg` | MIT |
 | `postgresql.svg` | [devicon](https://github.com/devicons/devicon) `icons/postgresql/postgresql-original.svg` | MIT |
 | `powershell.svg` | [PowerShell/PowerShell](https://github.com/PowerShell/PowerShell) `assets/powershell_128.svg` | MIT |
 | `python.svg` | [devicon](https://github.com/devicons/devicon) `icons/python/python-original.svg` | MIT |
+| `qwen.svg` | [Lobe Icons](https://github.com/lobehub/lobe-icons) `packages/static-svg/icons/qwen-color.svg` | MIT |
 | `r.svg` | [devicon](https://github.com/devicons/devicon) `icons/r/r-original.svg` | MIT |
 | `ruby.svg` | [devicon](https://github.com/devicons/devicon) `icons/ruby/ruby-original.svg` | MIT |
 | `sqlite.svg` | [devicon](https://github.com/devicons/devicon) `icons/sqlite/sqlite-original.svg` | MIT |

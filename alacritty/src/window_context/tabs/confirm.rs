@@ -142,7 +142,7 @@ fn locate(tabs: &Tabs, id: WindowId) -> Option<(usize, usize)> {
 }
 
 /// The job running in the pane `pane` of the tab `tab`.
-fn running(ctx: &WindowContext, tab: usize, pane: usize) -> Option<Job> {
+pub(super) fn running(ctx: &WindowContext, tab: usize, pane: usize) -> Option<Job> {
     let pane = ctx.display.tabs.tabs.get(tab)?.panes.get(pane)?;
     // The live pane's terminal is the window's.
     let session = pane.session.as_ref();
@@ -300,9 +300,9 @@ mod tests {
     #[test]
     fn asks_only_while_a_job_runs() {
         assert_eq!(closing(None), Closing::Now);
-        let job = Job { name: Some("vim".into()) };
+        let job = Job { name: Some("vim".into()), command: Vec::new() };
         assert_eq!(closing(Some(job)), Closing::Ask(Some("vim".into())));
-        assert_eq!(closing(Some(Job { name: None })), Closing::Ask(None));
+        assert_eq!(closing(Some(Job::default())), Closing::Ask(None));
     }
 
     #[test]

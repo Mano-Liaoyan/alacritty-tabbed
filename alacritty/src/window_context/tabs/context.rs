@@ -640,6 +640,7 @@ mod tests {
             title: String::new(),
             badge: String::new(),
             icon: None,
+            job: None,
             profile: None,
             session: Some(id),
         };

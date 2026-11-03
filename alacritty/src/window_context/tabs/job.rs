@@ -3,7 +3,14 @@
 //! On Unix the terminal's foreground process group tells: while the shell waits for a command, it
 //! is the shell's own, and while a command runs, the command's. On Windows a console has no
 //! foreground job, so any process the shell started that still runs counts; processes inside WSL
-//! or across SSH are not Windows processes, and do not.
+//! or across SSH are not Windows processes, and do not. The processes themselves are read with
+//! `sysinfo`, alike on every platform.
+
+use std::sync::{Mutex, MutexGuard, OnceLock};
+
+use alacritty_tabbed_deps::sysinfo::{
+    Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind,
+};
 
 /// The master side of a terminal, which tells its foreground job on Unix; on Windows none does.
 #[cfg(not(windows))]
@@ -11,10 +18,11 @@ pub type Terminal = std::os::unix::io::RawFd;
 #[cfg(windows)]
 pub struct Terminal;
 
-/// A program running in a terminal besides its shell: its name, when known.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// A program running in a terminal besides its shell: its name and command line, when known.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Job {
     pub name: Option<String>,
+    pub command: Vec<String>,
 }
 
 /// Processes that come with a console rather than run in it, which no job is.
@@ -22,35 +30,61 @@ pub struct Job {
 const HOSTS: [&str; 3] = ["conhost.exe", "openconsole.exe", "wslhost.exe"];
 
 /// The job running in the terminal whose shell is `shell`, at its master `fd`.
-#[cfg(not(windows))]
 pub fn running(fd: Terminal, shell: u32) -> Option<Job> {
-    // SAFETY: `tcgetpgrp` only reads the terminal's state; a closed `fd` fails with -1.
-    let group = unsafe { libc::tcgetpgrp(fd) };
-    if !foreground(group, shell) {
-        return None;
-    }
-    #[cfg(any(target_os = "linux", target_os = "android"))]
-    let name = std::fs::read_to_string(format!("/proc/{group}/comm"))
-        .ok()
-        .map(|name| name.trim().to_owned())
-        .filter(|name| !name.is_empty());
-    #[cfg(not(any(target_os = "linux", target_os = "android")))]
-    let name = None;
-    Some(Job { name })
+    let mut system = system();
+    let pid = Pid::from_u32(job(&mut system, fd, shell)?);
+    let kind = ProcessRefreshKind::nothing().with_cmd(UpdateKind::Always);
+    system.refresh_processes_specifics(ProcessesToUpdate::Some(&[pid]), false, kind);
+    let Some(process) = system.process(pid) else { return Some(Job::default()) };
+    let text = |text: &std::ffi::OsStr| text.to_string_lossy().into_owned();
+    Some(Job {
+        name: Some(text(process.name())),
+        command: process.cmd().iter().map(|arg| text(arg)).collect(),
+    })
 }
 
-/// The job running in the terminal whose shell is `shell`.
+/// The processes, kept between readings so that each refreshes only what changed.
+fn system() -> MutexGuard<'static, System> {
+    static SYSTEM: OnceLock<Mutex<System>> = OnceLock::new();
+    SYSTEM.get_or_init(|| Mutex::new(System::new())).lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// The process of the job: the leader of the terminal's foreground group.
+#[cfg(not(windows))]
+fn job(_: &mut System, fd: Terminal, shell: u32) -> Option<u32> {
+    // SAFETY: `tcgetpgrp` only reads the terminal's state; a closed `fd` fails with -1.
+    let group = unsafe { libc::tcgetpgrp(fd) };
+    foreground(group, shell).then_some(group as u32)
+}
+
+/// The process of the job: the one the shell started that is closest to it.
 #[cfg(windows)]
-pub fn running(_: Terminal, shell: u32) -> Option<Job> {
+fn job(system: &mut System, _: Terminal, shell: u32) -> Option<u32> {
     if shell == 0 {
         return None;
     }
-    let processes = windows::processes()?;
-    let older = |pid, parent| match (windows::created(pid), windows::created(parent)) {
-        (Some(child), Some(parent)) => child < parent,
-        _ => false,
-    };
-    descendant(shell, &processes, older).map(|name| Job { name: Some(name) })
+    let processes = list(system);
+    let started = |pid| system.process(Pid::from_u32(pid)).map(|process| process.start_time());
+    let older = |pid, parent| matches!((started(pid), started(parent)), (Some(child), Some(parent)) if child < parent);
+    descendant(shell, &processes, older)
+}
+
+/// The running processes, as their id, their parent's and their executable's name.
+#[cfg(windows)]
+pub fn processes() -> Option<Vec<(u32, u32, String)>> {
+    Some(list(&mut system()))
+}
+
+#[cfg(windows)]
+fn list(system: &mut System) -> Vec<(u32, u32, String)> {
+    system.refresh_processes_specifics(ProcessesToUpdate::All, true, ProcessRefreshKind::nothing());
+    let processes = system.processes().iter();
+    processes
+        .map(|(pid, process)| {
+            let parent = process.parent().map_or(0, Pid::as_u32);
+            (pid.as_u32(), parent, process.name().to_string_lossy().into_owned())
+        })
+        .collect()
 }
 
 /// Whether the foreground process `group` of a terminal is another than its `shell`'s: none, as
@@ -61,7 +95,7 @@ fn foreground(group: i32, shell: u32) -> bool {
 }
 
 /// A process started by `shell`, directly or not, among `processes`, each as its id, its parent's
-/// and its executable's name, that is not a console's host: the name of the one closest to the
+/// and its executable's name, that is not a console's host: the id of the one closest to the
 /// shell. A process `older` than the one whose id it names as its parent was started by another
 /// that is gone, whose id was reused.
 #[cfg_attr(not(windows), allow(dead_code))]
@@ -69,7 +103,7 @@ fn descendant(
     shell: u32,
     processes: &[(u32, u32, String)],
     older: impl Fn(u32, u32) -> bool,
-) -> Option<String> {
+) -> Option<u32> {
     let host = |name: &str| HOSTS.iter().any(|host| host.eq_ignore_ascii_case(name));
     let mut parents = vec![shell];
     let mut seen = vec![shell];
@@ -80,74 +114,13 @@ fn descendant(
             .filter(|&&(pid, parent, _)| parents.contains(&parent) && !seen.contains(&pid))
             .filter(|&&(pid, parent, _)| !older(pid, parent))
             .collect();
-        if let Some((_, _, name)) = children.iter().find(|(_, _, name)| !host(name)) {
-            return Some(name.clone());
+        if let Some((pid, ..)) = children.iter().find(|(_, _, name)| !host(name)) {
+            return Some(*pid);
         }
         parents = children.iter().map(|&&(pid, ..)| pid).collect();
         seen.extend(&parents);
     }
     None
-}
-
-#[cfg(windows)]
-pub use windows::processes;
-
-#[cfg(windows)]
-mod windows {
-    use std::mem;
-
-    use alacritty_tabbed_deps::windows_sys;
-    use windows_sys::Win32::Foundation::{CloseHandle, FILETIME, INVALID_HANDLE_VALUE};
-    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
-        CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
-        TH32CS_SNAPPROCESS,
-    };
-    use windows_sys::Win32::System::Threading::{
-        GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
-    };
-
-    /// The running processes, as their id, their parent's and their executable's name.
-    pub fn processes() -> Option<Vec<(u32, u32, String)>> {
-        // SAFETY: a snapshot of the processes, closed below.
-        let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
-        if snapshot == INVALID_HANDLE_VALUE {
-            return None;
-        }
-        let mut processes = Vec::new();
-        // SAFETY: the entry is plain data, sized as the API requires.
-        let mut entry: PROCESSENTRY32W = unsafe { mem::zeroed() };
-        entry.dwSize = mem::size_of::<PROCESSENTRY32W>() as u32;
-        // SAFETY: `snapshot` is valid and `entry` sized.
-        let mut more = unsafe { Process32FirstW(snapshot, &mut entry) } != 0;
-        while more {
-            let length = entry.szExeFile.iter().position(|&c| c == 0).unwrap_or(0);
-            let name = String::from_utf16_lossy(&entry.szExeFile[..length]);
-            processes.push((entry.th32ProcessID, entry.th32ParentProcessID, name));
-            // SAFETY: as above.
-            more = unsafe { Process32NextW(snapshot, &mut entry) } != 0;
-        }
-        // SAFETY: the snapshot is no longer used.
-        unsafe { CloseHandle(snapshot) };
-        Some(processes)
-    }
-
-    /// When the process `pid` started, in 100 ns since 1601.
-    pub fn created(pid: u32) -> Option<u64> {
-        // SAFETY: a handle that can only query, closed below.
-        let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
-        if process.is_null() {
-            return None;
-        }
-        let zero = FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
-        let [mut created, mut exited, mut kernel, mut user] = [zero; 4];
-        // SAFETY: `process` is valid and the times are written to.
-        let ok =
-            unsafe { GetProcessTimes(process, &mut created, &mut exited, &mut kernel, &mut user) }
-                != 0;
-        // SAFETY: the handle is no longer used.
-        unsafe { CloseHandle(process) };
-        ok.then(|| (u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime))
-    }
 }
 
 #[cfg(test)]
@@ -179,11 +152,11 @@ mod tests {
             process(20, 10, "cargo.exe"),
             process(30, 20, "rustc.exe"),
         ];
-        assert_eq!(descendant(shell, &busy, never).as_deref(), Some("cargo.exe"));
+        assert_eq!(descendant(shell, &busy, never), Some(20));
 
         // A console's host is no job, though what it hosts is.
         let hosted = [process(20, 10, "OpenConsole.exe"), process(30, 20, "vim.exe")];
-        assert_eq!(descendant(shell, &hosted, never).as_deref(), Some("vim.exe"));
+        assert_eq!(descendant(shell, &hosted, never), Some(30));
         assert_eq!(descendant(shell, &[process(20, 10, "conhost.exe")], never), None);
 
         // Ids looping back on themselves end.
@@ -192,7 +165,7 @@ mod tests {
 
         // A process left by a parent that is gone, whose id the shell now has, is not its job.
         let orphan = [process(5, 10, "svchost.exe"), process(20, 10, "ping.exe")];
-        assert_eq!(descendant(shell, &orphan, |pid, _| pid == 5).as_deref(), Some("ping.exe"));
+        assert_eq!(descendant(shell, &orphan, |pid, _| pid == 5), Some(20));
         assert_eq!(descendant(shell, &orphan[..1], |pid, _| pid == 5), None);
     }
 }

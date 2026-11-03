@@ -5,6 +5,7 @@
 
 pub use png;
 pub use resvg;
+pub use sysinfo;
 
 #[cfg(not(any(target_os = "macos", windows)))]
 pub use fontconfig_sys;

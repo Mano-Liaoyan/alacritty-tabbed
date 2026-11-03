@@ -223,7 +223,16 @@ mod tests {
     fn pane(id: u64, live: bool) -> Pane<u64> {
         let (name, title, badge) = (String::new(), String::new(), String::new());
         let session = (!live).then_some(id);
-        Pane { id: WindowId::from(id), name, title, badge, icon: None, profile: None, session }
+        Pane {
+            id: WindowId::from(id),
+            name,
+            title,
+            badge,
+            icon: None,
+            job: None,
+            profile: None,
+            session,
+        }
     }
 
     /// A group of panes 1 and 2, focused on 1 and live, and a tab of pane 3.
