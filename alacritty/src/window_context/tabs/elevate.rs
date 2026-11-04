@@ -28,8 +28,7 @@ pub struct Launch {
     #[clap(long, value_name = "NAME")]
     pub profile: Option<String>,
 
-    /// Run as administrator: on Windows Alacritty restarts elevated, after asking with UAC;
-    /// elsewhere the first tab's shell runs through sudo.
+    /// Run as administrator, elevated with UAC on Windows, through sudo elsewhere.
     #[clap(long)]
     pub elevate: bool,
 }

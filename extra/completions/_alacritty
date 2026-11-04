@@ -26,12 +26,14 @@ _alacritty() {
 '--class=[Defines window class/app_id on X11/Wayland \[default\: Alacritty\]]:general> | <general>,<instance:_default' \
 '*-o+[Override configuration file options \[example\: '\''cursor.style="Beam"'\''\]]:OPTION:_default' \
 '*--option=[Override configuration file options \[example\: '\''cursor.style="Beam"'\''\]]:OPTION:_default' \
+'--profile=[Open the first tab with this profile from profiles.toml]:NAME:_default' \
 '--print-events[Print all events to STDOUT]' \
 '(--daemon)--ref-test[Generates ref test]' \
 '(-v)*-q[Reduces the level of verbosity (the min level is -qq)]' \
 '(-q)*-v[Increases the level of verbosity (the max level is -vvv)]' \
 '--daemon[Do not spawn an initial window]' \
 '--hold[Remain open after child process exit]' \
+'--elevate[Run as administrator, elevated with UAC on Windows, through sudo elsewhere]' \
 '-h[Print help]' \
 '--help[Print help]' \
 '-V[Print version]' \
@@ -71,7 +73,9 @@ _arguments "${_arguments_options[@]}" : \
 '--class=[Defines window class/app_id on X11/Wayland \[default\: Alacritty\]]:general> | <general>,<instance:_default' \
 '*-o+[Override configuration file options \[example\: '\''cursor.style="Beam"'\''\]]:OPTION:_default' \
 '*--option=[Override configuration file options \[example\: '\''cursor.style="Beam"'\''\]]:OPTION:_default' \
+'--profile=[Open the first tab with this profile from profiles.toml]:NAME:_default' \
 '--hold[Remain open after child process exit]' \
+'--elevate[Run as administrator, elevated with UAC on Windows, through sudo elsewhere]' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
