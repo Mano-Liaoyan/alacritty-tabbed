@@ -177,15 +177,19 @@ pub fn pin(angle: f32, fill: f32) -> Arc<Image> {
 
 /// A shield, in one color to tint, for what runs as administrator: an outline, or `filled` where
 /// it is small.
+///
+/// Drawn to the proportions of Windows Terminal's shield, its font's U+EA18: 7 wide to 8 high,
+/// filling a 16 unit square from top to bottom, with a softly rising top, straight sides down to
+/// its middle and a line 1 unit wide.
 pub fn shield(filled: bool) -> Arc<Image> {
     static SHIELDS: OnceLock<[Arc<Image>; 2]> = OnceLock::new();
     let shields = SHIELDS.get_or_init(|| {
         [false, true].map(|filled| {
-            let (fill, width) = if filled { ("#000", 1.5) } else { ("none", 1.75) };
+            let fill = if filled { "#000" } else { "none" };
             let svg = format!(
-                r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
-<path d="M12 2.75L4.75 5.5V11.25C4.75 15.9 7.85 19.75 12 21.25C16.15 19.75 19.25 15.9 19.25 11.25V5.5Z"
-   fill="{fill}" stroke="#000" stroke-width="{width}" stroke-linejoin="round"/>
+                r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16">
+<path d="M8 0.6C9.9 1.8 12 2.7 14.1 3Q14.5 3.1 14.5 3.5V7.5C14.5 11 11.6 14.2 8 15.4C4.4 14.2 1.5 11 1.5 7.5V3.5Q1.5 3.1 1.9 3C4 2.7 6.1 1.8 8 0.6Z"
+   fill="{fill}" stroke="#000" stroke-width="1" stroke-linejoin="round"/>
 </svg>"##
             );
             Image::svg(svg.as_bytes(), true).expect("invalid shield")
