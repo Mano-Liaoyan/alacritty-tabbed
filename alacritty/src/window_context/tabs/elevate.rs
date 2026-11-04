@@ -86,7 +86,8 @@ pub fn startup(config: &UiConfig, options: &CliOptions) -> bool {
     };
     // A profile asks only where UAC elevates this user, so the elevated Alacritty, whose profile
     // asks too, does not restart again where it would not be elevated after all.
-    if !asked && !(profile.is_some_and(|profile| profile.elevate) && platform::limited()) {
+    let wanted = profile.is_some_and(|profile| profile.elevate) && platform::limited();
+    if !asked && !wanted {
         return false;
     }
     let args: Vec<String> = std::env::args_os()
