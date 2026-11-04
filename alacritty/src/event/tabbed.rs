@@ -49,6 +49,12 @@ impl Processor {
         event_loop: &ActiveEventLoop,
         window_options: WindowOptions,
     ) -> Result<(), Box<dyn Error>> {
+        // An elevated Alacritty, started in this one's place, opens the windows instead.
+        #[cfg(windows)]
+        if tabs::elevate::startup(&self.config, &self.cli_options) {
+            event_loop.exit();
+            return Ok(());
+        }
         // The windows of the last session, when it is restored.
         let mut saved = restore::take(&self.config, &self.cli_options).into_iter();
         let first = saved.next();

@@ -42,6 +42,9 @@ pub struct Profile {
     /// Leave the profile out of the new-tab menu.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub hidden: bool,
+    /// Run as administrator: in a new elevated window on Windows, through `sudo` elsewhere.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub elevate: bool,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -168,6 +171,10 @@ impl Profile {
         pty_config.working_directory =
             if directory.is_empty() { home::home_dir() } else { Some(expand(directory).into()) };
         pty_config.env.extend(self.env.clone());
+        #[cfg(not(windows))]
+        if self.elevate {
+            pty_config.shell = Some(super::elevate::root(split(&self.command)));
+        }
     }
 
     /// Start a window's first terminal with this profile, in the directory Alacritty was started

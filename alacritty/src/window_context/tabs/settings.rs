@@ -252,10 +252,17 @@ enum Target {
     Logo(usize),
     ToggleDefault,
     ToggleShown,
+    ToggleElevate,
     Delete,
     Cancel,
     Save,
 }
+
+/// What the switch running a profile as administrator does.
+#[cfg(windows)]
+const ELEVATE_HINT: &str = "In a new elevated window";
+#[cfg(not(windows))]
+const ELEVATE_HINT: &str = "Its shell runs through sudo";
 
 /// The well showing the color of the field at `field`, left of it.
 fn well(field: Rect, layout: &Layout) -> Rect {
@@ -354,6 +361,7 @@ impl Logos {
 struct Entry {
     text: [String; 7],
     hidden: bool,
+    elevate: bool,
     /// Name of the saved profile this edits, which tabs opened with it know it by.
     origin: Option<String>,
 }
@@ -370,7 +378,7 @@ impl Entry {
             env.collect::<Vec<_>>().join("\n"),
             profile.options.join("\n"),
         ];
-        Self { text, hidden: profile.hidden, origin: None }
+        Self { text, hidden: profile.hidden, elevate: profile.elevate, origin: None }
     }
 
     fn lines(&self, field: Field) -> impl Iterator<Item = &str> {
@@ -390,6 +398,7 @@ impl Entry {
             env: env.map(|(key, value)| (key.trim().into(), value.into())).collect(),
             options: self.lines(Field::Options).map(str::to_owned).collect(),
             hidden: self.hidden,
+            elevate: self.elevate,
         }
     }
 
@@ -695,6 +704,7 @@ impl Target {
                 | Target::AllFonts
                 | Target::ToggleDefault
                 | Target::ToggleShown
+                | Target::ToggleElevate
         )
     }
 }
@@ -896,11 +906,15 @@ impl Settings {
                 }
             }
             let toggles = if narrow {
-                [field(x0, at, x1, px(32.)), field(x0, at + px(40.), x1, px(32.))]
+                [0., 40., 80.].map(|down| field(x0, at + px(down), x1, px(32.)))
             } else {
-                [field(x0, at, mid - px(8.), px(32.)), field(mid + px(8.), at, x1, px(32.))]
+                [
+                    field(x0, at, mid - px(8.), px(32.)),
+                    field(mid + px(8.), at, x1, px(32.)),
+                    field(x0, at + px(40.), mid - px(8.), px(32.)),
+                ]
             };
-            (tile, fields, labels, toggles, toggles[1].bottom() + px(24.) - top)
+            (tile, fields, labels, toggles, toggles[2].bottom() + px(24.) - top)
         };
 
         // Widths of the segmented controls' segments.
@@ -1159,6 +1173,7 @@ impl Settings {
                     ),
                     (Target::ToggleDefault, toggles[0]),
                     (Target::ToggleShown, toggles[1]),
+                    (Target::ToggleElevate, toggles[2]),
                     (Target::Delete, Rect::new(x0, footer, delete, px(FOOTER_BUTTON))),
                 ]);
             },
@@ -1929,6 +1944,10 @@ impl Settings {
             },
             Target::ToggleShown => {
                 self.entries[self.selected].hidden ^= true;
+                self.touched();
+            },
+            Target::ToggleElevate => {
+                self.entries[self.selected].elevate ^= true;
                 self.touched();
             },
             Target::Delete => {
@@ -2948,19 +2967,23 @@ impl Settings {
                     left(layer, text, "Show all fonts", palette.foreground, false);
                     continue;
                 },
-                Target::ToggleDefault | Target::ToggleShown => {
-                    let (on, label, hint) = if target == Target::ToggleDefault {
-                        (
+                Target::ToggleDefault | Target::ToggleShown | Target::ToggleElevate => {
+                    let (on, label, hint) = match target {
+                        Target::ToggleDefault => (
                             self.default == Some(self.selected),
                             "Default profile",
                             "Opens with the new-tab button",
-                        )
-                    } else {
-                        (
+                        ),
+                        Target::ToggleShown => (
                             !self.entries[self.selected].hidden,
                             "Show in dropdown",
                             "Listed in the new-tab menu",
-                        )
+                        ),
+                        _ => (
+                            self.entries[self.selected].elevate,
+                            "Run as administrator",
+                            ELEVATE_HINT,
+                        ),
                     };
                     let track = Rect::new(rect.x, rect.center().1 - px(11.), px(40.), px(22.));
                     switch(layer, layout, palette, track, on);
@@ -3572,7 +3595,7 @@ mod tests {
             let (first, last) = match &panel.settings {
                 Some(page) => (page.heading.y, page.bottom()),
                 None => {
-                    let shown = panel.buttons.iter().find(|(t, _)| *t == Target::ToggleShown);
+                    let shown = panel.buttons.iter().find(|(t, _)| *t == Target::ToggleElevate);
                     (panel.tile.y, shown.unwrap().1.bottom())
                 },
             };

@@ -141,6 +141,8 @@ pub struct Layout {
     pub height: f32,
     /// Distance between the left edges of neighbouring tabs.
     step: f32,
+    /// The shield at the left of the bar, while Alacritty runs as administrator.
+    shield: Option<Rect>,
     /// The logo at the left of the bar.
     mark: Option<(Rect, Arc<Image>)>,
     /// The names beside it, each with whether it is the title.
@@ -185,6 +187,9 @@ impl Layout {
         // the edge of the panes' cards below, as the window's controls end at it on the right.
         // macOS puts it beside its window buttons instead, when they are shown.
         let left = if lights > 0. { lights + px(7.) } else { margin };
+        // A shield comes first while Alacritty runs as administrator, like Windows Terminal's.
+        let shield = tabs.elevated.then(|| Rect::new(left, 0., px(16.), bar).square(px(16.)));
+        let left = shield.map_or(left, |shield| shield.right() + px(10.));
         let on_track = tabs.configs.as_ref().is_none_or(|(config, _)| config.tabbed.tab_track);
         let default = Brand::default();
         let config = tabs.configs.as_ref().map_or(&default, |(config, _)| &config.tabbed.brand);
@@ -250,7 +255,7 @@ impl Layout {
             let row = px(34.).max(line + px(12.));
             let names = menu.profiles.iter().map(|profile| font.width(&profile.name, false));
             let text = names.fold(font.width(EDIT_PROFILES, false), f32::max);
-            let w = (text + row + px(36.)).max(px(220.)).min(width - 2. * margin);
+            let w = (text + row + px(64.)).max(px(220.)).min(width - 2. * margin);
             let x = new.x.min(width - margin - w).max(margin);
             let rows = menu.profiles.len() + 1;
             (Rect::new(x, bar - px(4.), w, rows as f32 * row + px(12.)), row)
@@ -271,6 +276,7 @@ impl Layout {
             panel_radius: tabs.panel_radius(),
             height,
             step,
+            shield,
             mark: mark.zip(image),
             label: label.map(|label| (label, names)),
             track,
@@ -793,6 +799,15 @@ pub fn badge(
     }
 }
 
+/// Mark the icon in `rect` of a pane running as administrator with a small shield at its corner,
+/// cut out of the `surface` under it.
+pub fn admin(layer: &mut Layer, layout: &Layout, rect: Rect, surface: Rgb, color: Rgb) {
+    let size = (rect.w * 0.55).round();
+    let shield = Rect::new(rect.right() - size * 0.7, rect.bottom() - size * 0.7, size, size);
+    layer.rounded(shield.inset(-layout.px(1.)), layout.curve(size / 2.), surface);
+    layer.image(shield, &icons::shield(true), color);
+}
+
 impl Tabs {
     /// Add the bar, which lies above the terminal, to the damage of a frame.
     ///
@@ -873,6 +888,9 @@ impl Tabs {
             }
         }
 
+        if let Some(rect) = layout.shield {
+            base.image(rect, &icons::shield(false), palette.foreground);
+        }
         // Logo, with a title and a subtitle beside it, the computer's name by default.
         if let Some((rect, image)) = &layout.mark {
             base.image(*rect, image, palette.foreground);
@@ -978,6 +996,9 @@ impl Tabs {
             if count == 1 {
                 let pane = tab.pane();
                 badge(layer, &layout, front, pane.image(), &pane.badge, colors(0, 1.));
+                if pane.admin {
+                    admin(layer, &layout, front, surface, palette.foreground);
+                }
             } else {
                 let motion = |pane: usize| {
                     let (_, fan, lift) = self.bar_effects.get(tab.panes[pane].id, now);
@@ -1164,6 +1185,11 @@ impl Tabs {
                 }
                 let y = item.center().1 - line_height / 2.;
                 top.text(icon_rect.right() + px(10.), y, name.into(), palette.foreground, false);
+                // Profiles that run as administrator end with a shield.
+                if menu.profiles.get(index).is_some_and(|profile| profile.elevate) {
+                    let shield = Rect::new(item.right() - px(28.), item.y, px(14.), row);
+                    top.image(shield.square(px(14.)), &icons::shield(false), palette.muted);
+                }
             }
         }
 

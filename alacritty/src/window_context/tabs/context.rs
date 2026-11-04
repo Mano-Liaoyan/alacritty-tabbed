@@ -642,6 +642,7 @@ mod tests {
             icon: None,
             job: None,
             profile: None,
+            admin: false,
             session: Some(id),
         };
         let id = |pane: &Pane<u64>| u64::from(pane.id);

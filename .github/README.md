@@ -141,9 +141,32 @@ and DeepSeek Harness, including those that run on Node.
 Until you save profiles, the menu offers the installed shells: PowerShell, Windows
 PowerShell, Command Prompt, Git Bash and each WSL distribution on Windows, and the shells
 in `/etc/shells` elsewhere. **Edit profiles…** in the menu sets each profile's name, logo,
-command line, starting directory, font, environment, configuration overrides, and whether
-it shows in the menu. Profiles can be added, duplicated, reordered and deleted, and saved
-changes apply to the tabs already open. See [Profiles](#profiles) for the file.
+command line, starting directory, font, environment, configuration overrides, whether
+it shows in the menu, and whether it runs as administrator. Profiles can be added,
+duplicated, reordered and deleted, and saved changes apply to the tabs already open. See
+[Profiles](#profiles) for the file.
+
+Tab titles show emoji in color, such as the ✳ Claude Code puts in its title. Windows draws
+them with Segoe UI Emoji, where the interface's font has no glyph for them, as the taskbar
+does. macOS and Linux already drew them in color.
+
+### Running as administrator
+
+Turn on **Run as administrator** for a profile, or Ctrl+click or right-click any profile in
+the **⌄** menu (Ctrl+Enter from the keyboard), to run it as administrator. The menu shows a
+shield beside profiles that always do.
+
+- **Windows:** elevation belongs to a whole process, so, like Windows Terminal, the profile
+  opens in a new elevated window after the UAC prompt. Every tab of that window runs as
+  administrator, and a shield at the left of its tab bar says so. A default profile that
+  runs as administrator makes Alacritty itself start elevated.
+- **macOS and Linux:** the profile's shell runs as root through `sudo` (or `doas`) in a
+  normal tab, which asks for your password there. Its icon wears a small shield, and splits
+  beside it run as root too. When Alacritty itself runs as root, its bar shows the shield.
+
+From the command line, `alacritty --elevate` starts elevated on Windows, asking with UAC,
+and runs the first tab through `sudo` elsewhere. `--profile <name>` opens the first tab with
+that profile. Neither restores the last session.
 
 ### Settings
 
@@ -206,6 +229,7 @@ All of these are under **Appearance** in the settings, and apply live.
 | --- | --- | --- |
 | Ctrl+Shift+T, **+** | ⌘T, **+** | New tab with the default profile |
 | **⌄** beside **+** | **⌄** beside **+** | Choose a profile (arrow keys and Enter work) |
+| Ctrl+click, right-click a profile in **⌄** | Same | Run it as administrator |
 | Ctrl+Tab / Ctrl+Shift+Tab | ⌘⇧] / ⌘⇧[ | Next / previous tab |
 | Ctrl+1 … Ctrl+8, Ctrl+9 | ⌘1 … ⌘8, ⌘9 | Go to a tab, or the last tab |
 | Ctrl+Shift+W | ⌘W | Close the focused pane, or its tab when it is the only one |
@@ -293,6 +317,7 @@ font = "JetBrains Mono"         # Empty uses the font from alacritty.toml.
 env = { EDITOR = "vim" }
 options = ["font.size=14"]      # Configuration overrides for this profile's panes.
 hidden = false                  # true leaves it out of the menu.
+elevate = false                 # true runs it as administrator.
 ```
 
 Icons can be SVG and PNG files everywhere, `.ico`, `.exe` and `.dll` files on Windows,

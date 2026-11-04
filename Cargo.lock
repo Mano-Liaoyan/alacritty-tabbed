@@ -107,6 +107,7 @@ dependencies = [
  "png",
  "resvg",
  "sysinfo",
+ "winapi",
  "windows-sys 0.59.0",
  "yeslogic-fontconfig-sys",
 ]
