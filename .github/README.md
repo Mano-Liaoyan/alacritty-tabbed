@@ -50,7 +50,7 @@ Download the build for your system from the
 
 | System | File |
 | --- | --- |
-| macOS (Apple Silicon and Intel) | `Alacritty-Tabbed-…-macos-universal.dmg` |
+| macOS (Apple Silicon) | `Alacritty-Tabbed-…-macos-aarch64.dmg` |
 | Windows | `Alacritty-Tabbed-…-windows-x86_64-installer.msi`, or the portable `.exe` |
 | Linux | `Alacritty-Tabbed-…-linux-x86_64.tar.gz` |
 

@@ -3,7 +3,13 @@
 
 name: Tabbed CI
 
-on: [push, pull_request, workflow_dispatch]
+# Pushes run only on main: a pull request's own run covers its branch, and tags are built by
+# the release workflow, so macOS runners, which GitHub has few of, are not asked for twice.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
@@ -64,12 +70,3 @@ jobs:
         run: |
           rustup toolchain install $NIGHTLY --profile minimal -c rustfmt
           cargo +$NIGHTLY fmt -- --check
-
-  check-macos-x86_64:
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v7
-      - name: Install target
-        run: rustup update && rustup target add x86_64-apple-darwin
-      - name: Build
-        run: cargo build --target=x86_64-apple-darwin
