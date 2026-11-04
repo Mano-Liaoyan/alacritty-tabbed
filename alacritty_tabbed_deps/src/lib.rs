@@ -24,4 +24,6 @@ pub use objc2_foundation;
 #[cfg(windows)]
 pub use dwrote;
 #[cfg(windows)]
+pub use winapi;
+#[cfg(windows)]
 pub use windows_sys;

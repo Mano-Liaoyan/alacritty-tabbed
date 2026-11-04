@@ -78,6 +78,9 @@ struct Faces {
     /// Advance of a space, for systems that measure no glyph without ink.
     space: f32,
     glyphs: HashMap<(char, bool), Measured>,
+    /// Color glyphs for the characters the face lacks, which crossfont draws in one color.
+    #[cfg(windows)]
+    emoji: super::emoji::Emoji,
 }
 
 struct Measured {
@@ -130,6 +133,8 @@ impl UiFont {
             size,
             space: (metrics.average_advance * 0.45) as f32,
             glyphs: HashMap::new(),
+            #[cfg(windows)]
+            emoji: super::emoji::Emoji::new(family),
         };
         Ok(Self {
             // macOS hides its interface font's real name.
@@ -233,12 +238,18 @@ impl UiFont {
 
 impl Faces {
     fn measure(&mut self, character: char, strong: bool) -> &mut Measured {
-        let Self { rasterizer, keys, advances, size, space, glyphs } = self;
+        let Self { rasterizer, keys, advances, size, space, glyphs, .. } = self;
+        #[cfg(windows)]
+        let emoji = &self.emoji;
         glyphs.entry((character, strong)).or_insert_with(|| {
             let key = GlyphKey { font_key: keys[strong as usize], character, size: *size };
-            let rasterized = match rasterizer.get_glyph(key) {
-                Ok(glyph) | Err(RasterizerError::MissingGlyph(glyph)) => glyph,
-                Err(_) => RasterizedGlyph::default(),
+            #[cfg(windows)]
+            let color = emoji.glyph(character, *size);
+            #[cfg(not(windows))]
+            let color = None;
+            let rasterized = match color.ok_or_else(|| rasterizer.get_glyph(key)) {
+                Ok(glyph) | Err(Ok(glyph) | Err(RasterizerError::MissingGlyph(glyph))) => glyph,
+                Err(Err(_)) => RasterizedGlyph::default(),
             };
             let advance = match rasterized.advance.0 {
                 _ if character.is_control() || character.width() == Some(0) => 0.,

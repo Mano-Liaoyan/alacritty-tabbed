@@ -231,6 +231,7 @@ mod tests {
             icon: None,
             job: None,
             profile: None,
+            admin: false,
             session,
         }
     }

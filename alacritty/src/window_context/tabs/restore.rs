@@ -147,14 +147,15 @@ pub fn path() -> Option<PathBuf> {
     return Some(dirs::data_local_dir()?.join("alacritty").join("session.json"));
 }
 
-/// Whether Alacritty was started plainly, without a command, directory, hold or daemon of its
-/// own: only such a process restores, saves or forgets the session.
+/// Whether Alacritty was started plainly, without a command, directory, hold, profile, elevation
+/// or daemon of its own: only such a process restores, saves or forgets the session.
 pub fn plain(options: &CliOptions) -> bool {
     let terminal = &options.window_options.terminal_options;
     !options.daemon
         && !terminal.hold
         && terminal.working_directory.is_none()
         && terminal.command().is_none()
+        && options.window_options.tabbed == Default::default()
 }
 
 /// The windows to restore at startup, taken out of the saved session, which is moved aside.
@@ -464,6 +465,7 @@ pub fn install(
         // In place before the window first shows its tabs, which would make a pane of the window.
         let tabs_state = &mut ctx.display.tabs;
         tabs_state.host = platform::hostname().to_uppercase();
+        tabs_state.elevated = super::elevate::elevated();
         tabs_state.tabs = tabs;
         tabs_state.active = active;
         let options = first_profile.as_ref().map_or_else(Vec::new, Profile::overrides);

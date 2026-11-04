@@ -313,6 +313,10 @@ pub struct WindowOptions {
     /// Override configuration file options [example: 'cursor.style="Beam"'].
     #[clap(short = 'o', long, num_args = 1..)]
     option: Vec<String>,
+
+    // tabbed: the first tab's profile, and running as administrator.
+    #[clap(flatten)]
+    pub tabbed: Box<crate::window_context::tabs::elevate::Launch>,
 }
 
 impl WindowOptions {

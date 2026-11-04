@@ -53,7 +53,7 @@ pub fn hostname() -> String {
     env::var("COMPUTERNAME").unwrap_or_default()
 }
 
-fn wide(text: impl AsRef<OsStr>) -> Vec<u16> {
+pub(super) fn wide(text: impl AsRef<OsStr>) -> Vec<u16> {
     text.as_ref().encode_wide().chain([0]).collect()
 }
 

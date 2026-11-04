@@ -15,7 +15,8 @@ publish = false
 # the libraries crossfont already uses on each platform. On macOS the AppKit bindings, upstream's
 # own, place the window buttons beside the bar and read how round its corners are. `sysinfo`,
 # with only its process support, names the program running in a pane on every platform, for its
-# tab's logo.
+# tab's logo. On Windows, `winapi`, which dwrote already uses, splits emoji into their colored
+# layers, which crossfont draws in one color only.
 
 [dependencies]
 png = { version = "0.17.5", default-features = false }
@@ -49,11 +50,22 @@ objc2-core-foundation = { version = "0.3.1", default-features = false, features 
 
 [target.'cfg(windows)'.dependencies]
 dwrote = "0.11.5"
+winapi = { version = "0.3.9", features = [
+    "dcommon",
+    "dwrite",
+    "dwrite_1",
+    "dwrite_2",
+    "minwindef",
+    "unknwnbase",
+    "windef",
+    "winerror",
+] }
 windows-sys = { version = "0.59", features = [
     "Wdk_System_Threading",
     "Win32_Foundation",
     "Win32_Graphics_Dwm",
     "Win32_Graphics_Gdi",
+    "Win32_Security",
     "Win32_Storage_Packaging_Appx",
     "Win32_System_Com",
     "Win32_System_Diagnostics_Debug",

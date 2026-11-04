@@ -21,6 +21,9 @@ mod context;
 mod cwd;
 mod divider;
 mod dnd;
+pub mod elevate;
+#[cfg(windows)]
+mod emoji;
 mod fonts;
 mod frame;
 mod fullscreen;
@@ -162,6 +165,8 @@ pub struct Tabs {
     placed: [Option<(PhysicalPosition<i32>, PhysicalSize<u32>)>; 2],
     /// Computer name shown beside the logo.
     host: String,
+    /// Whether Alacritty runs as administrator, which a shield at the left of the bar shows.
+    elevated: bool,
     /// The configuration before the terminal was fit in the panel, and after.
     configs: Option<(Rc<UiConfig>, Rc<UiConfig>)>,
     /// Padding added to fit the terminal in the panel, in logical pixels.
@@ -257,6 +262,8 @@ struct Pane<S = Session> {
     job: Option<Arc<Image>>,
     /// Name of the profile the pane was opened with.
     profile: Option<String>,
+    /// Whether its shell runs as root, through `sudo`, in an Alacritty that does not.
+    admin: bool,
     /// Terminal of a pane that is not live; the live one's lives in the window context.
     session: Option<S>,
 }
@@ -584,8 +591,10 @@ impl<S> Pane<S> {
                 (config.window.identity.title.clone(), ">".into(), icon)
             },
         };
+        // On Windows elevation is the whole window's.
+        let admin = !cfg!(windows) && profile.is_some_and(|profile| profile.elevate);
         let (title, profile) = (name.clone(), profile.map(|profile| profile.name.clone()));
-        Self { id, name, title, badge, icon, job: None, profile, session }
+        Self { id, name, title, badge, icon, job: None, profile, admin, session }
     }
 }
 
@@ -750,12 +759,29 @@ pub fn attributes(attributes: WindowAttributes, config: &UiConfig) -> WindowAttr
     if config.tabbed.tabs { platform::attributes(attributes) } else { attributes }
 }
 
-/// Start a window's first terminal with the default profile, unless a command was given.
+/// Start a window's first terminal with the profile the command line names, else the default one,
+/// unless a command was given.
 pub fn launch(config: &UiConfig, options: &WindowOptions, pty: &mut PtyOptions, tabs: &Tabs) {
     if !config.tabbed.tabs || options.terminal_options.command().is_some() {
         return;
     }
-    let Some(profile) = Profiles::load(config).default_profile().cloned() else { return };
+    let profiles = Profiles::load(config);
+    let named = options.tabbed.profile.as_ref().and_then(|name| {
+        let profile = profiles.list.iter().find(|profile| &profile.name == name);
+        if profile.is_none() {
+            error!("No profile named {name}");
+        }
+        profile
+    });
+    let profile = named.or_else(|| profiles.default_profile()).cloned();
+    // Elsewhere than on Windows, which restarts elevated, the shell asked to run as root does.
+    #[cfg(not(windows))]
+    let profile = match profile {
+        _ if !options.tabbed.elevate => profile,
+        Some(profile) => Some(Profile { elevate: true, ..profile }),
+        None => Some(Profile { elevate: true, ..Profile::new(&config.window.identity.title, "") }),
+    };
+    let Some(profile) = profile else { return };
     profile.launch(pty, options.terminal_options.working_directory.is_some());
     *tabs.first_profile.borrow_mut() = Some(profile);
 }
@@ -1317,6 +1343,7 @@ fn sync(ctx: &mut WindowContext, config: &Rc<UiConfig>, resize: bool) {
     // The window's own terminal becomes the first tab.
     if shown && tabs.tabs.is_empty() {
         tabs.host = platform::hostname().to_uppercase();
+        tabs.elevated = elevate::elevated();
         let profile = tabs.first_profile.borrow_mut().take();
         let pane = Pane::new(id, profile.as_ref(), config, None);
         if profile.is_some() && !ctx.preserve_title {
@@ -1614,7 +1641,14 @@ fn click(
     let hit = layout.hit(pointer);
     if ctx.display.tabs.menu.is_some() {
         match hit {
-            Hit::Item(index) if button == MouseButton::Left => choose(ctx, index, config, proxy),
+            Hit::Item(index) if button == MouseButton::Left => {
+                let admin = ctx.display.tabs.modifiers.control_key();
+                choose(ctx, index, admin, config, proxy)
+            },
+            // The other button runs the profile as administrator.
+            Hit::Item(index) if button == MouseButton::Right => {
+                choose(ctx, index, true, config, proxy)
+            },
             Hit::Item(_) => (),
             _ => close_menu(ctx),
         }
@@ -1706,8 +1740,8 @@ fn menu_key(
         Key::Named(NamedKey::ArrowDown) => menu.selected = (menu.selected + 1) % rows,
         Key::Named(NamedKey::ArrowUp) => menu.selected = (menu.selected + rows - 1) % rows,
         Key::Named(NamedKey::Enter) => {
-            let selected = menu.selected;
-            return choose(ctx, selected, config, proxy);
+            let (selected, admin) = (menu.selected, ctx.display.tabs.modifiers.control_key());
+            return choose(ctx, selected, admin, config, proxy);
         },
         Key::Named(NamedKey::Escape) => return close_menu(ctx),
         _ => return,
@@ -1715,16 +1749,22 @@ fn menu_key(
     redraw(ctx);
 }
 
-/// Open the profile in row `index` of the menu, or the settings after them.
+/// Open the profile in row `index` of the menu, as administrator if `admin`, or the settings after
+/// them.
 fn choose(
     ctx: &mut WindowContext,
     index: usize,
+    admin: bool,
     config: &Rc<UiConfig>,
     proxy: &EventLoopProxy<Event>,
 ) {
     let Some(menu) = ctx.display.tabs.menu.take() else { return };
     close_menu(ctx);
     match menu.profiles.get(index) {
+        Some(profile) if admin => {
+            let profile = Profile { elevate: true, ..profile.clone() };
+            open(ctx, config, proxy, Some(&profile))
+        },
         Some(profile) => open(ctx, config, proxy, Some(profile)),
         None => open_settings(ctx, config, proxy, Page::Profile),
     }
@@ -1812,6 +1852,10 @@ fn open(
     proxy: &EventLoopProxy<Event>,
     profile: Option<&Profile>,
 ) {
+    #[cfg(windows)]
+    if let Some(profile) = profile.filter(|profile| elevate::elsewhere(profile)) {
+        return elevate::open(profile, config);
+    }
     let (id, session) = match Session::spawn(ctx, config, proxy, profile, None, None) {
         Ok(pane) => pane,
         Err(err) => return error!("Could not open tab: {err}"),
@@ -1838,9 +1882,17 @@ pub fn split(
         return;
     }
 
-    let name = tab.pane().profile.clone();
+    let (name, admin) = (tab.pane().profile.clone(), tab.pane().admin);
     let profiles = Profiles::load(config).list;
     let profile = profiles.into_iter().find(|profile| Some(&profile.name) == name.as_ref());
+    // A pane beside one running as root runs as root too.
+    let profile = match profile {
+        Some(profile) if admin => Some(Profile { elevate: true, ..profile }),
+        None if admin => {
+            Some(Profile { elevate: true, ..Profile::new(&config.window.identity.title, "") })
+        },
+        profile => profile,
+    };
     // The new shell starts where the focused one is.
     let reported = ctx.terminal.lock().tabbed.reported_directory.clone();
     #[cfg(not(windows))]
@@ -2097,6 +2149,7 @@ mod tests {
             icon: None,
             job: None,
             profile: None,
+            admin: false,
             session,
         }
     }
