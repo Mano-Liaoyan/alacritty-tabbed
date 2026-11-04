@@ -187,9 +187,11 @@ impl Layout {
         // the edge of the panes' cards below, as the window's controls end at it on the right.
         // macOS puts it beside its window buttons instead, when they are shown.
         let left = if lights > 0. { lights + px(7.) } else { margin };
-        // A shield comes first while Alacritty runs as administrator, like Windows Terminal's.
-        let shield = tabs.elevated.then(|| Rect::new(left, 0., px(16.), bar).square(px(16.)));
-        let left = shield.map_or(left, |shield| shield.right() + px(10.));
+        // A shield comes first while Alacritty runs as administrator, like Windows Terminal's:
+        // centered in a slot as wide as the bar's buttons, and as far from what follows.
+        let slot = Rect::new(left, 0., control, bar);
+        let shield = tabs.elevated.then(|| slot.square(px(20.)));
+        let left = if shield.is_some() { slot.right() + px(6.) } else { left };
         let on_track = tabs.configs.as_ref().is_none_or(|(config, _)| config.tabbed.tab_track);
         let default = Brand::default();
         let config = tabs.configs.as_ref().map_or(&default, |(config, _)| &config.tabbed.brand);
