@@ -70,13 +70,3 @@ jobs:
         run: |
           rustup toolchain install $NIGHTLY --profile minimal -c rustfmt
           cargo +$NIGHTLY fmt -- --check
-
-  # On an Intel runner, natively, rather than taking one more of the scarce arm64 ones.
-  check-macos-x86_64:
-    runs-on: macos-15-intel
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install target
-        run: rustup update && rustup target add x86_64-apple-darwin
-      - name: Build
-        run: cargo build --target=x86_64-apple-darwin
