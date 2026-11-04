@@ -22,7 +22,7 @@ jobs:
   linux:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install dependencies
         run: |
           sudo apt-get update
@@ -39,7 +39,7 @@ jobs:
             scdoc < "$page" | gzip -c > "$NAME/man/$(basename "${page%.scd}").gz"
           done
           tar -czf "$NAME-linux-x86_64.tar.gz" "$NAME"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: linux
           path: ${{ env.NAME }}-linux-x86_64.tar.gz
@@ -47,7 +47,7 @@ jobs:
   macos:
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install dependencies
         run: brew install scdoc
       - name: Install targets
@@ -56,7 +56,7 @@ jobs:
         run: |
           make dmg-universal
           mv target/release/osx/Alacritty.dmg "$NAME-macos-universal.dmg"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: macos
           path: ${{ env.NAME }}-macos-universal.dmg
@@ -67,7 +67,7 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Build
         run: |
           cargo build --release
@@ -79,7 +79,7 @@ jobs:
           wix extension add WixToolset.UI.wixext/4.0.5 WixToolset.Util.wixext/4.0.5
           wix build -arch "x64" -ext WixToolset.UI.wixext -ext WixToolset.Util.wixext \
             -out "$NAME-windows-x86_64-installer.msi" "alacritty/windows/wix/alacritty.wxs"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: windows
           path: |
@@ -93,7 +93,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           merge-multiple: true
       - name: Publish release
