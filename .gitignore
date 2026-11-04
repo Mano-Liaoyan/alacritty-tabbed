@@ -1,1 +1,7 @@
 target
+
+# tabbed: local launcher and scratch output
+/dist/
+/target-*/
+/.migration-backup/
+/work/
