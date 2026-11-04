@@ -28,7 +28,7 @@ jobs:
         shell: bash
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install dependencies
         if: runner.os == 'Linux'
         run: |
@@ -65,7 +65,7 @@ jobs:
     env:
       NIGHTLY: nightly-2026-10-21
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Rustfmt
         run: |
           rustup toolchain install $NIGHTLY --profile minimal -c rustfmt
